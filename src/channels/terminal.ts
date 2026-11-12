@@ -2,22 +2,27 @@
  * Terminal channel — the daemon's own stdin/stdout.
  *
  * Inbound: lines typed on stdin become Events on the "terminal-main" thread.
- * Outbound: `respond_terminal` prints `mir: <text>` to stdout. When the daemon
- * runs under pm2 there is no TTY, so this channel is mainly used when running
- * the daemon in the foreground (`pnpm run dev`); piped stdin also works.
+ * Outbound: `respond_terminal` prints `mir: <text>` to stdout.
+ *
+ * stdin is only attached when there is a real TTY (or `MIR_TERMINAL_STDIN=1`).
+ * Under pm2 stdin is usually /dev/null or a shared pipe; consuming it there
+ * would steal input from whatever else owns it, so the channel stays outbound-
+ * only in that case.
  */
 
 import readline from "node:readline";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { type Channel, type ChannelEvent, type ReplyContext, ReplyBook } from "./types.ts";
+import { type Channel, type ChannelEvent, type ReplyContext, type ReplyRecorder, ReplyBook } from "./types.ts";
 import { makeResponseTool } from "./tool.ts";
+import { redactSecrets } from "../security.ts";
 
 export class TerminalChannel implements Channel {
 	readonly id = "terminal";
 	readonly kind = "terminal" as const;
 	private readonly book = new ReplyBook();
+	private readonly tools = new WeakMap<ReplyRecorder, ToolDefinition>();
+	private defaultTool: ToolDefinition | null = null;
 	private rl: readline.Interface | null = null;
-	private tool: ToolDefinition | null = null;
 
 	describe(): string {
 		return "the interactive terminal — the human is typing on stdin and reading stdout";
@@ -26,7 +31,14 @@ export class TerminalChannel implements Channel {
 		return "Plain text, no internal reasoning or meta-tags. Short and direct. This is a developer terminal, so code and detail are welcome, but never narrate tool calls.";
 	}
 
+	authenticated(): boolean {
+		// Local stdin is the authenticated principal: whoever owns the process.
+		return true;
+	}
+
 	async start(sink: (event: ChannelEvent) => void): Promise<void> {
+		const attachStdin = process.stdin.isTTY || process.env.MIR_TERMINAL_STDIN === "1";
+		if (!attachStdin) return;
 		this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 		process.stdout.write("\n> ");
 		this.rl.on("line", (line: string) => {
@@ -53,12 +65,17 @@ export class TerminalChannel implements Channel {
 	}
 
 	async respond(text: string, _ctx: ReplyContext): Promise<void> {
-		process.stdout.write(`\nmir: ${text}\n> `);
+		process.stdout.write(`\nmir: ${redactSecrets(text)}\n> `);
 	}
 
-	responseTool(): ToolDefinition {
-		if (!this.tool) this.tool = makeResponseTool(this);
-		return this.tool;
+	responseTool(recorder?: ReplyRecorder): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+		let tool = this.tools.get(recorder);
+		if (!tool) {
+			tool = makeResponseTool(this, recorder);
+			this.tools.set(recorder, tool);
+		}
+		return tool;
 	}
 
 	async stop(): Promise<void> {

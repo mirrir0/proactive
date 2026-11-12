@@ -6,34 +6,87 @@
  * text to any channel: it answers by calling a Channel's response tool
  * (`respond_<channel>`) and dispatches by calling `dispatch_task`.
  *
- * Because the Router's only outward path is a tool call, there is no need to
- * scrape or filter streamed text — the old text-delta filtering is gone.
+ * Scheduling model (this is where the correctness of the layer lives):
+ *
+ *   - One **serialized inbox**. Triggers, worker conclusions, worker exits,
+ *     recovery notices and system signals all enter the same queue, and exactly
+ *     one turn runs at a time. That removes the old "prompt while streaming
+ *     returns immediately, so the reply check runs against a half-finished
+ *     turn" bug: a turn's reply attribution is only evaluated after
+ *     `waitForIdle()`.
+ *   - **Batching as a consequence of a busy turn** (§2.1), not a trailing
+ *     debounce. When idle, a fixed `batchWindowMs` coalesces the first arrivals;
+ *     the timer is never reset by later arrivals, so a steady event stream
+ *     cannot starve the Router. While a turn runs, everything that piles up is
+ *     folded into the next turn.
+ *   - **Durable** task/worker/thread state and a durable trigger log, so a
+ *     restart does not erase what the agent was doing (item 2).
+ *   - **Chain of Recall**: long payloads are spilled to the store and inlined as
+ *     summaries plus ids, with a `recall` tool to hop back to them (item 4).
  */
 
 import {
-	createAgentSession,
 	SessionManager,
-	type ModelRuntime,
-	type ToolDefinition,
 	defineTool,
+	type AgentToolResult,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { SuperAgentConfig, Task, TaskStatus, Trigger, WorkerInfo } from "./types.ts";
-import type { Channel, ChannelEvent } from "./channels/types.ts";
-import { ContextManager } from "./context.ts";
+import type { RouterStatus, SuperAgentConfig, Task, TaskStatus, Trigger, WorkerInfo } from "./types.ts";
+import type { Channel, ChannelEvent, ReplyContext, ReplyRecorder } from "./channels/types.ts";
+import { ContextManager, createRecallTool } from "./context.ts";
 import { ThreadManager } from "./thread.ts";
-import type { ProcessManager } from "./process-manager.ts";
-import { channelActivity } from "./channels/tool.ts";
+import type { WorkerSpawner } from "./process-manager.ts";
+import { createMcpQueryTool } from "./mcp-query.ts";
+import type { HandStatus } from "./hands/protocol.ts";
+import type { McpCatalogEntry } from "./mcp-catalog.ts";
+import type { MirStore } from "./store.ts";
+import { metrics, log } from "./telemetry.ts";
+import { redactSecrets } from "./security.ts";
+import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
+import type { NewThreadEntry, ThreadEntry, ThreadLog } from "./threadlog.ts";
+
+/**
+ * How long a worker's output is buffered before it becomes a log entry.
+ *
+ * Short enough that a person watching a work thread sees it move; long enough
+ * that a streaming reply is a paragraph, not a line per token.
+ */
+const DELTA_FLUSH_MS = 750;
+
+export interface RouterControl {
+	abort(workerId: string, reason?: string): boolean;
+	isConnected(workerId: string): boolean;
+}
 
 export interface RouterDependencies {
-	modelRuntime: ModelRuntime;
+	modelRuntime: any;
 	model: any;
 	config: SuperAgentConfig;
 	context: ContextManager;
 	threads: ThreadManager;
 	channels: Channel[];
-	processManager: ProcessManager;
+	processManager: WorkerSpawner;
+	store: MirStore;
 	onTurnComplete: () => void;
+	getMcpCatalog?: () => McpCatalogEntry[];
+	/** Control-channel handle (abort / liveness). */
+	control?: RouterControl;
+	/** Deliver a follow-up event to a worker (fast-path pass-through). */
+	sendEventToWorker?: (workerId: string, event: ChannelEvent) => boolean;
+	/** Called when a persisted worker is found dead at boot, so pm2 can clean it up. */
+	onOrphanedWorker?: (workerId: string, taskId: string) => void;
+	/** Injectable session factory (tests use a scripted session). */
+	sessionFactory?: SessionFactory;
+	/** Hands: where execution happens, and the socket a Worker uses to reach it. */
+	hands?: { socketPath: string; listHands: () => HandStatus[] };
+	/**
+	 * The durable thread log. Optional so a test or a minimal deployment can run
+	 * the Router without one; every append is skipped when it is absent.
+	 */
+	threadLog?: ThreadLog;
+	/** Called with each entry after it is stored, so a watching client sees it live. */
+	publishEntry?: (threadId: string, entry: ThreadEntry) => void;
 }
 
 export interface TaskInput {
@@ -43,6 +96,10 @@ export interface TaskInput {
 	channelId?: string;
 	replyTo?: string;
 	id?: string;
+	/** Fast task → Worker uses the lightweight model instead of the Router's main model. */
+	fast?: boolean;
+	/** Pin the task to one hand; omitted = the hub picks the least-loaded capable one. */
+	endpointId?: string;
 }
 
 interface WorkerRecord {
@@ -56,19 +113,139 @@ interface WorkerRecord {
 	progress?: string;
 }
 
+/** One unit of Router input. A batch is a slice of these. */
+type InboxItem =
+	| { kind: "trigger"; trigger: Trigger; attempts: number }
+	| {
+			kind: "conclusion";
+			attempts?: number;
+			workerId: string;
+			taskId: string;
+			text: string;
+			channelId?: string;
+			replyTo?: string;
+			threadId?: string;
+			failed?: boolean;
+	  }
+	| { kind: "worker-exit"; workerId: string; taskId: string; reason: string; attempts?: number }
+	| {
+			kind: "recovery";
+			text: string;
+			channelId?: string;
+			replyTo?: string;
+			threadId?: string;
+			attempts?: number;
+	  }
+	| { kind: "signal"; text: string; attempts?: number };
+
+interface TurnReply {
+	channelId: string;
+	text: string;
+	ctx: ReplyContext;
+	at: number;
+}
+
+interface TurnState {
+	startedAt: number;
+	replies: TurnReply[];
+	dispatches: string[];
+	captured: string;
+	/**
+	 * The thread this turn is answering, when its batch is about one.
+	 *
+	 * A reply tool may name a thread, and usually does not: a chat's turn has one
+	 * thread in front of it. This is the fallback, so the log records the reply
+	 * on the thread it answered rather than nowhere.
+	 */
+	originThreadId?: string;
+}
+
+function emptyTurn(originThreadId?: string): TurnState {
+	return { startedAt: Date.now(), replies: [], dispatches: [], captured: "", originThreadId };
+}
+
+/** Small helper so retry backoff does not block the event loop tests use. */
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms).unref());
+}
+
+/**
+ * The channels a person types into. Their words are conversation, so they belong
+ * in the thread's log; a tool's or the watchdog's trigger is machinery, and the
+ * log is what a person reads.
+ */
+const PERSON_CHANNELS: ReadonlySet<string> = new Set<string>(["anomalous", "terminal"]);
+
 export class RouterLayer {
-	private session!: Awaited<ReturnType<typeof createAgentSession>>["session"];
+	private session!: AgentSessionLike;
 	private readonly deps: RouterDependencies;
 	private readonly config: SuperAgentConfig;
 	private readonly tasks = new Map<string, Task>();
 	private readonly workers = new Map<string, WorkerRecord>();
-	private triggerQueue: Trigger[] = [];
-	private flushTimer: NodeJS.Timeout | null = null;
+	private readonly dispatchQueue: Array<{ taskId: string; input: TaskInput }> = [];
+	/** Per-worker output waiting to be written into its thread. */
+	private readonly deltaBuffers = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+	private readonly inbox: InboxItem[] = [];
+	private turn: TurnState = emptyTurn();
+	private drainTimer: NodeJS.Timeout | null = null;
+	private draining = false;
+	private pendingSpawns = 0;
 	private disposed = false;
-	/** Assistant text captured this turn, used for the no-tool-call fallback. */
-	private captured = "";
-	/** Actions the Router took this turn (dispatch/respond), to decide fallback. */
-	private acted = 0;
+	private lastTurnAt = 0;
+	private turnInFlightSince = 0;
+	private turnCount = 0;
+
+	private readonly recorder: ReplyRecorder = {
+		record: (channelId, text, ctx) => {
+			this.turn.replies.push({ channelId, text, ctx, at: Date.now() });
+			metrics.counter("mir_router_replies_total", 1, { channel: channelId });
+			// The product's channel writes its reply into the chat's thread itself
+			// (channels/anomalous.ts `deliver`), so recording it here as well would
+			// post every answer twice. Every other channel has no such write, and is
+			// logged here — where every delivery passes, so no reply can reach a
+			// person without reaching the log a panel reads.
+			if (channelId === "anomalous") return;
+			// A reply that names no thread belongs to the one the turn is answering.
+			this.record(ctx.threadId ?? this.turn.originThreadId, { kind: "text", role: "assistant", text });
+		},
+	};
+
+	/**
+	 * Record the assistant's own tool call on the conversation's thread.
+	 *
+	 * The chat draws what the assistant *did* from its thread, not from prose: a
+	 * dispatch becomes a card that links to the work, because the call and its
+	 * result are entries there like everything else.
+	 */
+	private recordTurnTool(call: { id: string; name: string; args: unknown }): void {
+		this.record(this.turn.originThreadId, {
+			kind: "tool_call",
+			toolCallId: call.id,
+			toolName: call.name,
+			args: call.args,
+		});
+	}
+
+	/** What that call answered, on the same thread. */
+	private recordTurnToolResult(callId: string, result: unknown, isError = false): void {
+		this.record(this.turn.originThreadId, { kind: "tool_result", toolCallId: callId, isError, result });
+	}
+
+	/** Append to a thread's log and tell whoever is watching. Absent log = no-op. */
+	private record(threadId: string | undefined, entry: NewThreadEntry): void {
+		const threadLog = this.deps.threadLog;
+		if (threadLog === undefined || threadId === undefined || threadId === "") return;
+		try {
+			// A status entry moves the thread's own state as well as the log, so the
+			// column a list reads and the entries a panel reads cannot disagree.
+			const stored =
+				entry.kind === "status" ? threadLog.setStatus(threadId, entry.status, entry.note) : threadLog.append(threadId, entry);
+			this.deps.publishEntry?.(threadId, stored);
+		} catch (err) {
+			// A log failure must never cost the turn: the reply is already delivered.
+			log.warn("thread log append failed", { thread: threadId, kind: entry.kind, error: (err as Error).message });
+		}
+	}
 
 	private constructor(deps: RouterDependencies) {
 		this.deps = deps;
@@ -77,41 +254,55 @@ export class RouterLayer {
 
 	static async create(deps: RouterDependencies): Promise<RouterLayer> {
 		const router = new RouterLayer(deps);
-		const customTools: ToolDefinition[] = [
-			...deps.channels.map((c) => c.responseTool()),
-			router.buildDispatchTool(),
-			router.buildListWorkersTool(),
-		];
-		const result = await createAgentSession({
+		const customTools = router.buildTools();
+		const factory = deps.sessionFactory ?? createPiSession;
+		const sessionManager = (() => {
+			try {
+				return deps.config.sessionDir
+					? SessionManager.open(deps.config.sessionDir)
+					: SessionManager.inMemory();
+			} catch (err) {
+				log.warn("router session file unreadable; starting in memory", {
+					path: deps.config.sessionDir,
+					error: (err as Error).message,
+				});
+				return SessionManager.inMemory();
+			}
+		})();
+		router.session = await factory({
 			model: deps.model,
 			modelRuntime: deps.modelRuntime,
-			sessionManager: (() => {
-				try {
-					return deps.config.sessionDir
-						? SessionManager.open(deps.config.sessionDir)
-						: SessionManager.inMemory();
-				} catch {
-					return SessionManager.inMemory();
-				}
-			})(),
+			sessionManager,
 			thinkingLevel: deps.config.thinkingLevel,
 			noTools: "builtin",
 			customTools,
 		});
-		router.session = result.session as any;
 		router.session.subscribe((event: any) => {
-			if (process.env.MIR_DEBUG) {
-				const t = event.type === "message_update" ? `update:${event.assistantMessageEvent?.type}` : event.type;
-				if (t && !t.startsWith("update:thinking")) console.error(`[dbg] event ${t}`, event.assistantMessageEvent?.delta?.slice?.(0,60) ?? "");
-			}
 			if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-				router.captured += event.assistantMessageEvent.delta ?? "";
+				router.turn.captured += event.assistantMessageEvent.delta ?? "";
+			}
+			if (event.type === "auto_retry_end" && event.success === false) {
+				log.warn("router model retry exhausted", { error: event.finalError });
 			}
 		});
+		router.restore();
 		return router;
 	}
 
 	// ----- Tools the Router uses to act -----
+
+	private buildTools(): ToolDefinition[] {
+		return [
+			...this.deps.channels.map((c) => c.responseTool(this.recorder)),
+			this.buildDispatchTool(),
+			this.buildStopTaskTool(),
+			this.buildListWorkersTool(),
+			this.buildListTasksTool(),
+			this.buildListHandsTool(),
+			createRecallTool(this.deps.context),
+			createMcpQueryTool(this.deps.getMcpCatalog ?? (() => [])),
+		];
+	}
 
 	private buildDispatchTool(): ToolDefinition {
 		const router = this;
@@ -119,27 +310,106 @@ export class RouterLayer {
 			name: "dispatch_task",
 			label: "Dispatch task to a Worker",
 			description:
-				"Dispatch an isolated background Worker (its own pm2 process) to carry out a task. Use for any work that takes more than a quick reply. The Worker will report a conclusion back to you.",
+				"Dispatch an isolated background Worker (its own OS process) to carry out a task. Use for any work that takes more than a quick reply. The Worker reports a conclusion back to you, which arrives as a new turn. This call returns immediately.",
 			parameters: Type.Object({
 				title: Type.String({ description: "Short task title." }),
 				description: Type.String({ description: "What the Worker should do, self-contained." }),
 				channel: Type.Optional(Type.String({ description: "Channel id the task originated from." })),
 				thread: Type.Optional(Type.String({ description: "Thread id the task belongs to." })),
 				reply_to: Type.Optional(Type.String({ description: "Event id to reply to when done." })),
+				fast: Type.Optional(
+					Type.Boolean({ description: "True if this is a fast task → Worker uses the lightweight model." }),
+				),
+				endpoint: Type.Optional(
+					Type.String({
+						description:
+							"Hand (execution environment) id to run on. Omit to let the hub pick the least-loaded capable hand. Call list_hands to see them.",
+					}),
+				),
 			}),
-			async execute(_id, params) {
-				router.acted++;
-				const task = await router.dispatchTask({
-					title: params.title,
-					description: params.description,
-					threadId: params.thread,
-					channelId: params.channel,
-					replyTo: params.reply_to,
+			async execute(callId, params): Promise<AgentToolResult<any>> {
+				// The call is in the conversation's log before the task exists, so a
+				// display shows the card (and its spinner) from the first instant.
+				router.recordTurnTool({
+					id: callId,
+					name: "dispatch_task",
+					args: {
+						title: params.title,
+						description: params.description,
+						...(params.endpoint === undefined ? {} : { endpoint: params.endpoint }),
+					},
 				});
-				return {
-					content: [{ type: "text", text: `dispatched task ${task.id} (worker ${task.workerId})` }],
-					details: { taskId: task.id, workerId: task.workerId },
-				};
+				try {
+					const task = await router.dispatchTask({
+						title: params.title,
+						description: params.description,
+						threadId: params.thread,
+						channelId: params.channel,
+						replyTo: params.reply_to,
+						fast: params.fast ?? false,
+						endpointId: params.endpoint,
+					});
+					router.turn.dispatches.push(task.id);
+					// The card reads `details.threadId`: the task's own thread, which is
+					// where its work is written and what a click opens.
+					router.recordTurnToolResult(callId, {
+						details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId },
+					});
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									task.status === "queued"
+										? `task ${task.id} queued (worker capacity full; it starts when a slot frees)`
+										: `dispatched task ${task.id} (worker ${task.workerId})`,
+							},
+						],
+						details: { taskId: task.id, workerId: task.workerId, status: task.status },
+					};
+				} catch (err) {
+					router.recordTurnToolResult(callId, { error: (err as Error).message }, true);
+					return {
+						content: [{ type: "text", text: `dispatch failed: ${(err as Error).message}` }],
+						details: { error: (err as Error).message },
+						isError: true,
+					};
+				}
+			},
+		});
+	}
+
+	private buildStopTaskTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "stop_task",
+			label: "Stop a running task",
+			description:
+				"Abort a running Worker and mark its task cancelled. Use when the user cancels, or when a task is clearly going the wrong way.",
+			parameters: Type.Object({
+				task_id: Type.String({ description: "Task id to stop." }),
+				reason: Type.Optional(Type.String({ description: "Why it was stopped (recorded on the task)." })),
+			}),
+			async execute(_id, params): Promise<AgentToolResult<any>> {
+				try {
+					const task = await router.stopTask(params.task_id, params.reason);
+					router.turn.dispatches.push(task.id);
+					// The card reads `details.threadId`: the task's own thread, which is
+					// where its work is written and what a click opens.
+					router.recordTurnToolResult(callId, {
+						details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId },
+					});
+					return {
+						content: [{ type: "text", text: `stopped task ${task.id}` }],
+						details: { taskId: task.id, status: task.status },
+					};
+				} catch (err) {
+					return {
+						content: [{ type: "text", text: `stop failed: ${(err as Error).message}` }],
+						details: { error: (err as Error).message },
+						isError: true,
+					};
+				}
 			},
 		});
 	}
@@ -149,7 +419,7 @@ export class RouterLayer {
 		return defineTool({
 			name: "list_workers",
 			label: "List Workers",
-			description: "List the currently tracked Workers and their status.",
+			description: "List the currently tracked Workers, their tasks and status.",
 			parameters: Type.Object({}),
 			async execute() {
 				const info = router.listWorkers();
@@ -161,109 +431,466 @@ export class RouterLayer {
 		});
 	}
 
-	// ----- Inbound triggers (batched) -----
-
-	submitTrigger(trigger: Trigger): void {
-		this.triggerQueue.push(trigger);
-		if (this.flushTimer) clearTimeout(this.flushTimer);
-		this.flushTimer = setTimeout(() => void this.flush(), this.config.batchWindowMs);
-		this.flushTimer.unref();
+	private buildListTasksTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "list_tasks",
+			label: "List tasks",
+			description:
+				"List tasks the agent has dispatched, newest last. Use `recall` with a task id to read its full description or result.",
+			parameters: Type.Object({
+				status: Type.Optional(
+					Type.String({ description: "Filter: queued|running|blocked|done|failed|cancelled" }),
+				),
+				limit: Type.Optional(Type.Number({ description: "Max tasks to list (default 20)." })),
+			}),
+			async execute(_id, params): Promise<AgentToolResult<any>> {
+				const limit = Math.max(1, Math.min(100, Math.floor(params.limit ?? 20)));
+				let all = router.listTasks();
+				if (params.status) all = all.filter((t) => t.status === params.status);
+				const slice = all.slice(-limit);
+				const lines = slice.map(
+					(t) =>
+						`${t.id} [${t.status}]${t.fast ? " (fast)" : ""} — ${t.title}${t.workerId ? ` (worker ${t.workerId})` : ""}`,
+				);
+				return {
+					content: [{ type: "text", text: lines.length ? lines.join("\n") : "no tasks" }],
+					details: { count: slice.length, total: all.length },
+				};
+			},
+		});
 	}
 
-	private async flush(): Promise<void> {
-		this.flushTimer = null;
-		const batch = this.triggerQueue.splice(0, this.triggerQueue.length);
-		if (batch.length === 0) return;
-		const prompt = this.buildBatchPrompt(batch);
-		if (process.env.MIR_DEBUG) console.error(`[dbg] flush batch=${batch.length} channels=${this.deps.channels.map(c=>c.id)}`);
-		const deliveriesBefore = channelActivity.deliveries;
-		this.captured = "";
-		this.acted = 0;
-		try {
-			await this.session.prompt(prompt, { streamingBehavior: "followUp" });
-		} catch (err) {
-			console.error(`[router] turn error: ${(err as Error).message}`);
+	private buildListHandsTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "list_hands",
+			label: "List hands (execution environments)",
+			description:
+				"List the execution environments this agent can dispatch work to, with their capabilities, roots and load. " +
+				"Workers run on a hand; pass its id to dispatch_task to pin a task there.",
+			parameters: Type.Object({}),
+			async execute(): Promise<AgentToolResult<any>> {
+				const hands = router.deps.hands?.listHands() ?? [];
+				const text = hands.length
+					? hands
+							.map(
+								(h) =>
+									`${h.endpointId} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}/${h.policy.maxConcurrent}\n  roots: ${h.policy.roots.join(", ") || "(none)"}`,
+							)
+							.join("\n")
+					: "no hands are connected";
+				return { content: [{ type: "text", text }], details: { count: hands.length, hands } };
+			},
+		});
+	}
+
+	// ----- Inbound queue (serialized, batched) -----
+
+	submitTrigger(trigger: Trigger): void {
+		// What a person said is part of the thread, not only what the agent
+		// answered: a chat is a projection of its thread, and a projection cannot
+		// show words that were never written down. Recorded at admission, once, so
+		// a retried trigger does not say the same thing twice.
+		const said = trigger.text.trim();
+		if (said !== "" && PERSON_CHANNELS.has(trigger.channelId) && trigger.threadId !== undefined) {
+			this.record(trigger.threadId, { kind: "text", role: "user", text: said });
 		}
-		await this.ensureReply(batch[batch.length - 1], deliveriesBefore);
-		this.onTurnDone();
+		this.push({ kind: "trigger", trigger, attempts: trigger.attempts ?? 0 });
+	}
+
+	private push(item: InboxItem): void {
+		if (this.disposed) return;
+		this.inbox.push(item);
+		metrics.gauge("mir_router_queue_depth", this.inbox.length);
+		this.scheduleDrain();
 	}
 
 	/**
-	 * Safety net: if the model answered as plain text instead of calling a
-	 * response tool, deliver that text to the originating channel so the human
-	 * still gets a reply. Suppressed when the Router already acted.
+	 * Coalesce only when idle, with a fixed window from the first arrival.
+	 * The timer is never reset, so a steady stream cannot postpone the turn.
 	 */
-	private async ensureReply(origin: Trigger | undefined, deliveriesBefore: number): Promise<void> {
-		const text = this.captured.trim();
-		const responded = channelActivity.deliveries > deliveriesBefore;
-		if (!origin || responded || this.acted > 0 || text.length === 0) return;
-		const channel =
-			this.deps.channels.find((c) => c.id === origin.channelId) ?? this.deps.channels[0];
-		if (!channel) return;
+	private scheduleDrain(): void {
+		if (this.disposed || this.draining || this.drainTimer) return;
+		const delay = this.inbox.length === 1 ? Math.max(0, this.config.batchWindowMs) : 0;
+		if (delay === 0) {
+			void this.drain();
+			return;
+		}
+		this.drainTimer = setTimeout(() => {
+			this.drainTimer = null;
+			void this.drain();
+		}, delay);
+		this.drainTimer.unref();
+	}
+
+	private async drain(): Promise<void> {
+		if (this.draining || this.disposed) return;
+		this.draining = true;
 		try {
-			await channel.respond(text, { eventId: origin.id, threadId: origin.threadId });
-			channelActivity.deliveries++;
-		} catch (err) {
-			console.error(`[router] fallback delivery failed: ${(err as Error).message}`);
+			while (!this.disposed && this.inbox.length > 0) {
+				const batch = this.inbox.splice(0, Math.max(1, this.config.maxBatchSize));
+				await this.runTurn(batch);
+			}
+		} finally {
+			this.draining = false;
+			metrics.gauge("mir_router_queue_depth", this.inbox.length);
+			if (!this.disposed && this.inbox.length > 0) this.scheduleDrain();
 		}
 	}
 
-	private buildBatchPrompt(triggers: Trigger[]): string {
-		const lines: string[] = ["=== Inbound events (Router turn) ===", ""];
-		for (const t of triggers) {
-			const thread = t.threadId ? this.deps.threads.getThread(t.threadId) : undefined;
-			const related = thread ? [...thread.subscriberWorkerIds] : [];
-			lines.push(
-				this.deps.context.inline({
-					id: t.id,
-					type: "trigger",
-					summary: `channel=${t.channelId} thread=${t.threadId ?? "(new)"} from=${t.metadata?.["user"] ?? "unknown"} :: ${t.text}`,
-					relatedIds: related,
-				}),
-			);
-			lines.push("");
+	private async runTurn(batch: InboxItem[]): Promise<void> {
+		if (batch.length === 0) return;
+		this.turn = emptyTurn(this.originOf(batch)?.threadId);
+		this.turnInFlightSince = Date.now();
+		metrics.gauge("mir_router_turn_in_flight", 1);
+		const prompt = this.buildPrompt(batch);
+		const triggerCount = batch.filter((i) => i.kind === "trigger").length;
+		log.info("router turn start", {
+			items: batch.length,
+			triggers: triggerCount,
+			queue: this.inbox.length,
+		});
+		try {
+			await this.promptWithTimeout(prompt);
+			// The turn (including any queued follow-ups) must be settled before we
+			// judge whether the model replied — otherwise attribution races the model.
+			await settleSession(this.session);
+			await this.ensureReply(batch);
+			const duration = Date.now() - this.turn.startedAt;
+			metrics.observe("mir_router_turn_ms", duration);
+			metrics.observe("mir_router_batch_size", batch.length);
+			metrics.counter("mir_router_turns_total");
+			metrics.counter("mir_router_dispatches_total", this.turn.dispatches.length);
+			log.info("router turn end", {
+				ms: duration,
+				replies: this.turn.replies.length,
+				dispatches: this.turn.dispatches.length,
+			});
+			this.turnCount++;
+			this.lastTurnAt = Date.now();
+		} catch (err) {
+			await this.handleTurnFailure(batch, err as Error);
+		} finally {
+			this.turnInFlightSince = 0;
+			metrics.gauge("mir_router_turn_in_flight", 0);
+			this.onTurnDone();
 		}
-		const channelTools = this.deps.channels.map((c) => `respond_${c.id}`).join(", ");
-		lines.push(
-			`Your available tools are EXACTLY: ${channelTools} (reply on each channel), dispatch_task (spawn a Worker), list_workers (track Workers).`,
-			"You do NOT have bash, read, write, edit, or any execution tool — never run tasks yourself.",
-			"Decide for each event and ACT with tools — do not just describe:",
-			"- reply to a human → call the matching respond_<channel> tool (pass reply_to = the event id).",
-			"- a real task → call dispatch_task, then optionally tell the user you started it.",
-			"- pure noise → do nothing.",
-			"",
-			`Available channels: ${this.deps.channels.map((c) => c.id).join(", ")}.`,
-			"Never write the reply as plain assistant text; it must go through a response tool.",
-		);
+	}
+
+	private async promptWithTimeout(prompt: string): Promise<void> {
+		let timer: NodeJS.Timeout | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`router turn exceeded ${this.config.routerTurnTimeoutMs}ms`)),
+				this.config.routerTurnTimeoutMs,
+			);
+			timer.unref();
+		});
+		try {
+			await Promise.race([this.session.prompt(prompt), timeout]);
+		} catch (err) {
+			// A hung turn must not wedge the layer: abort it and let the retry path
+			// decide whether the batch is retried or failed.
+			await this.session.abort?.().catch(() => {});
+			throw err;
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	}
+
+	private async handleTurnFailure(batch: InboxItem[], err: Error): Promise<void> {
+		metrics.counter("mir_router_turn_errors_total");
+		log.error("router turn failed", { error: err.message, items: batch.length });
+
+		const retryable: InboxItem[] = [];
+		const exhausted: InboxItem[] = [];
+		// Conclusions and recovery notices are retried too: losing the relay of a
+		// finished task's result is just as bad as losing the task itself.
+		for (const item of batch) {
+			const attempts = (item.attempts ?? 0) + 1;
+			const retry = attempts < this.config.maxTriggerAttempts;
+			if (item.kind === "trigger") {
+				if (retry) {
+					this.deps.store.bumpEventAttempts(item.trigger.id);
+					this.deps.store.markEvent(item.trigger.id, "pending", err.message);
+				} else {
+					this.deps.store.markEvent(item.trigger.id, "failed", err.message);
+				}
+			}
+			if (retry) retryable.push({ ...item, attempts } as InboxItem);
+			else exhausted.push(item);
+		}
+
+		if (retryable.length > 0) {
+			// Re-queue at the front so ordering is preserved, then back off.
+			this.inbox.unshift(...retryable);
+			metrics.counter("mir_router_turn_retries_total");
+			await sleep(this.config.routerRetryBackoffMs);
+		}
+
+		// Tell the human when we give up, instead of silently swallowing the event.
+		const origin = this.originOf(exhausted);
+		if (origin) {
+			const channel = this.channelFor(origin.channelId);
+			const text = redactSecrets(
+				`I couldn't complete that request (${err.message}). The event is recorded; nothing was lost.`,
+			);
+			await channel?.respond(text, { eventId: origin.id, threadId: origin.threadId }).catch(() => {});
+			this.record(origin.threadId, { kind: "text", role: "assistant", text });
+		}
+	}
+
+	/** Deliver the model's plain text when it acted through no tool at all. */
+	private async ensureReply(batch: InboxItem[]): Promise<void> {
+		if (this.turn.replies.length > 0 || this.turn.dispatches.length > 0) return;
+		const text = this.turn.captured.trim();
+		if (!text) return;
+		const origin = this.originOf(batch);
+		if (!origin) return;
+		const channel = this.channelFor(origin.channelId);
+		if (!channel) return;
+		log.warn("router answered without a response tool; using fallback delivery", {
+			channel: origin.channelId,
+			event: origin.id,
+		});
+		metrics.counter("mir_router_fallback_replies_total", 1, { channel: origin.channelId });
+		const delivered = redactSecrets(text);
+		await channel.respond(delivered, { eventId: origin.id, threadId: origin.threadId });
+		this.record(origin.threadId, { kind: "text", role: "assistant", text: delivered });
+	}
+
+	private originOf(batch: InboxItem[]): { channelId: string; id?: string; threadId?: string } | undefined {
+		for (let i = batch.length - 1; i >= 0; i--) {
+			const item = batch[i]!;
+			if (item.kind === "trigger") {
+				return { channelId: item.trigger.channelId, id: item.trigger.id, threadId: item.trigger.threadId };
+			}
+			if (item.kind === "conclusion" && item.channelId) {
+				return { channelId: item.channelId, id: item.replyTo, threadId: item.threadId };
+			}
+			if (item.kind === "recovery" && item.channelId) {
+				return { channelId: item.channelId, id: item.replyTo, threadId: item.threadId };
+			}
+			if (item.kind === "worker-exit") {
+				const task = this.tasks.get(item.taskId);
+				if (task?.channelId) {
+					return { channelId: task.channelId, id: task.replyTo, threadId: task.threadId };
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private channelFor(channelId: string): Channel | undefined {
+		return this.deps.channels.find((c) => c.id === channelId) ?? this.deps.channels[0];
+	}
+
+	private buildPrompt(batch: InboxItem[]): string {
+		const lines: string[] = ["=== Inbound (Router turn) ===", ""];
+
+		for (const item of batch) {
+			switch (item.kind) {
+				case "trigger": {
+					const t = item.trigger;
+					const thread = t.threadId ? this.deps.threads.getThread(t.threadId) : undefined;
+					const related = [
+						...(thread ? [this.threadObjectId(thread.id), ...thread.subscriberWorkerIds.map((w) => `worker:${w}`)] : []),
+					];
+					// Inline a summary, spill the full text: the model can `recall` it.
+					const objectId = `trigger:${t.id}`;
+					this.deps.context.spill({
+						id: objectId,
+						type: "trigger",
+						summary: `${t.channelId}${t.threadId ? ` thread=${t.threadId}` : " (new thread)"} from=${
+							t.metadata?.["user"] ?? t.metadata?.["from"] ?? "unknown"
+						} :: ${t.text.replace(/\s+/g, " ")}`,
+						ref: `mir://event/${t.id}`,
+						inlineIds: related,
+					});
+					lines.push(
+						this.deps.context.inline({
+							id: objectId,
+							type: "trigger",
+							summary: `${t.channelId} thread=${t.threadId ?? "(new)"} from=${
+								t.metadata?.["user"] ?? "unknown"
+							} :: ${t.text}`,
+							relatedIds: related,
+						}),
+					);
+					lines.push(`  reply_to=${t.id}`);
+					lines.push("");
+					break;
+				}
+				case "conclusion": {
+					const objectId = `conclusion:${item.taskId}:${Date.now()}`;
+					this.deps.context.spill({
+						id: objectId,
+						type: "conclusion",
+						summary: `worker ${item.workerId} / task ${item.taskId}${item.failed ? " (FAILED)" : ""}: ${item.text.replace(/\s+/g, " ")}`,
+						ref: `mir://task/${item.taskId}`,
+						inlineIds: [`task:${item.taskId}`, `worker:${item.workerId}`],
+					});
+					lines.push(
+						this.deps.context.inline({
+							id: objectId,
+							type: "conclusion",
+							summary: `worker ${item.workerId} finished task ${item.taskId}${item.failed ? " (FAILED)" : ""}:\n${item.text}`,
+							relatedIds: [`task:${item.taskId}`, `worker:${item.workerId}`],
+						}),
+					);
+					if (item.channelId) {
+						lines.push(
+							`  origin: channel=${item.channelId}${item.replyTo ? ` reply_to=${item.replyTo}` : ""}${
+								item.threadId ? ` thread=${item.threadId}` : ""
+							}`,
+						);
+					}
+					lines.push("");
+					break;
+				}
+				case "worker-exit":
+					lines.push(
+						`[worker-exit] ${item.workerId} (task ${item.taskId}) exited without a conclusion: ${item.reason}`,
+						"",
+					);
+					break;
+				case "recovery":
+					lines.push(`[recovery] ${item.text}`, "");
+					break;
+				case "signal":
+					lines.push(`[signal] ${item.text}`, "");
+					break;
+			}
+		}
+
+		lines.push(this.stateBlock());
+		lines.push(this.instructionsBlock());
 		return lines.join("\n");
+	}
+
+	private stateBlock(): string {
+		const live = [...this.workers.values()].filter((w) => w.status === "busy" || w.status === "blocked");
+		const recentTasks = this.listTasks().slice(-5);
+		const parts: string[] = ["=== State ==="];
+		const hands = this.deps.hands?.listHands() ?? [];
+		if (hands.length) {
+			parts.push(
+				`hands: ${hands.filter((h) => h.connected).length} connected — ` +
+					hands
+						.map(
+							(h) =>
+								`${h.endpointId}${h.connected ? "" : "(offline)"} fs=${h.capabilities.fs} exec=${h.capabilities.exec} running=${h.running}/${h.policy.maxConcurrent}`,
+						)
+						.join(", "),
+			);
+		}
+		parts.push(
+			`workers: ${live.length} active of ${this.workers.size} tracked (capacity ${this.config.maxConcurrentWorkers}), queued tasks: ${this.dispatchQueue.length}`,
+		);
+		if (live.length) {
+			parts.push(
+				"active: " +
+					live
+						.map((w) => `${w.workerId}→${w.taskId} (${w.progress ?? w.status})`)
+						.join(", "),
+			);
+		}
+		if (recentTasks.length) {
+			parts.push(
+				"recent tasks: " +
+					recentTasks.map((t) => `${t.id}[${t.status}] ${t.title}`).join("; "),
+			);
+		}
+		return parts.join("\n") + "\n";
+	}
+
+	private instructionsBlock(): string {
+		const channelTools = this.deps.channels.map((c) => `respond_${c.id}`).join(", ");
+		return [
+			"=== How to act ===",
+			`Your tools: ${channelTools} (reply on a channel), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), recall (read spilled context by id), mcp_query (informational).`,
+			"You do NOT have bash, read, write, edit, or any execution tool — never run tasks yourself.",
+			"Decide for each item and ACT with tools — do not just describe:",
+			"- reply to a human → call the matching respond_<channel> tool, passing reply_to = the event id.",
+			"- a real task → call dispatch_task (pass endpoint=<hand id> only if the task needs a specific machine), then briefly tell the user it started.",
+			"- a worker conclusion → tell the user the outcome; dispatch follow-up work only if it is clearly needed.",
+			"- pure noise → do nothing.",
+			`Channels: ${this.deps.channels.map((c) => c.id).join(", ")}.`,
+			"Never write the reply as plain assistant text; it must go through a response tool.",
+			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
+		].join("\n");
+	}
+
+	private threadObjectId(threadId: string): string {
+		return `thread:${threadId}`;
 	}
 
 	// ----- Worker lifecycle -----
 
-	/** Spawn a Worker process for a Task. */
-	async dispatchTask(task: TaskInput): Promise<Task> {
-		if (this.workers.size >= this.config.maxConcurrentWorkers) {
-			throw new Error("max concurrent workers reached");
-		}
+	async dispatchTask(input: TaskInput): Promise<Task> {
+		if (this.disposed) throw new Error("router disposed");
 		const now = Date.now();
-		const id = task.id ?? `task-${crypto.randomUUID().slice(0, 8)}`;
-		const workerId = `worker-${id.slice(5, 13)}`;
+		const id = input.id ?? `task-${crypto.randomUUID()}`;
+		const atCapacity =
+			this.workers.size + this.pendingSpawns >= this.config.maxConcurrentWorkers;
 		const full: Task = {
 			id,
-			title: task.title,
-			description: task.description,
-			threadId: task.threadId,
-			channelId: task.channelId,
-			replyTo: task.replyTo,
-			status: "running",
-			workerId,
+			title: input.title,
+			description: input.description,
+			threadId: input.threadId,
+			channelId: input.channelId,
+			replyTo: input.replyTo,
+			status: atCapacity ? "queued" : "running",
 			createdAt: now,
 			updatedAt: now,
+			fast: input.fast ?? false,
+			endpointId: input.endpointId,
 		};
 		this.tasks.set(id, full);
+		this.deps.store.upsertTask(full);
+		this.record(input.threadId, {
+			kind: "status",
+			status: atCapacity ? "waiting" : "running",
+			note: `dispatched: ${input.title}${input.endpointId === undefined ? "" : ` on ${input.endpointId}`}`,
+		});
+		this.deps.context.spill({
+			id: `task:${id}`,
+			type: "task",
+			summary: `${input.title} — ${input.description.replace(/\s+/g, " ")}`,
+			ref: `mir://task/${id}`,
+			inlineIds: input.threadId ? [this.threadObjectId(input.threadId)] : [],
+		});
+
+		if (atCapacity) {
+			if (this.dispatchQueue.length >= this.config.maxDispatchQueue) {
+				full.status = "failed";
+				full.error = "dispatch queue full";
+				full.updatedAt = Date.now();
+				this.deps.store.upsertTask(full);
+				throw new Error(`dispatch queue full (${this.config.maxDispatchQueue} waiting)`);
+			}
+			this.dispatchQueue.push({ taskId: id, input });
+			metrics.counter("mir_tasks_queued_total");
+			log.info("task queued (worker capacity full)", { task: id, queue: this.dispatchQueue.length });
+			return full;
+		}
+
+		await this.spawnWorker(full, input);
+		return full;
+	}
+
+	/** Spawn a Worker process for an already-registered task. */
+	private async spawnWorker(task: Task, input: TaskInput): Promise<void> {
+		const now = Date.now();
+		const workerId = `worker-${crypto.randomUUID().slice(0, 12)}`;
+		task.workerId = workerId;
+		task.status = "running";
+		task.updatedAt = now;
+		this.pendingSpawns++;
 		this.workers.set(workerId, {
 			workerId,
-			taskId: id,
+			taskId: task.id,
 			status: "busy",
 			threadIds: task.threadId ? [task.threadId] : [],
 			channelId: task.channelId,
@@ -271,99 +898,399 @@ export class RouterLayer {
 			lastHeartbeat: now,
 			progress: "spawning",
 		});
+		this.persistWorker(workerId);
+		this.deps.store.upsertTask(task);
 		if (task.threadId) this.deps.threads.subscribe(workerId, task.threadId);
 
-		await this.deps.processManager.spawnWorker({
-			workerId,
-			taskId: id,
-			title: task.title,
-			description: task.description,
-			threadId: task.threadId,
-			channelId: task.channelId,
-			replyTo: task.replyTo,
-			modelId: this.config.modelId,
-			providerRouting: this.config.providerRouting,
-			thinkingLevel: this.config.thinkingLevel,
-			socketPath: this.config.socketPath,
-			idleExitMs: this.config.workerIdleExitMs,
-			maxTokens: this.config.maxTokens,
-		});
-		return full;
+		const workerModelId = task.fast ? this.config.fastModelId : this.config.modelId;
+		try {
+			await this.deps.processManager.spawnWorker({
+				workerId,
+				taskId: task.id,
+				title: task.title,
+				description: task.description,
+				threadId: task.threadId,
+				channelId: task.channelId,
+				replyTo: task.replyTo,
+				modelId: workerModelId,
+				providerRouting: this.config.providerRouting,
+				thinkingLevel: this.config.thinkingLevel,
+				socketPath: this.config.socketPath,
+				idleExitMs: this.config.workerIdleExitMs,
+				heartbeatMs: this.config.workerHeartbeatMs,
+				maxTokens: this.config.maxTokens,
+				sessionDir: this.config.workerSessionDir,
+				mcpConfigPath: this.config.mcpConfigPath,
+				endpointId: task.endpointId,
+				handsSocketPath: this.deps.hands?.socketPath,
+				capabilities: this.config.workerCapabilities,
+				toolPolicy: this.config.workerToolPolicy,
+			});
+			metrics.counter("mir_worker_spawns_total", 1, { fast: String(Boolean(task.fast)) });
+			log.info("worker spawned", { task: task.id, worker: workerId, model: workerModelId, hand: task.endpointId ?? "auto" });
+		} catch (err) {
+			this.failWorker(workerId, `failed to spawn worker: ${(err as Error).message}`);
+		} finally {
+			this.pendingSpawns--;
+			this.drainDispatchQueue();
+		}
 	}
 
-	/** A Worker sent a status/heartbeat update over the control channel. */
+	private drainDispatchQueue(): void {
+		while (
+			this.dispatchQueue.length > 0 &&
+			this.workers.size + this.pendingSpawns < this.config.maxConcurrentWorkers
+		) {
+			const next = this.dispatchQueue.shift()!;
+			const task = this.tasks.get(next.taskId);
+			// The task may have been cancelled while it waited.
+			if (!task || task.status !== "queued") continue;
+			void this.spawnWorker(task, next.input).catch((err) => {
+				log.error("queued task spawn failed", { task: task.id, error: (err as Error).message });
+			});
+		}
+	}
+
+	private persistWorker(workerId: string): void {
+		const rec = this.workers.get(workerId);
+		if (!rec) return;
+		this.deps.store.upsertWorker({
+			id: rec.workerId,
+			taskId: rec.taskId,
+			status: rec.status,
+			threadIds: rec.threadIds,
+			channelId: rec.channelId,
+			replyTo: rec.replyTo,
+			lastHeartbeat: rec.lastHeartbeat,
+			progress: rec.progress,
+		});
+	}
+
+	/** A Worker connected to the control channel. */
+	handleWorkerHello(workerId: string): void {
+		const rec = this.workers.get(workerId);
+		if (!rec) {
+			log.warn("hello from unknown worker", { worker: workerId });
+			return;
+		}
+		rec.status = "busy";
+		rec.lastHeartbeat = Date.now();
+		rec.progress = "connected";
+		this.persistWorker(workerId);
+	}
+
+	/** A Worker sent a status update or heartbeat. */
 	handleWorkerStatus(workerId: string, status: string, progress?: string): void {
 		const rec = this.workers.get(workerId);
 		if (!rec) return;
 		rec.status = status as WorkerInfo["status"];
 		rec.lastHeartbeat = Date.now();
 		if (progress !== undefined) rec.progress = progress;
+		this.persistWorker(workerId);
 	}
 
-	/** A Worker connected to the control channel. */
-	handleWorkerHello(workerId: string): void {
+	/** A Worker reported a conclusion. Queue it for the Router to relay. */
+	/**
+	 * A worker's streaming output, coalesced into the work thread's log.
+	 *
+	 * Deltas arrive many per second; appending each one would make the log a
+	 * transcript of keystrokes and the panel unreadable. They are buffered per
+	 * worker and flushed on a short timer (and on the worker's conclusion or
+	 * exit), so the log carries what was said rather than how it was typed.
+	 */
+	handleWorkerDelta(workerId: string, text: string): void {
+		if (this.deps.threadLog === undefined) return;
 		const rec = this.workers.get(workerId);
-		if (!rec) return;
-		rec.status = "busy";
-		rec.lastHeartbeat = Date.now();
-		rec.progress = "connected";
+		if (rec === undefined || rec.threadIds.length === 0) return;
+		const existing = this.deltaBuffers.get(workerId);
+		if (existing !== undefined) {
+			existing.text += text;
+			return;
+		}
+		const timer = setTimeout(() => this.flushWorkerDelta(workerId), DELTA_FLUSH_MS);
+		timer.unref?.();
+		this.deltaBuffers.set(workerId, { text, timer });
 	}
 
-	/** A Worker reported a conclusion. Route it back into the Router to reply. */
-	async handleWorkerConclusion(workerId: string, text: string): Promise<void> {
+	/** Write a worker's buffered output into its threads, if there is any. */
+	private flushWorkerDelta(workerId: string): void {
+		const buffered = this.deltaBuffers.get(workerId);
+		if (buffered === undefined) return;
+		this.deltaBuffers.delete(workerId);
+		clearTimeout(buffered.timer);
+		if (buffered.text.trim() === "") return;
 		const rec = this.workers.get(workerId);
-		if (!rec) return;
+		if (rec === undefined) return;
+		for (const threadId of rec.threadIds) {
+			this.record(threadId, { kind: "text", role: "assistant", text: buffered.text });
+		}
+	}
+
+	handleWorkerConclusion(workerId: string, text: string): void {
+		// Whatever the worker was mid-sentence on belongs before its conclusion.
+		this.flushWorkerDelta(workerId);
+		const rec = this.workers.get(workerId);
+		if (!rec) {
+			log.warn("conclusion from unknown worker", { worker: workerId });
+			return;
+		}
 		rec.status = "done";
 		rec.lastHeartbeat = Date.now();
+		rec.progress = "conclusion reported";
+		this.persistWorker(workerId);
+
+		// The work thread's own record: what the worker said, then that it ended.
+		// A client watching the thread sees the answer without waiting for the
+		// Router to pass it on to a channel.
+		for (const threadId of rec.threadIds) {
+			this.record(threadId, { kind: "text", role: "assistant", text });
+			this.record(threadId, { kind: "status", status: "done", note: `worker ${workerId} finished` });
+		}
+
 		const task = this.tasks.get(rec.taskId);
 		if (task) {
 			task.status = "done";
 			task.result = text;
 			task.updatedAt = Date.now();
+			this.deps.store.upsertTask(task);
+			metrics.counter("mir_tasks_completed_total", 1, { status: "done", fast: String(Boolean(task.fast)) });
+			metrics.observe("mir_task_duration_ms", Date.now() - task.createdAt, { fast: String(Boolean(task.fast)) });
+			this.deps.context.spill({
+				id: `task:${task.id}`,
+				type: "task",
+				summary: `${task.title} [done] — ${text.replace(/\s+/g, " ")}`,
+				ref: `mir://task/${task.id}`,
+				inlineIds: [`worker:${workerId}`],
+			});
 		}
-		const channel = rec.channelId ?? this.deps.channels[0]?.id ?? "terminal";
-		const deliveriesBefore = channelActivity.deliveries;
-		this.captured = "";
-		this.acted = 0;
-		const prompt = [
-			`Worker ${workerId} finished task ${rec.taskId}.`,
-			`Origin channel: ${channel}${rec.threadIds[0] ? ` thread ${rec.threadIds[0]}` : ""}.`,
-			`Conclusion:\n${text}`,
-			"",
-			`Reply to the human via respond_${channel} (reply_to = the originating event), then optionally dispatch follow-up work. Do not print plain text.`,
-		].join("\n");
-		try {
-			await this.session.prompt(prompt, { streamingBehavior: "followUp" });
-		} catch (err) {
-			console.error(`[router] conclusion error: ${(err as Error).message}`);
-		}
-		const responded = channelActivity.deliveries > deliveriesBefore;
-		if (!responded && this.acted === 0) {
-			const ch = this.deps.channels.find((c) => c.id === channel);
-			await ch?.respond(text, { eventId: rec.replyTo, threadId: rec.threadIds[0] }).catch(() => {});
-		}
-		this.onTurnDone();
+
+		this.push({
+			kind: "conclusion",
+			workerId,
+			taskId: rec.taskId,
+			text,
+			channelId: rec.channelId,
+			replyTo: rec.replyTo,
+			threadId: rec.threadIds[0],
+		});
 	}
 
-	/** Deliver a follow-up Event to a subscribed Worker over the control channel. */
-	deliverToWorker(workerId: string, event: ChannelEvent, send: (w: string, e: ChannelEvent) => boolean): boolean {
-		return send(workerId, event);
+	/** A Worker handed an event back: it is not theirs. Re-route it. */
+	handleWorkerRelease(workerId: string, eventId: string, reason?: string): void {
+		const rec = this.workers.get(workerId);
+		const stored = this.deps.store.getEvent(eventId);
+		if (rec && stored) {
+			this.deps.threads.unsubscribe(workerId, stored.threadId);
+			rec.threadIds = rec.threadIds.filter((t) => t !== stored.threadId);
+			this.persistWorker(workerId);
+		}
+		log.info("worker released event", { worker: workerId, event: eventId, reason });
+		metrics.counter("mir_worker_releases_total");
+		if (!stored) return;
+		this.push({
+			kind: "trigger",
+			trigger: {
+				id: stored.id,
+				channelId: stored.channelId,
+				kind: this.deps.channels.find((c) => c.id === stored.channelId)?.kind ?? "http",
+				text: stored.text,
+				payload: stored.payload,
+				receivedAt: stored.receivedAt,
+				threadId: stored.threadId,
+				replyTo: stored.replyTo,
+				metadata: { ...(stored.from ? { from: stored.from } : {}), released_by: workerId, release_reason: reason ?? "" },
+			},
+			attempts: stored.attempts,
+		});
+	}
+
+	/** A Worker asked to stop receiving a Thread. */
+	handleWorkerUnsubscribe(workerId: string, threadId: string, reason?: string): void {
+		this.deps.threads.unsubscribe(workerId, threadId);
+		const rec = this.workers.get(workerId);
+		if (rec) {
+			rec.threadIds = rec.threadIds.filter((t) => t !== threadId);
+			this.persistWorker(workerId);
+		}
+		log.info("worker unsubscribed from thread", { worker: workerId, thread: threadId, reason });
 	}
 
 	/** A Worker's control connection dropped (process exited/crashed). */
-	handleWorkerDisconnect(workerId: string): string | undefined {
+	handleWorkerDisconnect(workerId: string): void {
 		const rec = this.workers.get(workerId);
-		if (!rec) return undefined;
-		rec.status = "idle";
-		rec.lastHeartbeat = Date.now();
+		if (!rec) return;
 		const task = this.tasks.get(rec.taskId);
-		if (task && task.status === "running") {
+		const wasRunning = task && (task.status === "running" || task.status === "blocked");
+		if (wasRunning) {
+			this.failWorker(workerId, "worker process exited before reporting a conclusion");
+			this.push({
+				kind: "worker-exit",
+				workerId,
+				taskId: rec.taskId,
+				reason: "process exited without a conclusion",
+			});
+		} else {
+			this.workers.delete(workerId);
+			this.deps.store.deleteWorker(workerId);
+			this.deps.threads.removeWorker(workerId);
+		}
+		void this.deps.processManager.killWorker(rec.taskId).catch(() => {});
+		this.drainDispatchQueue();
+	}
+
+	private failWorker(workerId: string, reason: string): void {
+		const rec = this.workers.get(workerId);
+		if (!rec) return;
+		const task = this.tasks.get(rec.taskId);
+		if (task) {
 			task.status = "failed";
+			task.error = reason;
 			task.updatedAt = Date.now();
+			this.deps.store.upsertTask(task);
+			metrics.counter("mir_tasks_completed_total", 1, { status: "failed", fast: String(Boolean(task.fast)) });
 		}
 		this.workers.delete(workerId);
-		return rec.taskId;
+		this.deps.store.deleteWorker(workerId);
+		this.deps.threads.removeWorker(workerId);
 	}
+
+	/** Stop a task: abort the worker, cancel the task, free the slot. */
+	async stopTask(taskId: string, reason?: string): Promise<Task> {
+		const task = this.tasks.get(taskId);
+		if (!task) throw new Error(`unknown task ${taskId}`);
+		task.status = "cancelled";
+		task.error = reason ?? "stopped by operator";
+		task.updatedAt = Date.now();
+		this.deps.store.upsertTask(task);
+		// A queued task has no worker yet: just remove it from the queue.
+		const queueIdx = this.dispatchQueue.findIndex((i) => i.taskId === taskId);
+		if (queueIdx >= 0) this.dispatchQueue.splice(queueIdx, 1);
+		if (task.workerId) {
+			const workerId = task.workerId;
+			this.deps.control?.abort(workerId, reason);
+			this.workers.delete(workerId);
+			this.deps.store.deleteWorker(workerId);
+			this.deps.threads.removeWorker(workerId);
+			await this.deps.processManager.killWorker(taskId).catch(() => {});
+		}
+		metrics.counter("mir_tasks_completed_total", 1, { status: "cancelled", fast: String(Boolean(task.fast)) });
+		this.drainDispatchQueue();
+		return task;
+	}
+
+	/**
+	 * Stop everything running in a thread: every task that is on it, queued or
+	 * working. What a client's Stop reaches, and why it names a thread rather
+	 * than a task: a person watching a thread does not know its task ids.
+	 */
+	async stopThread(threadId: string, reason?: string): Promise<Task[]> {
+		const tasks = [...this.tasks.values()].filter(
+			(task) => task.threadId === threadId && (task.status === "running" || task.status === "queued"),
+		);
+		const stopped: Task[] = [];
+		for (const task of tasks) {
+			try {
+				stopped.push(await this.stopTask(task.id, reason ?? "stopped from the thread"));
+			} catch {
+				/* already gone: nothing to stop */
+			}
+		}
+		this.record(threadId, { kind: "status", status: "stopped", note: reason ?? "stopped" });
+		return stopped;
+	}
+
+	/** Reap a finished worker: remove it, free its slot, delete its pm2 app. */
+	async reapWorker(workerId: string): Promise<void> {
+		const rec = this.workers.get(workerId);
+		if (!rec) return;
+		this.workers.delete(workerId);
+		this.deps.store.deleteWorker(workerId);
+		this.deps.threads.removeWorker(workerId);
+		await this.deps.processManager.killWorker(rec.taskId).catch(() => {});
+		this.drainDispatchQueue();
+	}
+
+	// ----- Restore / recovery -----
+
+	/**
+	 * Hydrate durable state. Workers from a previous daemon generation are dead
+	 * (their control socket is gone), so their tasks are failed with an explicit
+	 * reason and the Router is told — instead of silently forgetting the work.
+	 */
+	private restore(): void {
+		for (const task of this.deps.store.listTasks()) this.tasks.set(task.id, task);
+		const persisted = this.deps.store.listWorkers();
+		const orphaned: Task[] = [];
+		for (const rec of persisted) {
+			const connected = this.deps.control?.isConnected(rec.id) ?? false;
+			if (connected) {
+				this.workers.set(rec.id, {
+					workerId: rec.id,
+					taskId: rec.taskId,
+					status: rec.status,
+					threadIds: rec.threadIds,
+					channelId: rec.channelId,
+					replyTo: rec.replyTo,
+					lastHeartbeat: rec.lastHeartbeat,
+					progress: rec.progress,
+				});
+				continue;
+			}
+			const task = this.tasks.get(rec.taskId);
+			if (task && (task.status === "running" || task.status === "blocked" || task.status === "queued")) {
+				task.status = "failed";
+				task.error = "daemon restarted while this task was running";
+				task.updatedAt = Date.now();
+				this.deps.store.upsertTask(task);
+				orphaned.push(task);
+			}
+			this.deps.store.deleteWorker(rec.id);
+			this.deps.threads.removeWorker(rec.id);
+			this.deps.onOrphanedWorker?.(rec.id, rec.taskId);
+		}
+		// Queued tasks with no worker: put them back on the dispatch queue.
+		for (const task of this.listTasks()) {
+			if (task.status === "queued" && !this.dispatchQueue.some((i) => i.taskId === task.id)) {
+				this.dispatchQueue.push({
+					taskId: task.id,
+					input: {
+						id: task.id,
+						title: task.title,
+						description: task.description,
+						threadId: task.threadId,
+						channelId: task.channelId,
+						replyTo: task.replyTo,
+						fast: task.fast,
+					},
+				});
+			}
+		}
+		if (orphaned.length > 0) {
+			// One item per task so each affected channel gets its own reply.
+			for (const task of orphaned) {
+				this.push({
+					kind: "recovery",
+					text: [
+						`The daemon restarted while task ${task.id} "${task.title}" was running.`,
+						`It is now marked failed (${task.error ?? "interrupted"}).`,
+						"Tell this channel what happened, and offer to re-dispatch if the work still matters.",
+					].join("\n"),
+					channelId: task.channelId,
+					replyTo: task.replyTo,
+					threadId: task.threadId,
+				});
+			}
+			metrics.counter("mir_tasks_interrupted_total", orphaned.length);
+		}
+		if (this.dispatchQueue.length > 0) this.drainDispatchQueue();
+	}
+
+	/** Queue a system signal for the Router (MCP changes, watchdog notes, …). */
+	submitSignal(text: string): void {
+		this.push({ kind: "signal", text });
+	}
+
+	// ----- Introspection -----
 
 	private onTurnDone(): void {
 		this.deps.onTurnComplete();
@@ -372,6 +1299,7 @@ export class RouterLayer {
 	listTasks(): Task[] {
 		return Array.from(this.tasks.values());
 	}
+
 	listWorkers(): WorkerInfo[] {
 		return Array.from(this.workers.values(), (w) => ({
 			id: w.workerId,
@@ -383,10 +1311,81 @@ export class RouterLayer {
 		}));
 	}
 
+	/** Snapshot for the Watchdog and for `/healthz`. */
+	status(): RouterStatus {
+		return {
+			turnCount: this.turnCount,
+			lastTurnAt: this.lastTurnAt,
+			turnInFlightSince: this.turnInFlightSince,
+			queueDepth: this.inbox.length,
+			draining: this.draining,
+			dispatchQueue: this.dispatchQueue.length,
+			workers: this.workers.size,
+			tasks: this.tasks.size,
+		};
+	}
+
+	/**
+	 * Keep only the newest `keep` tasks in memory. Terminal tasks stay in the
+	 * durable store (and the recall graph), so nothing is lost — the in-memory
+	 * map is a cache, and an unbounded one is §8.1's memory leak.
+	 */
+	pruneTasks(keep = 500): number {
+		const all = this.listTasks();
+		if (all.length <= keep) return 0;
+		const removable = all
+			.filter((t) => t.status === "done" || t.status === "failed" || t.status === "cancelled")
+			.sort((a, b) => a.updatedAt - b.updatedAt);
+		const excess = all.length - keep;
+		let removed = 0;
+		for (const task of removable) {
+			if (removed >= excess) break;
+			if (this.tasks.delete(task.id)) removed++;
+		}
+		return removed;
+	}
+
+	/** Watchdog hook: abort a hung turn. */
+	async abortTurn(reason: string): Promise<void> {
+		log.warn("aborting router turn", { reason });
+		await this.session.abort?.().catch(() => {});
+	}
+
+	getTask(taskId: string): Task | undefined {
+		return this.tasks.get(taskId);
+	}
+
+	/** Re-dispatch a failed/interrupted task with the same inputs. */
+	async retryTask(taskId: string): Promise<Task> {
+		const task = this.tasks.get(taskId);
+		if (!task) throw new Error(`unknown task ${taskId}`);
+		return this.dispatchTask({
+			title: task.title,
+			description: task.description,
+			threadId: task.threadId,
+			channelId: task.channelId,
+			replyTo: task.replyTo,
+			fast: task.fast,
+		});
+	}
+
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
-		if (this.flushTimer) clearTimeout(this.flushTimer);
-		await this.session.dispose();
+		if (this.drainTimer) clearTimeout(this.drainTimer);
+		this.drainTimer = null;
+		// An in-flight turn may still touch the store; let it finish or abort it
+		// before the caller closes the database underneath it.
+		if (this.turnInFlightSince > 0) {
+			await this.session.abort?.().catch(() => {});
+			await Promise.race([
+				settleSession(this.session).catch(() => {}),
+				sleep(5000),
+			]);
+		}
+		await this.session.dispose().catch(() => {});
 	}
 }
+
+/** TaskStatus is re-exported for callers that only import the router. */
+export type { TaskStatus };

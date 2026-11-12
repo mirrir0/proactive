@@ -1,0 +1,275 @@
+/**
+ * Security seam (superagent.md §8.4).
+ *
+ * The architecture assumes cloud compute trusts endpoint devices and that
+ * credentials on an endpoint can enter the model's context. Both assumptions
+ * are wrong by default, so this module provides the three controls the system
+ * needs to be deployable:
+ *
+ *   1. **Redaction** — every secret value the process knows about is scrubbed
+ *      from logs, model prompts and tool results. A secret that is used is
+ *      never a secret that is read.
+ *   2. **Channel authentication** — inbound events are only accepted from
+ *      callers holding a shared token and/or a valid HMAC signature, so the
+ *      event stream (which drives the agent) cannot be spoofed.
+ *   3. **Capability gating** — a Worker's tool surface is a policy decision,
+ *      not an accident of what the process happens to import.
+ *
+ * Nothing here imports agent code, so it is safe to use from every layer.
+ */
+
+import crypto from "node:crypto";
+
+// ---------------------------------------------------------------------------
+// 1. Secret registry + redaction
+// ---------------------------------------------------------------------------
+
+/** Values shorter than this are not redacted — they would mangle ordinary text. */
+const MIN_SECRET_LENGTH = 8;
+
+/** Env var names that are treated as secrets when discovered from the process. */
+const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|AUTH)/i;
+
+export class SecretRegistry {
+	/** value → human name, used in the redaction marker. */
+	private readonly byValue = new Map<string, string>();
+
+	/** Register a known secret value (idempotent). */
+	add(name: string, value: string | undefined | null): void {
+		if (!value || value.length < MIN_SECRET_LENGTH) return;
+		if (this.byValue.has(value)) return;
+		this.byValue.set(value, name);
+	}
+
+	/** Discover secrets from an env map (defaults to `process.env`). */
+	addFromEnv(env: NodeJS.ProcessEnv = process.env): void {
+		for (const [name, value] of Object.entries(env)) {
+			if (!SECRET_NAME_RE.test(name)) continue;
+			this.add(name, value);
+		}
+	}
+
+	get size(): number {
+		return this.byValue.size;
+	}
+
+	/** True when `value` is a registered secret. */
+	contains(value: string): boolean {
+		return this.byValue.has(value);
+	}
+
+	/**
+	 * Replace every known secret in `text` with `«redacted:NAME»`.
+	 * Longest-first so a secret that contains another secret wins.
+	 */
+	redact(text: string): string {
+		if (!text || this.byValue.size === 0) return text;
+		let out = text;
+		const entries = [...this.byValue.entries()].sort((a, b) => b[0].length - a[0].length);
+		for (const [value, name] of entries) {
+			if (!out.includes(value)) continue;
+			out = out.split(value).join(`«redacted:${name}»`);
+		}
+		return out;
+	}
+}
+
+/** Process-wide registry. Populated at daemon/worker startup. */
+export const secrets = new SecretRegistry();
+
+/** Convenience wrapper around the process-wide registry. */
+export function redactSecrets(text: string): string {
+	return secrets.redact(text);
+}
+
+/**
+ * Resolve `${env:NAME}` placeholders in a config object at use time.
+ *
+ * MCP configs live on disk and are often committed; this lets a config carry
+ * `"GITHUB_TOKEN": "${env:GITHUB_TOKEN}"` while the value only exists in the
+ * environment. Unresolved placeholders are dropped (never passed literally).
+ */
+export function resolveSecretRefs<T>(value: T): T {
+	const walk = (node: unknown): unknown => {
+		if (typeof node === "string") {
+			// Inline form so "Bearer ${env:TOKEN}" works, not just a bare placeholder.
+			return node.replace(/\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_all, name: string) => process.env[name] ?? "");
+		}
+		if (Array.isArray(node)) return node.map(walk);
+		if (node && typeof node === "object") {
+			const out: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(node as Record<string, unknown>)) out[k] = walk(v);
+			return out;
+		}
+		return node;
+	};
+	return walk(value) as T;
+}
+
+// ---------------------------------------------------------------------------
+// 2. Channel authentication
+// ---------------------------------------------------------------------------
+
+export interface ChannelAuthOptions {
+	/** Shared bearer token expected in `tokenHeader`. Empty/undefined disables token auth. */
+	token?: string;
+	tokenHeader?: string;
+	/** HMAC-SHA256 secret over `<timestamp>.<rawBody>`. Empty/undefined disables signature auth. */
+	hmacSecret?: string;
+	signatureHeader?: string;
+	timestampHeader?: string;
+	/** Reject signatures older/newer than this (replay window). Default 5 minutes. */
+	maxSkewMs?: number;
+}
+
+export interface AuthResult {
+	ok: boolean;
+	reason?: string;
+}
+
+function safeEqual(a: string, b: string): boolean {
+	const ab = Buffer.from(a);
+	const bb = Buffer.from(b);
+	if (ab.length !== bb.length) return false;
+	return crypto.timingSafeEqual(ab, bb);
+}
+
+/** Compute the signature value a caller should send. Exported for tests and clients. */
+export function signChannelBody(secret: string, timestamp: string, rawBody: string): string {
+	const digest = crypto.createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
+	return `sha256=${digest}`;
+}
+
+/**
+ * Verify an inbound channel request.
+ *
+ * Both checks are optional and independent: configure a token for simple
+ * shared-secret deployments, an HMAC for anything reachable by third parties,
+ * or both. When neither is configured the request is allowed — but the daemon
+ * logs a warning at startup so an unauthenticated public bind is never silent.
+ */
+export function verifyChannelRequest(
+	options: ChannelAuthOptions,
+	headers: Record<string, string | string[] | undefined>,
+	rawBody: string,
+	now: number = Date.now(),
+): AuthResult {
+	const header = (name: string): string | undefined => {
+		const v = headers[name.toLowerCase()];
+		return Array.isArray(v) ? v[0] : v;
+	};
+
+	if (options.token) {
+		const supplied = header(options.tokenHeader ?? "x-mir-token") ?? "";
+		if (!supplied) return { ok: false, reason: "missing channel token" };
+		if (!safeEqual(supplied, options.token)) return { ok: false, reason: "invalid channel token" };
+	}
+
+	if (options.hmacSecret) {
+		const supplied = header(options.signatureHeader ?? "x-mir-signature") ?? "";
+		const ts = header(options.timestampHeader ?? "x-mir-timestamp") ?? "";
+		if (!supplied) return { ok: false, reason: "missing signature" };
+		if (!ts) return { ok: false, reason: "missing signature timestamp" };
+		const skewMs = options.maxSkewMs ?? 5 * 60_000;
+		const tsMs = Number(ts) * (String(ts).length <= 10 ? 1000 : 1);
+		if (!Number.isFinite(tsMs)) return { ok: false, reason: "invalid signature timestamp" };
+		if (Math.abs(now - tsMs) > skewMs) return { ok: false, reason: "signature timestamp outside replay window" };
+		const expected = signChannelBody(options.hmacSecret, ts, rawBody);
+		if (!safeEqual(supplied, expected)) return { ok: false, reason: "invalid signature" };
+	}
+
+	return { ok: true };
+}
+
+/** True when any authentication is configured. */
+export function authConfigured(options: ChannelAuthOptions): boolean {
+	return Boolean(options.token || options.hmacSecret);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Worker capability gating
+// ---------------------------------------------------------------------------
+
+export type FsCapability = "none" | "ro" | "rw";
+
+export interface WorkerCapabilities {
+	/** Outbound network from codemode (`fetch`). */
+	net: boolean;
+	/** Filesystem access from codemode (`readFile`/`writeFile`). */
+	fs: FsCapability;
+	/** Whether MCP servers are connected at all. */
+	mcp: boolean;
+	/** Whether the `codemode` tool exists. */
+	codemode: boolean;
+}
+
+export const DEFAULT_WORKER_CAPABILITIES: WorkerCapabilities = {
+	net: true,
+	fs: "rw",
+	mcp: true,
+	codemode: true,
+};
+
+/** Parse capabilities from JSON, a comma list of grants, or nothing. */
+export function parseCapabilities(raw: string | undefined | null): WorkerCapabilities {
+	if (!raw || !raw.trim()) return { ...DEFAULT_WORKER_CAPABILITIES };
+	const trimmed = raw.trim();
+	if (trimmed.startsWith("{")) {
+		try {
+			const parsed = JSON.parse(trimmed) as Partial<WorkerCapabilities>;
+			return { ...DEFAULT_WORKER_CAPABILITIES, ...parsed };
+		} catch {
+			return { ...DEFAULT_WORKER_CAPABILITIES };
+		}
+	}
+	// Grant-list form: "net,fs:ro,mcp" (anything not granted is denied).
+	const caps: WorkerCapabilities = { net: false, fs: "none", mcp: false, codemode: false };
+	for (const grant of trimmed.split(",").map((s) => s.trim()).filter(Boolean)) {
+		if (grant === "net") caps.net = true;
+		else if (grant === "mcp") caps.mcp = true;
+		else if (grant === "codemode") caps.codemode = true;
+		else if (grant === "fs") caps.fs = "rw";
+		else if (grant === "fs:ro") caps.fs = "ro";
+		else if (grant === "fs:rw") caps.fs = "rw";
+		else if (grant === "all") return { ...DEFAULT_WORKER_CAPABILITIES };
+	}
+	return caps;
+}
+
+/** Human-readable capability line, injected into the worker prompt. */
+export function describeCapabilities(caps: WorkerCapabilities): string {
+	const parts = [
+		`network=${caps.net ? "allowed" : "denied"}`,
+		`filesystem=${caps.fs}`,
+		`mcp=${caps.mcp ? "enabled" : "disabled"}`,
+		`codemode=${caps.codemode ? "enabled" : "disabled"}`,
+	];
+	return parts.join(", ");
+}
+
+/** Glob-ish tool matcher: `*` matches any run of characters. */
+export function matchToolName(pattern: string, name: string): boolean {
+	if (pattern === name) return true;
+	if (!pattern.includes("*")) return false;
+	const re = new RegExp(
+		"^" + pattern.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
+	);
+	return re.test(name);
+}
+
+/**
+ * Apply an allow/deny policy to a tool set.
+ * Deny wins; a non-empty allow list means "only these".
+ */
+export function filterToolNames(
+	names: string[],
+	policy: { allow?: string[]; deny?: string[] },
+): string[] {
+	return names.filter((name) => {
+		if (policy.deny?.some((p) => matchToolName(p, name))) return false;
+		if (policy.allow && policy.allow.length > 0) {
+			return policy.allow.some((p) => matchToolName(p, name));
+		}
+		return true;
+	});
+}

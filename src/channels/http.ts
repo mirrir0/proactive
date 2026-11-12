@@ -8,18 +8,33 @@
  *           `reply_to` URL when one was supplied; otherwise stores the reply in
  *           an in-memory outbox readable at GET /channels/http/outbox.
  *
- * This lets any external system (CI, curl, a GitHub relay, another agent) drive
- * Triggers and receive the agent's reply.
+ * Authentication: set `MIR_HTTP_TOKEN` (shared bearer token) and/or
+ * `MIR_HTTP_HMAC_SECRET` (HMAC-SHA256 over `<timestamp>.<body>`, replay window
+ * 5 minutes). Requests that fail either check are rejected before their body
+ * is even parsed, so a spoofed event never reaches the agent.
  */
 
 import http from "node:http";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { type Channel, type ChannelEvent, type ReplyContext, ReplyBook } from "./types.ts";
+import {
+	type Channel,
+	type ChannelEvent,
+	type ReplyContext,
+	type ReplyRecorder,
+	ReplyBook,
+} from "./types.ts";
 import { makeResponseTool } from "./tool.ts";
+import { redactSecrets, verifyChannelRequest, type ChannelAuthOptions } from "../security.ts";
+import { log } from "../telemetry.ts";
 
 export interface HttpChannelOptions {
 	host: string;
 	port: number;
+	/** Shared token accepted in `x-mir-token`. */
+	token?: string;
+	/** HMAC secret for `x-mir-signature`. */
+	hmacSecret?: string;
+	maxBodyBytes?: number;
 }
 
 interface OutboxEntry {
@@ -29,18 +44,25 @@ interface OutboxEntry {
 	at: number;
 }
 
+const DEFAULT_MAX_BODY_BYTES = 256 * 1024;
+
 export class HttpChannel implements Channel {
 	readonly id = "http";
 	readonly kind = "http" as const;
 	private readonly book = new ReplyBook();
 	private readonly outbox: OutboxEntry[] = [];
 	private readonly options: HttpChannelOptions;
+	private readonly tools = new WeakMap<ReplyRecorder, ToolDefinition>();
+	private defaultTool: ToolDefinition | null = null;
 	private server: http.Server | null = null;
-	private tool: ToolDefinition | null = null;
 	private sink: ((e: ChannelEvent) => void) | null = null;
 
 	constructor(options: HttpChannelOptions) {
 		this.options = options;
+	}
+
+	private authOptions(): ChannelAuthOptions {
+		return { token: this.options.token, hmacSecret: this.options.hmacSecret };
 	}
 
 	describe(): string {
@@ -50,6 +72,16 @@ export class HttpChannel implements Channel {
 		return "Structured and information-dense, like an API/markdown reply. Include what changed, the result, and any next step. No filler.";
 	}
 
+	authenticated(): boolean {
+		return Boolean(this.options.token || this.options.hmacSecret);
+	}
+
+	/** Bound port (useful when constructed with port 0, e.g. in tests). */
+	get port(): number {
+		const address = this.server?.address();
+		return typeof address === "object" && address ? address.port : this.options.port;
+	}
+
 	async start(sink: (event: ChannelEvent) => void): Promise<void> {
 		this.sink = sink;
 		this.server = http.createServer((req, res) => this.handle(req, res));
@@ -57,19 +89,42 @@ export class HttpChannel implements Channel {
 			this.server!.once("error", reject);
 			this.server!.listen(this.options.port, this.options.host, () => resolve());
 		});
+		if (!this.authenticated()) {
+			log.warn("http channel is unauthenticated", {
+				channel: "http",
+				host: this.options.host,
+				port: this.options.port,
+				hint: "set MIR_HTTP_TOKEN and/or MIR_HTTP_HMAC_SECRET",
+			});
+		}
 	}
 
 	private handle(req: http.IncomingMessage, res: http.ServerResponse): void {
 		const url = req.url ?? "/";
 		if (req.method === "GET" && url.startsWith("/channels/http/outbox")) {
+			if (!this.authorize(req, res, "")) return;
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(JSON.stringify({ replies: this.outbox }));
 			return;
 		}
 		if (req.method === "POST" && url.startsWith("/channels/http/events")) {
+			const maxBytes = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 			let body = "";
-			req.on("data", (c) => (body += c));
+			let tooLarge = false;
+			req.on("data", (chunk: Buffer) => {
+				if (tooLarge) return;
+				body += chunk.toString("utf8");
+				if (body.length > maxBytes) {
+					tooLarge = true;
+					res.writeHead(413, { "content-type": "application/json" });
+					res.end(JSON.stringify({ error: "payload too large" }));
+					req.destroy();
+				}
+			});
 			req.on("end", () => {
+				if (tooLarge) return;
+				// Authenticate before parsing: an unauthenticated body is never trusted.
+				if (!this.authorize(req, res, body)) return;
 				let parsed: any = {};
 				try {
 					parsed = body ? JSON.parse(body) : {};
@@ -84,9 +139,11 @@ export class HttpChannel implements Channel {
 					res.end(JSON.stringify({ error: "missing text" }));
 					return;
 				}
-				const threadId = String(parsed.thread ?? parsed.threadId ?? `http-${crypto.randomUUID().slice(0, 8)}`);
+				const threadId = String(
+					parsed.thread ?? parsed.threadId ?? `http-${crypto.randomUUID().slice(0, 8)}`,
+				);
 				const event: ChannelEvent = {
-					id: `evt-${crypto.randomUUID().slice(0, 8)}`,
+					id: String(parsed.id ?? `evt-${crypto.randomUUID().slice(0, 8)}`),
 					channelId: this.id,
 					threadId,
 					from: parsed.from,
@@ -94,7 +151,10 @@ export class HttpChannel implements Channel {
 					payload: parsed.payload,
 					replyTo: parsed.reply_to ?? parsed.replyTo ?? parsed.callback_url,
 					receivedAt: Date.now(),
-					metadata: { explicit_request: String(parsed.explicit_request ?? true) },
+					metadata: {
+						explicit_request: String(parsed.explicit_request ?? true),
+						...(parsed.metadata && typeof parsed.metadata === "object" ? parsed.metadata : {}),
+					},
 				};
 				this.book.remember(event);
 				this.sink?.(event);
@@ -107,12 +167,26 @@ export class HttpChannel implements Channel {
 		res.end(JSON.stringify({ error: "not found" }));
 	}
 
+	private authorize(req: http.IncomingMessage, res: http.ServerResponse, rawBody: string): boolean {
+		const result = verifyChannelRequest(this.authOptions(), req.headers, rawBody);
+		if (result.ok) return true;
+		log.warn("rejected unauthenticated channel request", {
+			channel: "http",
+			reason: result.reason,
+			remote: req.socket.remoteAddress,
+		});
+		res.writeHead(401, { "content-type": "application/json" });
+		res.end(JSON.stringify({ error: "unauthorized", reason: result.reason }));
+		return false;
+	}
+
 	async respond(text: string, ctx: ReplyContext): Promise<void> {
 		const resolved = this.book.resolve(ctx) ?? ctx;
+		const safeText = redactSecrets(text);
 		const entry: OutboxEntry = {
 			id: `out-${crypto.randomUUID().slice(0, 8)}`,
 			threadId: resolved.threadId ?? "http",
-			text,
+			text: safeText,
 			at: Date.now(),
 		};
 		this.outbox.push(entry);
@@ -123,18 +197,25 @@ export class HttpChannel implements Channel {
 				await fetch(resolved.replyTo, {
 					method: "POST",
 					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ text, thread: entry.threadId, event_id: resolved.eventId }),
+					body: JSON.stringify({ text: safeText, thread: entry.threadId, event_id: resolved.eventId }),
+					signal: AbortSignal.timeout(10_000),
 				});
-			} catch {
+			} catch (err) {
 				// Non-fatal: the reply is still in the outbox for polling.
+				log.warn("http reply callback failed", { channel: "http", error: (err as Error).message });
 			}
 		}
-		console.log(`[http] reply → thread=${entry.threadId}: ${text.slice(0, 120)}`);
+		log.info("http reply", { channel: "http", thread: entry.threadId, chars: safeText.length });
 	}
 
-	responseTool(): ToolDefinition {
-		if (!this.tool) this.tool = makeResponseTool(this);
-		return this.tool;
+	responseTool(recorder?: ReplyRecorder): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+		let tool = this.tools.get(recorder);
+		if (!tool) {
+			tool = makeResponseTool(this, recorder);
+			this.tools.set(recorder, tool);
+		}
+		return tool;
 	}
 
 	async stop(): Promise<void> {

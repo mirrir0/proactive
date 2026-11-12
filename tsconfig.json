@@ -10,10 +10,10 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "declaration": true,
-    "outDir": "./dist",
-    "rootDir": "./src"
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "types": ["node"]
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]
 }

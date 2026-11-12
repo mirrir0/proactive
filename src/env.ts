@@ -4,6 +4,14 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
+
+/** Expand a leading tilde to the user's home directory. */
+export function expandHome(value: string): string {
+	if (value.startsWith("~/")) return homedir() + value.slice(1);
+	if (value === "~") return homedir();
+	return value;
+}
 
 export function loadEnv(file = ".env"): void {
 	let raw: string;

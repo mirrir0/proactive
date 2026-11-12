@@ -1,28 +1,38 @@
 {
-  "name": "mir",
-  "version": "1.0.0",
-  "description": "Super-agent 'mir' \u2014 Router+Workers, pm2 process manager, channel-based event sources",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "tsx src/index.ts daemon",
-    "daemon": "pm2 start ecosystem.config.cjs",
-    "stop": "pm2 delete mir-daemon",
-    "restart": "pm2 restart mir-daemon",
-    "logs": "pm2 logs mir-daemon",
-    "send": "tsx src/index.ts send",
-    "build": "tsc",
-    "check": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "1.5.0",
-    "@earendil-works/pi-coding-agent": "1.5.0",
-    "pm2": "^5.4.0",
-    "typebox": "^1.3.27"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
-  }
+	"name": "mir",
+	"version": "1.0.0",
+	"description": "Super-agent 'mir' \u2014 Router+Workers, pm2 process manager, channel-based event sources",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"mir-endpoint": "bin/mir-endpoint.js"
+	},
+	"scripts": {
+		"dev": "tsx src/index.ts daemon",
+		"daemon": "pm2 start ecosystem.config.cjs",
+		"stop": "pm2 delete mir-daemon",
+		"restart": "pm2 restart mir-daemon",
+		"logs": "pm2 logs mir-daemon",
+		"send": "tsx src/index.ts send",
+		"endpoint": "tsx src/endpoint/main.ts",
+		"build": "tsc -p tsconfig.build.json",
+		"check": "tsc --noEmit",
+		"test": "node --import tsx --test test/*.test.ts",
+		"test:watch": "node --import tsx --test --watch test/*.test.ts",
+		"smoke:hands": "tsx scripts/smoke-hands.ts",
+		"smoke:brain": "tsx scripts/smoke-brain.ts"
+	},
+	"dependencies": {
+		"@anthropic-ai/sandbox-runtime": "^0.0.82",
+		"@earendil-works/pi-ai": "1.5.0",
+		"@earendil-works/pi-coding-agent": "1.5.0",
+		"@earendil-works/pi-durable": "1.5.0",
+		"pm2": "^5.4.0",
+		"typebox": "^1.3.27"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"tsx": "^4.19.0",
+		"typescript": "^5.7.0"
+	}
 }

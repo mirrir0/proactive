@@ -7,13 +7,19 @@
  *   - outbound: it exposes its own response tool (`respond_<channel>`), and the
  *     Router replies by calling that tool — never by writing raw text.
  *
- * This is what replaces the old `source: im|github|...` enum and the
- * stdout-scraping text filter.
+ * Channels also own their own **authentication**: an inbound Event is only
+ * admitted after the transport has verified it (`verify`), because the event
+ * stream is what drives the agent.
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-export type ChannelKind = "terminal" | "http" | "queue";
+/**
+ * What kind of place a channel is. `anomalous` is the product's own: its socket
+ * is the host's, so the host pushes messages in and takes replies back (see
+ * channels/anomalous.ts).
+ */
+export type ChannelKind = "terminal" | "http" | "queue" | "anomalous";
 
 /** A single inbound message on a Channel. */
 export interface ChannelEvent {
@@ -40,6 +46,20 @@ export interface ReplyContext {
 	replyTo?: string;
 }
 
+/**
+ * Receives every reply a turn actually delivered.
+ *
+ * The Router uses this instead of a process-wide counter: attribution must be
+ * exact per turn, otherwise the "did the model answer?" fallback fires on
+ * stale state and double-posts.
+ */
+export interface ReplyRecorder {
+	record(channelId: string, text: string, ctx: ReplyContext): void;
+}
+
+/** A no-op recorder for callers that do not track deliveries. */
+export const NOOP_RECORDER: ReplyRecorder = { record: () => {} };
+
 export interface Channel {
 	/** Stable id used in prompts and tool names: `respond_<id>`. */
 	readonly id: string;
@@ -58,12 +78,27 @@ export interface Channel {
 	respond(text: string, ctx: ReplyContext): Promise<void>;
 
 	/** Build the per-channel response tool the Router calls. */
-	responseTool(): ToolDefinition;
+	responseTool(recorder?: ReplyRecorder): ToolDefinition;
+
+	/**
+	 * Optional transport-level admission check. Returns `{ok:false}` for events
+	 * that must not enter the system (bad signature, wrong owner, …).
+	 */
+	verify?(event: ChannelEvent): { ok: boolean; reason?: string };
+
+	/** True when this channel has authentication configured. */
+	authenticated?(): boolean;
 
 	stop(): Promise<void>;
 }
 
-/** Shared event-id + reply-context bookkeeping for channels. */
+/** Max remembered reply contexts per channel (prevents an unbounded map). */
+const REPLY_BOOK_CAPACITY = 1000;
+
+/**
+ * Shared event-id + reply-context bookkeeping for channels.
+ * Bounded FIFO so a long-running daemon cannot leak memory through it.
+ */
 export class ReplyBook {
 	private readonly byEvent = new Map<string, ReplyContext>();
 	private readonly byThread = new Map<string, ReplyContext>();
@@ -78,6 +113,10 @@ export class ReplyBook {
 		this.byEvent.set(event.id, ctx);
 		this.byThread.set(event.threadId, ctx);
 		this.last = ctx;
+		if (this.byEvent.size > REPLY_BOOK_CAPACITY) {
+			const oldest = this.byEvent.keys().next().value;
+			if (oldest !== undefined) this.byEvent.delete(oldest);
+		}
 	}
 
 	resolve(ctx: ReplyContext): ReplyContext | undefined {
@@ -88,5 +127,9 @@ export class ReplyBook {
 			return this.byThread.get(ctx.threadId);
 		}
 		return this.last;
+	}
+
+	get size(): number {
+		return this.byEvent.size;
 	}
 }

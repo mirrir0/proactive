@@ -1,2 +1,6 @@
 node_modules/
 dist/
+.mir/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

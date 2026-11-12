@@ -1,27 +1,54 @@
 /**
  * Worker process entrypoint (`mir-worker-<taskId>` under pm2).
  *
- * Boots one WorkerRuntime for the Task named in MIR_WORKER_SPEC, connects to the
+ * Boots one WorkerRuntime for the Task named in the spec file, connects to the
  * daemon's control channel, runs the Task, reports the conclusion, then serves
- * follow-up Thread events until idle — then exits.
+ * follow-up Thread events (queued, never dropped) until idle — then exits.
+ *
+ * MCP: the daemon watches mcp.config.json and broadcasts a `system` signal
+ * (kind `mcp_changed`) when servers are added/removed/changed. On receipt this
+ * worker hot-reloads its MCP connections, swaps its `mcp__*` tool set, refreshes
+ * the codemode sandbox globals, re-reports its catalog to the daemon, and
+ * injects a system message into the session so the model knows what changed.
+ *
+ * Security: the task spec arrives as a 0600 file path (never inline env), the
+ * secret registry is primed from the environment so nothing leaks into logs or
+ * prompts, and the tool surface is filtered by the spec's capability policy.
  */
 
+import fs from "node:fs";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadEnv } from "./env.ts";
 import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerSpec } from "./process-manager.ts";
-import { WorkerRuntime } from "./worker.ts";
+import { WorkerRuntime, createWorkerControlTools } from "./worker.ts";
 import { ControlClient } from "./ipc.ts";
+import { McpManager } from "./mcp.ts";
+import { createCodemodeTool } from "./codemode.ts";
+import { HandsClient } from "./hands/client.ts";
+import { createHandTools } from "./hands/tools.ts";
+import { createMcpQueryTool } from "./mcp-query.ts";
+import { formatMcpChangedText, isEmptyDiff, type McpDiff } from "./mcp-catalog.ts";
+import { filterToolNames, secrets, DEFAULT_WORKER_CAPABILITIES } from "./security.ts";
+import { log } from "./telemetry.ts";
 
 function readSpec(): WorkerSpec {
+	const path = process.env.MIR_WORKER_SPEC_PATH;
+	if (path) {
+		const raw = fs.readFileSync(path, "utf8");
+		return JSON.parse(raw) as WorkerSpec;
+	}
+	// Legacy path: inline env (kept so an old daemon can still spawn a worker).
 	const raw = process.env.MIR_WORKER_SPEC;
-	if (!raw) throw new Error("MIR_WORKER_SPEC is not set");
+	if (!raw) throw new Error("MIR_WORKER_SPEC_PATH is not set");
 	return JSON.parse(raw) as WorkerSpec;
 }
 
 async function main(): Promise<void> {
 	loadEnv();
+	secrets.addFromEnv();
 	const spec = readSpec();
+	const capabilities = spec.capabilities ?? DEFAULT_WORKER_CAPABILITIES;
 	const apiKey = process.env.OPENROUTER_API_KEY;
 	if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
 
@@ -42,26 +69,125 @@ async function main(): Promise<void> {
 		};
 	}
 
+	// --- Hands: the execution environment this task runs against ---
+	// The Worker process is a brain: it holds the model loop and the tool surface,
+	// not the filesystem. If a hand is configured, filesystem access moves there.
+	let handsClient: HandsClient | null = null;
+	let handTools: any[] = [];
+	if (spec.handsSocketPath) {
+		handsClient = new HandsClient({
+			socketPath: spec.handsSocketPath,
+			agent: `worker-${spec.workerId}`,
+		});
+		const connected = await handsClient
+			.connect()
+			.then(() => true)
+			.catch((err) => {
+				log.warn("hands hub unreachable; hand tools will report an error", {
+					error: (err as Error).message,
+					socket: spec.handsSocketPath,
+				});
+				return false;
+			});
+		handTools = createHandTools({ client: handsClient, endpointId: spec.endpointId });
+		if (connected) {
+			const hands = await handsClient.refreshHands().catch(() => []);
+			log.info("hands available to this worker", {
+				hands: hands.map((h) => h.endpointId),
+				pinned: spec.endpointId ?? "auto",
+			});
+		}
+	}
+
+	// Local codemode keeps pure computation; the environment is the hand's job.
+	const codemodeCapabilities = handsClient ? { ...capabilities, fs: "none" as const } : capabilities;
+
+	// --- MCP + codemode setup (both gated by capabilities) ---
+	const mcp = new McpManager();
+	if (capabilities.mcp) {
+		const mcpConfig = McpManager.loadConfig(spec.mcpConfigPath);
+		await mcp.start(mcpConfig);
+	}
+
+	// Live reference so the codemode sandbox can rebuild its globals after a hot-reload.
+	const mcpToolsRef = { tools: capabilities.mcp ? mcp.getCodemodeTools() : [] };
+
+	const controlTools = (): any[] => {
+		const defs: any[] = [];
+		if (capabilities.mcp) {
+			defs.push(...mcp.getToolDefinitions(), createMcpQueryTool(() => mcp.getToolCatalog()));
+		}
+		if (capabilities.codemode) {
+			defs.push(
+				createCodemodeTool({
+					cwd: process.cwd(),
+					getMcpTools: () => mcpToolsRef.tools,
+					capabilities: codemodeCapabilities,
+				}),
+			);
+		}
+		// Tool policy: an allow/deny list on top of the capability grants.
+		const allowed = filterToolNames(
+			defs.map((d) => String(d.name)),
+			spec.toolPolicy ?? {},
+		);
+		return defs.filter((d) => allowed.includes(String(d.name)));
+	};
+
+	let customTools = [...controlTools(), ...handTools];
+
 	const client = new ControlClient(spec.socketPath, spec.workerId, spec.taskId);
 	await client.connect();
+	if (capabilities.mcp) {
+		// Publish our catalog so the Router's mcp_query reflects reality.
+		client.mcpCatalog(mcp.getServerReports(), mcp.getToolCatalog());
+	}
 
 	const worker = await WorkerRuntime.create({
 		taskId: spec.taskId,
+		sessionDir: spec.sessionDir,
 		modelRuntime,
 		model,
 		thinkingLevel: (spec.thinkingLevel as any) ?? "high",
+		mcpTools: mcpToolsRef.tools,
+		customTools,
+		capabilities,
+		heartbeatMs: spec.heartbeatMs,
 		reporter: {
 			status: (status, progress) => client.status(status, progress),
+			heartbeat: (status, progress) => client.heartbeat(status, progress),
 			delta: (text) => client.delta(text),
+			release: (eventId, reason) => client.release(eventId, reason),
+			unsubscribe: (threadId, reason) => client.unsubscribe(threadId, reason),
 		},
 	});
+
+	// Worker-side subscription control (release an event, leave a thread).
+	// The runtime appends these to the live session's tool set and refreshes its
+	// registry, so they are callable from the very next turn.
+	const threadIds = spec.threadId ? [spec.threadId] : [];
+	worker.addTools(createWorkerControlTools(worker, threadIds));
 
 	const taskPrompt = [
 		`Task: ${spec.title}`,
 		"",
 		`Description: ${spec.description}`,
 		"",
-		"Complete this task. Then report a concise conclusion (what you did, what you found, the outcome).",
+		`Capabilities granted to you: ${JSON.stringify(capabilities)}.`,
+		handsClient
+			? [
+					"Execution happens on a hand (an execution environment), not in this process:",
+					"- exec({ argv }) runs a command there (argv form, no shell unless granted)",
+					"- read_file / write_file / list_dir touch its filesystem, confined to its roots",
+					"- git({ args }) runs git there, using the machine's own credentials",
+					"- list_hands() shows what is reachable",
+					`You are pinned to hand: ${spec.endpointId ?? "(the hub picks the least-loaded capable one)"}.`,
+					"Your local codemode has no filesystem access; use the hand tools for anything on disk.",
+				].join("\n")
+			: "No hand is configured; use your local tools.",
+		"You can call mcp_query to search which MCP tools are available.",
+		"Use the tools you have as needed to complete the task, then report a concise conclusion (what you did, what you found, the outcome).",
+		"If a follow-up message arrives that is not part of this task, call release_event instead of answering it.",
 	].join("\n");
 
 	let idleTimer: NodeJS.Timeout | null = null;
@@ -72,7 +198,11 @@ async function main(): Promise<void> {
 		stopping = true;
 		if (idleTimer) clearTimeout(idleTimer);
 		client.status("done");
-		await worker.dispose();
+		await worker.dispose().catch(() => {});
+		handsClient?.close();
+		await mcp.stop().catch(() => {});
+		// Flush before exiting: an immediate exit() can truncate the last message.
+		await client.flush();
 		client.close();
 		process.exit(0);
 	};
@@ -83,32 +213,89 @@ async function main(): Promise<void> {
 		idleTimer.unref();
 	};
 
+	// --- MCP hot-reload on `system` signals from the daemon ---
+	// Syncs are serialized: a second mcp_changed arriving mid-sync waits its turn.
+	let syncQueue: Promise<void> = Promise.resolve();
+
+	const handleMcpChanged = async (): Promise<void> => {
+		let fresh;
+		try {
+			fresh = McpManager.loadConfig(spec.mcpConfigPath);
+		} catch (err) {
+			// The daemon's watcher already validated the file, but the file can
+			// change again in between — keep the old config rather than tear down.
+			log.error("MCP reload aborted, config unreadable", { error: (err as Error).message });
+			return;
+		}
+		const diff: McpDiff = await mcp.sync(fresh);
+		// Swap the mcp__* tool definitions in the session and refresh its registry.
+		try {
+			worker.replaceMcpTools(mcp.getToolDefinitions());
+		} catch (err) {
+			log.error("failed to refresh MCP tool set", { error: (err as Error).message });
+		}
+		// Refresh codemode sandbox globals (takes effect on the next codemode call).
+		mcpToolsRef.tools = mcp.getCodemodeTools();
+		// Re-report the catalog so the daemon/Router cache converges.
+		client.mcpCatalog(mcp.getServerReports(), mcp.getToolCatalog());
+		// System message: tell the model what was added/removed/changed.
+		const text = formatMcpChangedText(diff);
+		if (!isEmptyDiff(diff)) {
+			await worker.injectSystemMessage(text, {
+				added: diff.added,
+				removed: diff.removed,
+				changed: diff.changed,
+				failed: diff.failed,
+			});
+		}
+		log.info("MCP hot-reload done", {
+			added: diff.added,
+			removed: diff.removed,
+			changed: diff.changed,
+			failed: diff.failed,
+		});
+	};
+
+	client.onSystem((msg) => {
+		armIdle();
+		if (msg.kind !== "mcp_changed" || !capabilities.mcp) return;
+		syncQueue = syncQueue.then(handleMcpChanged).catch((err) => {
+			log.error("MCP hot-reload failed", { error: (err as Error).message });
+		});
+	});
+
 	// Follow-up events on subscribed Threads arrive over the control channel.
+	// They are queued by the runtime, so an event that lands mid-turn is not lost.
 	client.onEvent((event) => {
 		armIdle();
-		void (async () => {
-			try {
-				await worker.run(`Follow-up on your task's thread:\n\n${event.text}`);
-			} catch (err) {
-				client.status("failed", (err as Error).message);
-			}
-		})();
+		worker.enqueueFollowUp(
+			[
+				`Follow-up on your task's thread (event ${event.id}, from ${event.from ?? "unknown"}):`,
+				"",
+				event.text,
+				"",
+				"If this is outside your task, call release_event with a reason. Otherwise act on it and report a concise conclusion.",
+			].join("\n"),
+			event.id,
+		);
 	});
 	client.onAbort(() => void finish());
 
 	try {
 		client.status("busy", "running task");
 		const result = await worker.run(taskPrompt);
+		await worker.conclude(spec.taskId, result || "(worker produced no conclusion text)");
 		client.conclusion(result || "(worker produced no conclusion text)");
 	} catch (err) {
-		client.status("failed", (err as Error).message);
-		client.conclusion(`FAILED: ${(err as Error).message}`);
+		const message = `FAILED: ${(err as Error).message}`;
+		await worker.conclude(spec.taskId, message, (err as Error).message);
+		client.conclusion(message);
 	}
 
 	armIdle();
 }
 
 main().catch((err) => {
-	console.error("[worker] fatal:", err?.message ?? err);
+	log.error("worker fatal", { error: (err as Error).message });
 	process.exit(1);
 });

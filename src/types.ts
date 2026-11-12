@@ -10,6 +10,9 @@
  */
 
 import type { ChannelKind } from "./channels/types.ts";
+import type { WorkerCapabilities } from "./security.ts";
+import type { HandCapabilities, HandPolicy } from "./hands/protocol.ts";
+import { DEFAULT_HAND_CAPABILITIES, DEFAULT_HAND_POLICY } from "./hands/protocol.ts";
 
 export type ModelProvider = "openrouter";
 
@@ -26,6 +29,8 @@ export interface Trigger {
 	threadId?: string; // undefined => cold start, needs router dispatch
 	replyTo?: string; // opaque reply address within the channel
 	metadata?: Record<string, string>;
+	/** How many Router turns have already tried to handle this trigger. */
+	attempts?: number;
 }
 
 export interface Thread {
@@ -49,9 +54,13 @@ export interface Task {
 	updatedAt: number;
 	result?: string;
 	error?: string;
+	/** True if this task used the fast (lightning) model. */
+	fast?: boolean;
+	/** Hand this task was pinned to, when the Router chose one. */
+	endpointId?: string;
 }
 
-export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed";
+export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
 
 export interface WorkerInfo {
 	id: string;
@@ -62,17 +71,7 @@ export interface WorkerInfo {
 	progress?: string;
 }
 
-export interface RouterDecision {
-	action: "dispatch" | "route_to_worker" | "ignore" | "ask_user";
-	workerId?: string;
-	taskId?: string;
-	reason?: string;
-}
-
-/**
- * OpenRouter provider-routing preferences. Sent verbatim as the `provider`
- * field in the OpenRouter API request body (see pi-ai's openRouterRouting).
- */
+/** OpenRouter provider-routing preferences (sent verbatim as `provider`). */
 export interface OpenRouterRouting {
 	only?: string[];
 	order?: string[];
@@ -84,39 +83,221 @@ export interface OpenRouterRouting {
 	zdr?: boolean;
 }
 
+/** Router scheduling state, shared by the Router, Watchdog and health endpoint. */
+export interface RouterStatus {
+	turnCount: number;
+	lastTurnAt: number;
+	turnInFlightSince: number;
+	queueDepth: number;
+	draining: boolean;
+	dispatchQueue: number;
+	workers: number;
+	tasks: number;
+}
+
+/** One semantic (model-judged) admission policy. */
+export interface SemanticPolicyConfig {
+	name: string;
+	/** Natural-language rule the judge applies. */
+	prompt: string;
+	enabled?: boolean;
+}
+
+export interface TriggerPolicyConfig {
+	/** Per channel-kind admission policy. */
+	kindPolicy?: Partial<Record<ChannelKind, "ignore" | "candidate" | "respond_only">>;
+	/** When non-empty, only these sender ids are admitted. */
+	allowedUsers?: string[];
+	/** Channel kinds that require an @-mention to be admitted. */
+	requireMention?: ChannelKind[];
+}
+
+export interface SemanticFilterConfig {
+	enabled: boolean;
+	/** Model used for the slow path. Defaults to `fastModelId`. */
+	modelId?: string;
+	policies: SemanticPolicyConfig[];
+	/** Cap on judged events per minute (0 = unlimited). Protects the budget. */
+	maxJudgementsPerMinute?: number;
+}
+
+export interface WatchdogConfig {
+	enabled: boolean;
+	checkIntervalMs: number;
+	/** Heartbeat age after which a busy worker is considered stuck. */
+	stuckMs: number;
+	/** A Router turn running longer than this is considered hung. */
+	routerTurnTimeoutMs: number;
+	/** Model used by the watchdog session. Defaults to `fastModelId`. */
+	modelId?: string;
+	/** Cap on watchdog model turns per hour (0 = unlimited). */
+	maxTurnsPerHour?: number;
+}
+
+/**
+ * Hands: the execution environments this daemon can dispatch work to.
+ * `local` registers the daemon's own machine so a deployment works out of the
+ * box; remote hands dial out and are managed with `mir hands`.
+ */
+export interface HandsConfig {
+	enabled: boolean;
+	/** Endpoint listener bind address. */
+	host: string;
+	/** Endpoint listener port (0 = no listener; local hand only). */
+	port: number;
+	/** Unix socket the brains (Workers) use to reach the hub. */
+	socketPath: string;
+	tlsCert?: string;
+	tlsKey?: string;
+	heartbeatMs: number;
+	offlineGraceMs: number;
+	requestTimeoutMs: number;
+	/** Register the daemon's own machine as a hand. */
+	local: boolean;
+	localPolicy: HandPolicy;
+	localCapabilities: HandCapabilities;
+}
+
+export interface WorkerToolPolicy {
+	allow?: string[];
+	deny?: string[];
+}
+
+/**
+ * The brain's client API: where a display connects, and with what token.
+ *
+ * Off unless a socket is named. When it is on, the brain serves the door
+ * described in `src/api/protocol.ts` — threads, entries, say, stop, hands — and
+ * nothing else.
+ */
+export interface BrainApiConfig {
+	/** Unix socket path. Empty = the API is off. */
+	socketPath: string;
+	/** Shared bearer token. A brain with a socket and no token refuses to start. */
+	token: string;
+}
+
 export interface SuperAgentConfig {
 	modelId: string;
+	/** Fast-model override for fast-task Workers (e.g. nemotron-3.5-lightning). */
+	fastModelId: string;
 	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	sessionDir: string;
+	/** Coalescing window applied only when the Router is idle (never reset mid-batch). */
 	batchWindowMs: number;
+	/** Max triggers folded into one Router prompt (rest are handled next turn). */
+	maxBatchSize: number;
 	maxConcurrentWorkers: number;
+	/** Tasks beyond `maxConcurrentWorkers` wait here instead of being rejected. */
+	maxDispatchQueue: number;
 	providerRouting?: OpenRouterRouting;
 	/** Local Unix socket for the daemon↔worker control channel. */
 	socketPath: string;
+	/** The client API a display connects to. Off by default. */
+	api: BrainApiConfig;
 	/** HTTP webhook channel bind address. */
 	httpHost: string;
 	httpPort: number;
+	/** Shared token / HMAC for the HTTP channel (empty = unauthenticated). */
+	httpToken?: string;
+	httpHmacSecret?: string;
 	/** File queue channel directory. */
 	queueDir: string;
+	/** Queue channel polling fallback interval (fs.watch is unreliable on some FS). */
+	queuePollMs: number;
 	/** How long a finished, idle Worker waits for follow-up events before exiting. */
 	workerIdleExitMs: number;
+	/** Worker heartbeat interval, independent of turn progress. */
+	workerHeartbeatMs: number;
 	/** Cap on max_tokens per request (avoids OpenRouter reserving the whole context). */
 	maxTokens: number;
+	/** Directory where per-worker durable session files are written (pi-durable). */
+	workerSessionDir: string;
+	/** Directory for the daemon's durable state (mir.sqlite). */
+	stateDir: string;
+	/** Path to mcp.config.json for worker MCP server connections. */
+	mcpConfigPath: string;
+	/** Capabilities granted to Workers (tool surface is a policy decision). */
+	workerCapabilities: WorkerCapabilities;
+	/** Extra tool allow/deny policy applied to Workers on top of capabilities. */
+	workerToolPolicy: WorkerToolPolicy;
+	/** Trigger admission policies. */
+	triggerPolicies: TriggerPolicyConfig;
+	/** Model-judged admission (slow path). */
+	semanticFilter: SemanticFilterConfig;
+	/** Wall-clock cap on one Router turn before it is aborted. */
+	routerTurnTimeoutMs: number;
+	/** Backoff before a failed Router batch is retried. */
+	routerRetryBackoffMs: number;
+	/** Max attempts for one batch before its events are failed. */
+	maxTriggerAttempts: number;
+	/** Retention for terminal events in the trigger log. */
+	eventRetentionMs: number;
+	/** Max spilled objects kept for Chain of Recall. */
+	objectRetention: number;
+	/** Prometheus metrics endpoint (0 = disabled). */
+	metricsPort: number;
+	metricsHost: string;
+	watchdog: WatchdogConfig;
+	hands: HandsConfig;
 }
 
 export const DEFAULT_CONFIG: SuperAgentConfig = {
 	modelId: "nvidia/nemotron-3.5-super-vl:free",
+	fastModelId: "nvidia/nemotron-3.5-lightning:free",
 	thinkingLevel: "medium",
 	sessionDir: "",
 	batchWindowMs: 500,
+	maxBatchSize: 20,
 	maxConcurrentWorkers: 8,
+	maxDispatchQueue: 50,
 	providerRouting: undefined,
-	/** Example forced routing (opt in via env). */
-	// providerRouting: { only: ["deepinfra"], quantizations: ["fp8"], allow_fallbacks: false },
 	socketPath: "",
+	api: { socketPath: "", token: "" },
 	httpHost: "127.0.0.1",
 	httpPort: 4599,
+	httpToken: undefined,
+	httpHmacSecret: undefined,
 	queueDir: "",
+	queuePollMs: 2000,
 	workerIdleExitMs: 120_000,
+	workerHeartbeatMs: 15_000,
 	maxTokens: 8192,
+	workerSessionDir: "",
+	stateDir: "",
+	mcpConfigPath: "mcp.config.json",
+	workerCapabilities: { net: true, fs: "rw", mcp: true, codemode: true },
+	workerToolPolicy: {},
+	triggerPolicies: {},
+	semanticFilter: {
+		enabled: true,
+		policies: [],
+		maxJudgementsPerMinute: 120,
+	},
+	routerTurnTimeoutMs: 5 * 60_000,
+	routerRetryBackoffMs: 2000,
+	maxTriggerAttempts: 3,
+	eventRetentionMs: 7 * 24 * 60 * 60_000,
+	objectRetention: 5000,
+	metricsPort: 0,
+	metricsHost: "127.0.0.1",
+	watchdog: {
+		enabled: true,
+		checkIntervalMs: 30_000,
+		stuckMs: 5 * 60_000,
+		routerTurnTimeoutMs: 6 * 60_000,
+		maxTurnsPerHour: 30,
+	},
+	hands: {
+		enabled: true,
+		host: "127.0.0.1",
+		port: 4700,
+		socketPath: "",
+		heartbeatMs: 15_000,
+		offlineGraceMs: 90_000,
+		requestTimeoutMs: 10 * 60_000,
+		local: true,
+		localPolicy: { ...DEFAULT_HAND_POLICY },
+		localCapabilities: { ...DEFAULT_HAND_CAPABILITIES },
+	},
 };

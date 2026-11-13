@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ChannelEvent } from "./channels/types.ts";
 import type { McpCatalogEntry, McpServerReport } from "./mcp-catalog.ts";
+import type { McpConfig } from "./mcp.ts";
 import { log } from "./telemetry.ts";
 
 /** Bump when a message shape changes incompatibly. */
@@ -51,6 +52,8 @@ export type DaemonToWorker =
 			removed: string[];
 			changed: string[];
 			failed: string[];
+			/** The config to load, when the daemon holds it rather than a file on disk. */
+			config?: McpConfig;
 	  };
 
 export interface WorkerConnection {

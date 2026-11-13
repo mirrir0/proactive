@@ -16,7 +16,8 @@ import { ProcessManager } from "./process-manager.ts";
 import { MirStore } from "./store.ts";
 import crypto from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hashToken } from "./hands/protocol.ts";
 import { runEndpoint } from "./endpoint/main.ts";
 
@@ -132,6 +133,29 @@ async function main(): Promise<void> {
 			process.exit(1);
 		}
 		process.env.MIR_API_SOCKET = socket;
+		// A brain can outlive the host that started it: its socket is a file and its
+		// parent is gone. The host reaps a stale one through this file before it
+		// starts a new one, so a restart never leaves two brains of one member
+		// fighting over one socket — the old one keeps serving with the old env.
+		const pidFile = process.env.MIR_BRAIN_PID_FILE ?? "";
+		if (pidFile !== "") {
+			mkdirSync(dirname(pidFile), { recursive: true });
+			writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
+			const clear = (): void => {
+				try {
+					rmSync(pidFile, { force: true });
+				} catch {
+					// A pid file that cannot be removed is stale, not fatal.
+				}
+			};
+			process.on("exit", clear);
+			for (const signal of ["SIGINT", "SIGTERM"] as const) {
+				process.on(signal, () => {
+					clear();
+					process.exit(0);
+				});
+			}
+		}
 		await runDaemon();
 		return;
 	}

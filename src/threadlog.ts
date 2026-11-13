@@ -122,11 +122,31 @@ export class ThreadLog {
 	 * process that happened to call first.
 	 */
 	append(threadId: string, entry: NewThreadEntry): ThreadEntry {
+		// A thread does not say the same thing twice running. A model handed a
+		// conclusion it was told not to restate sometimes restates it, and a
+		// person then reads the same paragraph twice; the second adds nothing, so
+		// it is not written. Statuses between the two do not count, and only the
+		// same speaker repeating itself is a repeat — a person echoing it is not.
+		if (entry.kind === "text") {
+			const said = entry as { role: string; text: string };
+			const said_ = this.lastTextEntryOf(threadId, said.role);
+			// The words are already there, so that entry is what a caller publishes
+			// and nothing new is written.
+			if (said_ !== null && said_.text === said.text) return said_;
+		}
 		const at = entry.at ?? Date.now();
 		const seq = this.store.appendThreadEntry(threadId, at, entry.kind, payloadOf(entry));
 		const stored = { ...entry, seq, at } as ThreadEntry;
 		if (this.retainPerThread > 0) this.store.pruneThreadEntries(threadId, this.retainPerThread);
 		return stored;
+	}
+
+	/** The last thing `role` said in this thread, or null when it has said nothing. */
+	private lastTextEntryOf(threadId: string, role: string): Extract<ThreadEntry, { kind: "text" }> | null {
+		for (const entry of this.entries(threadId, 0, this.retainPerThread > 0 ? this.retainPerThread : 500).reverse()) {
+			if (entry.kind === "text" && entry.role === role) return entry;
+		}
+		return null;
 	}
 
 	/** The entries after `since` (exclusive), oldest first. `since: 0` is the whole log. */

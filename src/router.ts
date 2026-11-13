@@ -40,6 +40,7 @@ import type { WorkerSpawner } from "./process-manager.ts";
 import { createMcpQueryTool } from "./mcp-query.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 import type { McpCatalogEntry } from "./mcp-catalog.ts";
+import type { McpConfig } from "./mcp.ts";
 import type { MirStore } from "./store.ts";
 import { metrics, log } from "./telemetry.ts";
 import { redactSecrets } from "./security.ts";
@@ -80,6 +81,12 @@ export interface RouterDependencies {
 	sessionFactory?: SessionFactory;
 	/** Hands: where execution happens, and the socket a Worker uses to reach it. */
 	hands?: { socketPath: string; listHands: () => HandStatus[] };
+	/**
+	 * The MCP servers this member may reach, as the stack serves them. A Worker
+	 * spawned now is given the current answer; a change reaches the Workers
+	 * already running through the daemon's `mcp_changed` broadcast.
+	 */
+	mcpServers?: { current: () => McpConfig };
 	/**
 	 * The durable thread log. Optional so a test or a minimal deployment can run
 	 * the Router without one; every append is skipped when it is absent.
@@ -390,7 +397,7 @@ export class RouterLayer {
 				task_id: Type.String({ description: "Task id to stop." }),
 				reason: Type.Optional(Type.String({ description: "Why it was stopped (recorded on the task)." })),
 			}),
-			async execute(_id, params): Promise<AgentToolResult<any>> {
+			async execute(callId, params): Promise<AgentToolResult<any>> {
 				try {
 					const task = await router.stopTask(params.task_id, params.reason);
 					router.turn.dispatches.push(task.id);
@@ -811,6 +818,7 @@ export class RouterLayer {
 			"=== How to act ===",
 			`Your tools: ${channelTools} (reply on a channel), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), recall (read spilled context by id), mcp_query (informational).`,
 			"You do NOT have bash, read, write, edit, or any execution tool — never run tasks yourself.",
+			"Nor do you have the member's connected services (Linear, Context7, and whatever else they linked). A Worker does: it is handed them at dispatch. So \"I don't have that tool\" is not an answer — a request that needs one is a reason to dispatch, and the Worker reports what it found.",
 			"Decide for each item and ACT with tools — do not just describe:",
 			"- reply to a human → call the matching respond_<channel> tool, passing reply_to = the event id.",
 			"- a real task → call dispatch_task (pass endpoint=<hand id> only if the task needs a specific machine), then briefly tell the user it started.",
@@ -820,6 +828,26 @@ export class RouterLayer {
 			"Never write the reply as plain assistant text; it must go through a response tool.",
 			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
 		].join("\n");
+	}
+
+	/**
+	 * Whether `entry` is word for word the last thing said in this thread. Status
+	 * entries between the two do not count: a delivery writes its text and then
+	 * its state, and a restatement may land after either.
+	 */
+	private repeatsLast(threadLog: ThreadLog, threadId: string, entry: { role: string; text: string }): boolean {
+		try {
+			const all = threadLog.entries(threadId, 0);
+			for (let i = all.length - 1; i >= 0; i--) {
+				const seen = all[i];
+				// Only its own last words: a person echoing them is not a repeat.
+				if (seen === undefined || seen.kind !== "text" || seen.role !== entry.role) continue;
+				return seen.text === entry.text;
+			}
+			return false;
+		} catch {
+			return false;
+		}
 	}
 
 	private threadObjectId(threadId: string): string {
@@ -921,6 +949,7 @@ export class RouterLayer {
 				maxTokens: this.config.maxTokens,
 				sessionDir: this.config.workerSessionDir,
 				mcpConfigPath: this.config.mcpConfigPath,
+				...(this.deps.mcpServers === undefined ? {} : { mcpConfig: this.deps.mcpServers.current() }),
 				endpointId: task.endpointId,
 				handsSocketPath: this.deps.hands?.socketPath,
 				capabilities: this.config.workerCapabilities,

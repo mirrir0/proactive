@@ -22,6 +22,7 @@ import { parseCapabilities, authConfigured } from "./security.ts";
 import { normalizePolicy } from "./hands/policy.ts";
 import { DEFAULT_HAND_POLICY } from "./hands/protocol.ts";
 import { log } from "./telemetry.ts";
+import { McpServers } from "./mcp-servers.ts";
 import type { SemanticPolicyConfig, SuperAgentConfig, WatchdogConfig } from "./types.ts";
 
 function csvEnv(name: string): string[] | undefined {
@@ -72,6 +73,9 @@ export function semanticPoliciesFromEnv(env: NodeJS.ProcessEnv = process.env): S
 }
 
 export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentConfig {
+	// The stack this brain belongs to, when it has one. Absent, this brain runs on
+	// its own config file and reaches no connected service.
+	const stackUrl = env.MIR_STACK_URL ?? "";
 	const only = csvEnv("OPENROUTER_PROVIDER_ONLY");
 	const quantizations = csvEnv("OPENROUTER_QUANTIZATIONS");
 	const watchdog: WatchdogConfig = {
@@ -115,6 +119,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		),
 		stateDir: expandHome(env.MIR_STATE_DIR ?? join(homedir(), ".local", "share", "mir", "state")),
 		mcpConfigPath: env.MIR_MCP_CONFIG_PATH ?? "mcp.config.json",
+		// The stack says what this member may reach; without one, the file does.
+		...(stackUrl === "" ? {} : { mcpServers: new McpServers({ stackUrl, token: env.MIR_API_TOKEN ?? "", log }) }),
 		workerCapabilities: parseCapabilities(env.MIR_CAPABILITIES),
 		workerToolPolicy: {
 			allow: csvEnv("MIR_WORKER_TOOL_ALLOW"),

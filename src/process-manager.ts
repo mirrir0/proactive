@@ -16,6 +16,7 @@ import path from "node:path";
 import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerCapabilities } from "./security.ts";
 import type { WorkerToolPolicy } from "./types.ts";
+import type { McpConfig } from "./mcp.ts";
 import { log } from "./telemetry.ts";
 
 /** Everything a Worker process needs to run one Task. */
@@ -36,6 +37,8 @@ export interface WorkerSpec {
 	maxTokens: number;
 	sessionDir: string;
 	mcpConfigPath: string;
+	/** The servers this Worker should load, when the daemon knows better than the file. */
+	mcpConfig?: McpConfig;
 	/** Hand this task is pinned to (omitted = the hub picks one). */
 	endpointId?: string;
 	/** Unix socket for the hands hub (omitted = no hands; worker uses local tools). */

@@ -12,6 +12,7 @@
 import type { ChannelKind } from "./channels/types.ts";
 import type { WorkerCapabilities } from "./security.ts";
 import type { HandCapabilities, HandPolicy } from "./hands/protocol.ts";
+import type { McpServers } from "./mcp-servers.ts";
 import { DEFAULT_HAND_CAPABILITIES, DEFAULT_HAND_POLICY } from "./hands/protocol.ts";
 
 export type ModelProvider = "openrouter";
@@ -217,6 +218,11 @@ export interface SuperAgentConfig {
 	stateDir: string;
 	/** Path to mcp.config.json for worker MCP server connections. */
 	mcpConfigPath: string;
+	/**
+	 * This member's MCP servers as the stack serves them (`MIR_STACK_URL`). Unset
+	 * means the file is the source, which is how a brain run by hand behaves.
+	 */
+	mcpServers?: McpServers;
 	/** Capabilities granted to Workers (tool surface is a policy decision). */
 	workerCapabilities: WorkerCapabilities;
 	/** Extra tool allow/deny policy applied to Workers on top of capabilities. */

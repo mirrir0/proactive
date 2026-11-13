@@ -13,11 +13,12 @@
 
 import { McpClient, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
-import { Type, type TSchema } from "typebox";
+import type { TSchema } from "typebox";
 import { defineTool, type ToolDefinition, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { type CodemodeTool } from "@earendil-works/pi-codemode";
 import { getOAuthManager } from "./mcp-oauth.ts";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveSecretRefs, secrets } from "./security.ts";
 import {
 	buildCatalogEntry,
@@ -58,9 +59,40 @@ export type { McpCatalogEntry, McpDiff, McpServerReport } from "./mcp-catalog.ts
  * Manager for MCP client connections. One instance per Worker process.
  * Loads mcp.config.json, connects to servers, and exposes their tools.
  */
+export interface McpManagerOptions {
+	/**
+	 * Where a server's tool list is remembered between Workers. A Worker is a
+	 * fresh process, so without this every Worker pays a connect and a
+	 * `tools/list` per server before it can do anything — seconds, when a server
+	 * lists eighty tools over the network. The list is the same list.
+	 */
+	readonly cacheDir?: string;
+}
+
+/** What is remembered of a server's tools: enough to offer them, nothing that expires badly. */
+interface CachedTools {
+	readonly tools: unknown[];
+	readonly at: number;
+}
+
 export class McpManager {
+	private readonly options: McpManagerOptions;
 	private servers = new Map<string, ConnectedServer>();
+	/**
+	 * Every server's tools, connected or remembered. This is what the model is
+	 * offered: a server whose list is remembered has its tools from the first
+	 * millisecond, and is dialled when one of them is called.
+	 */
+	private tools = new Map<string, any[]>();
+	/** Servers known from the config but not dialled yet. */
+	private pending = new Map<string, McpServerConfig>();
+	/** One dial per server, however many callers ask at once. */
+	private connecting = new Map<string, Promise<void>>();
 	private started = false;
+
+	constructor(options: McpManagerOptions = {}) {
+		this.options = options;
+	}
 	/** Last config this manager applied (baseline for diffing). */
 	private lastConfig: McpConfig = { mcpServers: {} };
 	/** Per-server health: ok=false when a connection attempt fails. */
@@ -86,6 +118,14 @@ export class McpManager {
 		this.lastConfig = snapshotConfig(config);
 
 		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+			const remembered = this.remembered(serverConfig);
+			if (remembered !== null) {
+				// The model can call these now; the connection is made when it does,
+				// or by the warm pass below, whichever comes first.
+				this.tools.set(name, remembered);
+				this.pending.set(name, serverConfig);
+				continue;
+			}
 			try {
 				await this.connectServer(name, serverConfig);
 			} catch (err) {
@@ -93,7 +133,79 @@ export class McpManager {
 				this.serverStatus.set(name, { ok: false, error: (err as Error).message });
 			}
 		}
+		// Dial what was remembered, without holding the Worker's boot on it: the
+		// tools are already offered, and a server that is slow to answer must not
+		// delay the first turn.
+		void this.warm();
 	}
+
+	/** Connect the servers whose tools were remembered, one at a time, in the background. */
+	private async warm(): Promise<void> {
+		for (const name of [...this.pending.keys()]) {
+			await this.ensureConnected(name).catch(() => {});
+		}
+	}
+
+	/**
+	 * A server's tools as they were last listed, when the config still names the
+	 * same target. Keyed by URL (a rename keeps the list); a server whose command
+	 * or URL changed is a different server and is dialled afresh.
+	 */
+	private remembered(config: McpServerConfig): any[] | null {
+		if (config.url === undefined) return null;
+		const cache = this.readCache();
+		const entry = cache[config.url];
+		return entry !== undefined && Array.isArray(entry.tools) && entry.tools.length > 0 ? entry.tools : null;
+	}
+
+	private cachePath(): string | null {
+		return this.options.cacheDir === undefined ? null : join(this.options.cacheDir, "mcp-tools.json");
+	}
+
+	private readCache(): Record<string, CachedTools> {
+		const path = this.cachePath();
+		if (path === null || !existsSync(path)) return {};
+		try {
+			return JSON.parse(readFileSync(path, "utf8")) as Record<string, CachedTools>;
+		} catch {
+			return {};
+		}
+	}
+
+	private writeCache(url: string, tools: unknown[]): void {
+		const path = this.cachePath();
+		if (path === null) return;
+		try {
+			const cache = this.readCache();
+			cache[url] = { tools, at: Date.now() };
+			mkdirSync(this.options.cacheDir!, { recursive: true });
+			// Written whole and renamed: several Workers of one brain share the file.
+			const temp = `${path}.${process.pid}.tmp`;
+			writeFileSync(temp, JSON.stringify(cache));
+			renameSync(temp, path);
+		} catch {
+			// A cache that cannot be written costs a slow boot, not a broken one.
+		}
+	}
+
+	/** The connection for `name`, dialled now if it was remembered. */
+	private async ensureConnected(name: string): Promise<void> {
+		if (this.servers.has(name)) return;
+		const config = this.pending.get(name);
+		if (config === undefined) throw new Error(`MCP server "${name}" is not configured`);
+		const inFlight = this.connecting.get(name);
+		if (inFlight !== undefined) return await inFlight;
+		const dialling = this.connectServer(name, config)
+			.then(() => {
+				this.pending.delete(name);
+			})
+			.finally(() => {
+				this.connecting.delete(name);
+			});
+		this.connecting.set(name, dialling);
+		return await dialling;
+	}
+
 
 	/**
 	 * Diff `config` against the last applied config, disconnect removed/changed
@@ -140,14 +252,16 @@ export class McpManager {
 			this.servers.delete(name);
 			console.error(`[mcp] disconnected from server "${name}"`);
 		}
+		this.tools.delete(name);
+		this.pending.delete(name);
 		this.serverStatus.delete(name);
 	}
 
 	/** Flat catalog of every tool on every connected server (for mcp_query / daemon cache). */
 	getToolCatalog(): McpCatalogEntry[] {
 		const entries: McpCatalogEntry[] = [];
-		for (const [name, server] of this.servers) {
-			for (const mcpTool of server.tools) {
+		for (const [name, tools] of this.tools) {
+			for (const mcpTool of tools) {
 				entries.push(buildCatalogEntry(name, mcpTool));
 			}
 		}
@@ -158,17 +272,21 @@ export class McpManager {
 	getServerReports(): McpServerReport[] {
 		const names = new Set<string>([
 			...Object.keys(this.lastConfig.mcpServers),
+			...this.tools.keys(),
 			...this.servers.keys(),
 		]);
 		const reports: McpServerReport[] = [];
 		for (const name of [...names].sort()) {
 			const connected = this.servers.get(name);
 			const status = this.serverStatus.get(name);
+			// A remembered server is not dialled yet, and that is not a fault: its
+			// tools are offered and the connection is made on the first call.
+			const remembered = this.pending.has(name);
 			reports.push({
 				name,
-				ok: connected != null,
-				error: connected ? undefined : status?.error ?? "not connected",
-				toolCount: connected?.tools.length ?? 0,
+				ok: connected != null || remembered,
+				error: connected || remembered ? undefined : status?.error ?? "not connected",
+				toolCount: this.tools.get(name)?.length ?? 0,
 			});
 		}
 		return reports;
@@ -185,6 +303,9 @@ export class McpManager {
 			console.error(`[mcp] disconnected from server "${name}"`);
 		}
 		this.servers.clear();
+		this.tools.clear();
+		this.pending.clear();
+		this.connecting.clear();
 		this.serverStatus.clear();
 		this.started = false;
 	}
@@ -192,8 +313,8 @@ export class McpManager {
 	/** Get all tool definitions from all connected servers, converted for pi-coding-agent. */
 	getToolDefinitions(): ToolDefinition[] {
 		const defs: ToolDefinition[] = [];
-		for (const [name, server] of this.servers) {
-			for (const mcpTool of server.tools) {
+		for (const [name, tools] of this.tools) {
+			for (const mcpTool of tools) {
 				defs.push(mcpToolToToolDefinition(name, mcpTool, this));
 			}
 		}
@@ -204,8 +325,8 @@ export class McpManager {
 	getCodemodeTools(): CodemodeTool[] {
 		const mcp = this;
 		const tools: CodemodeTool[] = [];
-		for (const [name, server] of this.servers) {
-			for (const mcpTool of server.tools) {
+		for (const [name, offered] of this.tools) {
+			for (const mcpTool of offered) {
 				tools.push({
 					name: `mcp__${name}__${mcpTool.name}`,
 					description: mcpTool.description ?? `Call ${mcpTool.name} on MCP server ${name}`,
@@ -233,7 +354,7 @@ export class McpManager {
 		let serverName: string | undefined;
 		let mcpToolName: string | undefined;
 
-		for (const [name] of this.servers) {
+		for (const name of this.tools.keys()) {
 			const prefix = `mcp__${name}__`;
 			if (toolName.startsWith(prefix)) {
 				serverName = name;
@@ -246,6 +367,17 @@ export class McpManager {
 			return { content: [{ type: "text", text: `MCP server not found for tool: ${toolName}` }], details: {}, isError: true };
 		}
 
+		// A server whose list was remembered is dialled here, on the call that
+		// needs it, rather than before the Worker could do anything at all.
+		try {
+			await this.ensureConnected(serverName);
+		} catch (err) {
+			return {
+				content: [{ type: "text", text: `MCP server "${serverName}" could not be reached: ${(err as Error).message}` }],
+				details: { server: serverName },
+				isError: true,
+			};
+		}
 		const server = this.servers.get(serverName);
 		if (!server) {
 			return { content: [{ type: "text", text: `MCP server "${serverName}" not connected` }], details: {}, isError: true };
@@ -278,18 +410,32 @@ export class McpManager {
 		if (config.url) {
 			const serverUrl = config.url;
 			const oauth = getOAuthManager();
-			const authProvider = oauth.getAuthProvider(serverUrl);
+			// A server the config already carries a credential for is not one we run
+			// an OAuth flow against: the header is the whole of the authentication,
+			// and asking for a protected resource would discover the wrong address.
+			const authProvider =
+				config.headers?.authorization === undefined ? oauth.getAuthProvider(serverUrl) : undefined;
 
 			// Try connecting; if the server requires OAuth, we'll get a 401 on listTools
 			// and need to run the interactive flow.
 			let connected = false;
 			for (let attempt = 0; attempt < 2; attempt++) {
 				try {
-					transport = new StreamableHttpTransport({ url: serverUrl, authProvider });
+					transport = new StreamableHttpTransport({
+						url: serverUrl,
+						authProvider,
+						// A server reached through a proxy that already knows who is calling
+						// is authenticated by this header, not by an OAuth flow of its own:
+						// without it, the client sees the 401, tries to discover a protected
+						// resource and fails on an address that was never the target.
+						...(config.headers === undefined ? {} : { headers: config.headers }),
+					});
 					client = new McpClient({ name, version: "1.0.0" });
 					await client.connect(transport);
 					const tools = await client.listTools();
 					this.servers.set(name, { name, client, tools, transport });
+					this.tools.set(name, tools);
+					if (config.url !== undefined) this.writeCache(config.url, tools);
 					this.serverStatus.set(name, { ok: true });
 					console.error(`[mcp] connected to server "${name}" with ${tools.length} tools`);
 					connected = true;
@@ -351,8 +497,7 @@ function snapshotConfig(config: McpConfig): McpConfig {
 
 /** Convert an MCP Tool to a pi-coding-agent ToolDefinition. */
 function mcpToolToToolDefinition(serverName: string, mcpTool: any, mcp: McpManager): ToolDefinition {
-	const inputSchema = mcpTool.inputSchema ?? { type: "object", properties: {}, additionalProperties: false };
-	const params = typeBoxFromJsonSchema(inputSchema);
+	const params = parametersOf(mcpTool.inputSchema);
 
 	const fullToolName = `mcp__${serverName}__${mcpTool.name}`;
 
@@ -369,38 +514,26 @@ function mcpToolToToolDefinition(serverName: string, mcpTool: any, mcp: McpManag
 	});
 }
 
-/** Convert a JSON Schema object to a TypeBox schema. */
-function typeBoxFromJsonSchema(schema: any): TSchema {
-	const type = schema.type;
-	const properties = schema.properties ?? {};
-	const required = schema.required ?? [];
-
-	if (type === "object") {
-		const props: Record<string, any> = {};
-		for (const [key, value] of Object.entries(properties)) {
-			props[key] = typeBoxFromJsonSchema(value);
-		}
-		return Type.Object(props, {
-			description: schema.description,
-			...(required.length ? { required } : {}),
-			additionalProperties: schema.additionalProperties ?? false,
-		});
-	}
-	if (type === "string") {
-		return Type.String({ description: schema.description });
-	}
-	if (type === "number") {
-		return Type.Number({ description: schema.description });
-	}
-	if (type === "integer") {
-		return Type.Integer({ description: schema.description });
-	}
-	if (type === "boolean") {
-		return Type.Boolean({ description: schema.description });
-	}
-	if (type === "array") {
-		const items = schema.items ? typeBoxFromJsonSchema(schema.items) : Type.Any();
-		return Type.Array(items, { description: schema.description });
-	}
-	return Type.Any({ description: schema.description });
+/**
+ * A tool's parameters, as the server declared them.
+ *
+ * MCP `inputSchema` is JSON Schema already, and a TypeBox schema *is* JSON
+ * Schema, so it is passed through rather than rebuilt. Rebuilding lost what the
+ * server said: every property came back required (TypeBox marks all of them so
+ * unless each is wrapped), and `enum`, `minLength`, `$ref` and friends were
+ * dropped. A model reading that believed it had to supply every optional filter
+ * on every call — Linear's `list_issues` declares sixteen and needs none — and
+ * then reported the tool as unusable rather than calling it.
+ *
+ * A server that declares no object schema gets the permissive one.
+ */
+function parametersOf(inputSchema: unknown): TSchema {
+	const schema = inputSchema as { readonly type?: unknown; readonly properties?: unknown } | null | undefined;
+	const usable =
+		schema !== null &&
+		schema !== undefined &&
+		typeof schema === "object" &&
+		(schema.type === "object" || schema.properties !== undefined);
+	return (usable ? schema : { type: "object", properties: {}, additionalProperties: false }) as TSchema;
 }
+

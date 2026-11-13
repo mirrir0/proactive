@@ -26,6 +26,7 @@ import { Watchdog } from "./watchdog.ts";
 import { ControlServer } from "./ipc.ts";
 import { ProcessManager, type WorkerSpawner } from "./process-manager.ts";
 import { McpConfigWatcher } from "./mcp-watcher.ts";
+import type { McpConfig } from "./mcp.ts";
 import {
 	formatMcpChangedText,
 	type McpCatalogEntry,
@@ -72,6 +73,8 @@ export class SuperAgent {
 	private watchdog: Watchdog | null = null;
 	private control: ControlServer | null = null;
 	private mcpWatcher: McpConfigWatcher | null = null;
+	/** Unsubscribes this brain from the stack's MCP answers, when that is the source. */
+	private stopMcpServers: (() => void) | null = null;
 	private metricsServer: MetricsServerHandle | null = null;
 	private handsHub: HandsHub | null = null;
 	private handsServer: HandsServer | null = null;
@@ -292,11 +295,23 @@ export class SuperAgent {
 			await this.apiServer.start();
 		}
 
-		// Watch the MCP config; on change, signal connected workers to hot-reload.
-		this.mcpWatcher = new McpConfigWatcher(this.config.mcpConfigPath, (diff) =>
-			this.handleMcpConfigChanged(diff),
-		);
-		this.mcpWatcher.start();
+		// MCP changes, from whichever source this brain has. With a stack, the
+		// member's connected services are fetched and polled (mcp-servers.ts) and
+		// the file is not read at all; without one, the file watcher is the source.
+		if (this.config.mcpServers !== undefined) {
+			// Ask before the Router exists: the first Worker spawned is given this
+			// answer, and a Worker that booted with nothing would keep nothing.
+			await this.config.mcpServers.refresh();
+			this.stopMcpServers = this.config.mcpServers.onChange((diff, config) =>
+				this.handleMcpConfigChanged(diff, config),
+			);
+			this.config.mcpServers.start();
+		} else {
+			this.mcpWatcher = new McpConfigWatcher(this.config.mcpConfigPath, (diff) =>
+				this.handleMcpConfigChanged(diff),
+			);
+			this.mcpWatcher.start();
+		}
 
 		// The product's channel comes before the Router, because the Router builds
 		// its `respond_anomalous` tool from it. Its delivery writes into the thread
@@ -343,6 +358,7 @@ export class SuperAgent {
 				isConnected: (workerId) => this.control?.isConnected(workerId) ?? false,
 			},
 			sendEventToWorker: (workerId, event) => this.control?.sendEvent(workerId, event) ?? false,
+			mcpServers: this.config.mcpServers,
 			hands: this.handsHub
 				? {
 						socketPath: this.handsSocketPath(),
@@ -442,7 +458,7 @@ export class SuperAgent {
 	}
 
 	/** Watcher callback: prune stale cache entries and signal all workers to hot-reload. */
-	private handleMcpConfigChanged(diff: McpDiff): void {
+	private handleMcpConfigChanged(diff: McpDiff, config?: McpConfig): void {
 		for (const server of new Set([...diff.removed, ...diff.changed, ...diff.failed])) {
 			for (const [name, entry] of this.mcpCatalog) {
 				if (entry.server === server) this.mcpCatalog.delete(name);
@@ -458,6 +474,7 @@ export class SuperAgent {
 				removed: diff.removed,
 				changed: diff.changed,
 				failed: diff.failed,
+				...(config === undefined ? {} : { config }),
 			}) ?? 0;
 		log.info("mcp config change broadcast", {
 			workers: sent,
@@ -717,6 +734,9 @@ export class SuperAgent {
 		this.localSandbox = null;
 		this.mcpWatcher?.stop();
 		this.mcpWatcher = null;
+		this.stopMcpServers?.();
+		this.stopMcpServers = null;
+		this.config.mcpServers?.stop();
 		await this.router?.dispose();
 		await this.control?.stop();
 		await this.processManager.disconnect();

@@ -23,7 +23,7 @@ import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerSpec } from "./process-manager.ts";
 import { WorkerRuntime, createWorkerControlTools } from "./worker.ts";
 import { ControlClient } from "./ipc.ts";
-import { McpManager } from "./mcp.ts";
+import { McpManager, type McpConfig } from "./mcp.ts";
 import { createCodemodeTool } from "./codemode.ts";
 import { HandsClient } from "./hands/client.ts";
 import { createHandTools } from "./hands/tools.ts";
@@ -105,8 +105,9 @@ async function main(): Promise<void> {
 	// --- MCP + codemode setup (both gated by capabilities) ---
 	const mcp = new McpManager();
 	if (capabilities.mcp) {
-		const mcpConfig = McpManager.loadConfig(spec.mcpConfigPath);
-		await mcp.start(mcpConfig);
+		// The daemon holds the config when the stack is the source (this member's
+		// connected services); the file is the fallback for a brain run by hand.
+		await mcp.start(spec.mcpConfig ?? McpManager.loadConfig(spec.mcpConfigPath));
 	}
 
 	// Live reference so the codemode sandbox can rebuild its globals after a hot-reload.
@@ -180,7 +181,7 @@ async function main(): Promise<void> {
 					"- exec({ argv }) runs a command there (argv form, no shell unless granted)",
 					"- read_file / write_file / list_dir touch its filesystem, confined to its roots",
 					"- git({ args }) runs git there, using the machine's own credentials",
-					"- list_hands() shows what is reachable",
+					"- list_hands() shows the hand you run on, and nothing else",
 					`You are pinned to hand: ${spec.endpointId ?? "(the hub picks the least-loaded capable one)"}.`,
 					"Your local codemode has no filesystem access; use the hand tools for anything on disk.",
 				].join("\n")
@@ -217,10 +218,10 @@ async function main(): Promise<void> {
 	// Syncs are serialized: a second mcp_changed arriving mid-sync waits its turn.
 	let syncQueue: Promise<void> = Promise.resolve();
 
-	const handleMcpChanged = async (): Promise<void> => {
-		let fresh;
+	const handleMcpChanged = async (pushed?: McpConfig): Promise<void> => {
+		let fresh: McpConfig;
 		try {
-			fresh = McpManager.loadConfig(spec.mcpConfigPath);
+			fresh = pushed ?? McpManager.loadConfig(spec.mcpConfigPath);
 		} catch (err) {
 			// The daemon's watcher already validated the file, but the file can
 			// change again in between — keep the old config rather than tear down.
@@ -259,7 +260,7 @@ async function main(): Promise<void> {
 	client.onSystem((msg) => {
 		armIdle();
 		if (msg.kind !== "mcp_changed" || !capabilities.mcp) return;
-		syncQueue = syncQueue.then(handleMcpChanged).catch((err) => {
+		syncQueue = syncQueue.then(() => handleMcpChanged(msg.config)).catch((err) => {
 			log.error("MCP hot-reload failed", { error: (err as Error).message });
 		});
 	});

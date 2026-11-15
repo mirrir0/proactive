@@ -210,6 +210,12 @@ channel) with `ts`, `level`, `msg` and fields, secrets redacted.
 batch size, queue depth, task duration p50/p95, replies, retries, watchdog
 findings. Exposed as Prometheus text on `MIR_METRICS_PORT`.
 
+**Trace** — one chat read end to end out of the durable state, read-only:
+`npm run trace` (docs/trace.md). The log is the flow; a trace is the flow in the
+order it happened, with the waiting and the pathologies counted. It is the
+instrument a change to the Router, a Worker's brief, or the hand a task runs on
+is argued from — so it reports facts with a code and never a verdict.
+
 ## MCP + Codemode (Worker tools)
 
 **MCP config** — `mcp.config.json` at the project root (configurable via

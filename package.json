@@ -20,7 +20,8 @@
 		"test": "node --import tsx --test test/*.test.ts",
 		"test:watch": "node --import tsx --test --watch test/*.test.ts",
 		"smoke:hands": "tsx scripts/smoke-hands.ts",
-		"smoke:brain": "tsx scripts/smoke-brain.ts"
+		"smoke:brain": "tsx scripts/smoke-brain.ts",
+		"trace": "tsx scripts/trace.ts"
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.82",

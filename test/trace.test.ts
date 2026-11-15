@@ -343,6 +343,24 @@ test("a chat with nothing wrong says nothing", () => {
 	);
 });
 
+test("a task that failed carries what went wrong, not only that it did", () => {
+	const input = fixture();
+	const trace = assemble({
+		...input,
+		tasks: input.tasks.map((held) => ({
+			...held,
+			status: "failed",
+			error: "daemon restarted while this task was running",
+		})),
+	});
+	const dispatch = trace.turns[0]?.dispatches[0];
+	assert.equal(dispatch?.status, "failed");
+	assert.equal(dispatch?.error, "daemon restarted while this task was running", "the words, so a cause can be read");
+	const failed = trace.findings.find((finding) => finding.code === "failed-task");
+	assert.ok(failed !== undefined);
+	assert.equal(failed?.severity, "high");
+});
+
 test("a duration is written the way a person says it", () => {
 	assert.equal(formatSpan(5_136), "5s");
 	assert.equal(formatSpan(185_000), "3m 5s");
@@ -403,6 +421,11 @@ test("the reader opens a brain's state, and finds a chat's thread by its chat", 
 			);
 			assert.equal(reader.entries(THREAD)[0]?.payload.text, "hi", "a payload is parsed, not handed out as text");
 			assert.equal(reader.tasks()[0]?.reportThreadId, THREAD);
+			const found = reader.search("hi");
+			assert.equal(found.length, 1, "a phrase from a transcript finds the entry that said it");
+			assert.equal(found[0]?.threadId, THREAD, "and the thread it belongs to, which is how a chat is found");
+			assert.match(found[0]?.snippet ?? "", /hi/, "with the words around it, to tell the right chat from a near one");
+			assert.deepEqual(reader.search("nothing says this"), [], "and nothing for a phrase nobody said");
 			assert.equal(reader.busyBetween(0, 3_000, [THREAD]).entries, 0, "this thread is not other work");
 			assert.equal(reader.busyBetween(0, 3_000, []).entries, 2, "with nothing excluded, it is");
 		} finally {

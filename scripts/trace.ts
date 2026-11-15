@@ -29,7 +29,7 @@ import {
 	type StateReader,
 	type ThreadRow,
 } from "./trace/read.ts";
-import { renderChatList, renderTrace, type ChatRow } from "./trace/render.ts";
+import { clock, day, renderChatList, renderTrace, type ChatRow } from "./trace/render.ts";
 
 interface Args {
 	readonly chat?: string | undefined;
@@ -40,6 +40,8 @@ interface Args {
 	readonly json: boolean;
 	readonly full: boolean;
 	readonly latest: boolean;
+	/** A phrase from a transcript, to find the chat it came from. */
+	readonly find?: string | undefined;
 	readonly help: boolean;
 	readonly color: boolean;
 }
@@ -60,6 +62,7 @@ function parseArgs(argv: readonly string[]): Args {
 		json: has("json"),
 		full: has("full"),
 		latest: has("latest"),
+		find: value("find"),
 		help: has("help") || has("h"),
 		color: !has("no-color") && process.stdout.isTTY === true,
 	};
@@ -72,6 +75,7 @@ const USAGE = `trace — one chat's flow through the brain, read-only
   npm run trace -- --chat <chatId>    one chat
   npm run trace -- --thread <id>      one thread (a chat's, or a worker's)
   npm run trace -- --task <taskId>    one dispatch's worker, in full
+  npm run trace -- --find "<phrase>"  which chat said this (from a pasted transcript)
 
   --state <path>   the database, a member's home, or the brains root
   --turns <n>      only the last n turns
@@ -121,6 +125,51 @@ function main(): number {
 	const reader = openState(statePath);
 	try {
 		const where = describeStatePath(statePath);
+
+		if (args.find !== undefined) {
+			const found = reader.search(args.find);
+			if (found.length === 0) {
+				process.stdout.write(`nothing in this brain contains “${args.find}”\n`);
+				return 0;
+			}
+			const threads = reader.threads();
+			const chats = new Map<string, { thread: ThreadRow; hits: typeof found }>();
+			for (const hit of found) {
+				const thread = threads.find((candidate) => candidate.id === hit.threadId);
+				if (thread === undefined) continue;
+				const held = chats.get(thread.id) ?? { thread, hits: [] };
+				held.hits.push(hit);
+				chats.set(thread.id, held);
+			}
+			if (args.json) {
+				process.stdout.write(
+					`${JSON.stringify(
+						{
+							state: statePath,
+							matches: [...chats.values()].map((held) => ({
+								chatId: held.thread.chatId ?? null,
+								threadId: held.thread.id,
+								name: held.thread.name,
+								hits: held.hits,
+							})),
+						},
+						null,
+						2,
+					)}\n`,
+				);
+				return 0;
+			}
+			for (const held of chats.values()) {
+				process.stdout.write(
+					`${held.thread.chatId ?? "(no chat)"}  ${held.thread.name.slice(0, 40)}  ${held.hits.length} match(es)\n`,
+				);
+				for (const hit of held.hits.slice(0, 3)) {
+					process.stdout.write(`    ${day(hit.at)} ${clock(hit.at)} ${hit.kind}: ${hit.snippet}\n`);
+				}
+			}
+			process.stdout.write(`\ntrace one: --chat <id>\n`);
+			return 0;
+		}
 
 		if (args.chat === undefined && args.thread === undefined && args.task === undefined && !args.latest) {
 			const rows: ChatRow[] = chatThreads(reader).map((thread) => {

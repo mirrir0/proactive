@@ -36,13 +36,13 @@ const CODES = {
 const paint = (text: string, code: keyof typeof CODES, color: boolean): string =>
 	color ? `\u001b[${CODES[code]}m${text}\u001b[0m` : text;
 
-const clock = (at: number): string => {
+export const clock = (at: number): string => {
 	const date = new Date(at);
 	const pad = (value: number): string => String(value).padStart(2, "0");
 	return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 };
 
-const day = (at: number): string => {
+export const day = (at: number): string => {
 	const date = new Date(at);
 	const pad = (value: number): string => String(value).padStart(2, "0");
 	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
@@ -130,6 +130,9 @@ function renderDispatch(dispatch: DispatchTrace, turn: TurnTrace, options: Rende
 		if (dispatch.instructions !== undefined) {
 			lines.push(`${indent}         ${paint("instructions", "dim", options.color)} ${clip(dispatch.instructions, 1600)}`);
 		}
+	}
+	if (dispatch.error !== undefined && dispatch.error !== "") {
+		lines.push(`${indent}         ${paint("failed:", "red", options.color)} ${clip(dispatch.error, options.full ? 2000 : 160)}`);
 	}
 	lines.push(...renderWorker(dispatch, options, `${indent}  `));
 	for (const child of dispatch.children) {

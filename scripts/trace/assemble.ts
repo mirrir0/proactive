@@ -50,6 +50,8 @@ export interface DispatchTrace {
 	readonly children: readonly DispatchTrace[];
 	/** Whether this task's conclusion reached the conversation that dispatched it. */
 	readonly delivered: boolean;
+	/** What went wrong, when the task failed: the words, not only the status. */
+	readonly error: string | undefined;
 }
 
 /** One turn: the person's words and everything the brain did about them. */
@@ -295,6 +297,7 @@ export function assemble(input: AssembleInput): Trace {
 			worker,
 			children: (childrenOf.get(task.id) ?? []).map((child) => dispatchFor(child, depth + 1)),
 			delivered,
+			error: task.error,
 		};
 	};
 

@@ -62,6 +62,16 @@ export interface BusyWindow {
 	readonly threads: readonly { id: string; name: string; entries: number }[];
 }
 
+/** A thread entry that contains a phrase, for finding the chat it belongs to. */
+export interface FoundEntry {
+	readonly threadId: string;
+	readonly seq: number;
+	readonly at: number;
+	readonly kind: string;
+	/** The text around the match, so a reader can tell the right chat from a near one. */
+	readonly snippet: string;
+}
+
 export interface StateReader {
 	readonly path: string;
 	threads(): ThreadRow[];
@@ -72,6 +82,14 @@ export interface StateReader {
 	tasks(): TaskRow[];
 	/** Entries on other threads between two instants: what the brain was busy with. */
 	busyBetween(from: number, to: number, exclude: readonly string[]): BusyWindow;
+	/**
+	 * Entries whose text contains a phrase, newest first.
+	 *
+	 * The way in from a transcript: someone pastes what they saw and no id, and the
+	 * words they saw are in the log. Matching is on the stored payload, so it finds
+	 * what the person said and what they were told, not a summary of either.
+	 */
+	search(phrase: string, limit?: number): FoundEntry[];
 	close(): void;
 }
 
@@ -177,6 +195,28 @@ export function openState(path: string): StateReader {
 				)
 				.all()
 				.map((row) => toTask(row as Record<string, unknown>));
+		},
+		search(phrase, limit = 40) {
+			if (phrase.trim() === "") return [];
+			const rows = db
+				.prepare(
+					`SELECT thread_id, seq, at, kind, payload FROM thread_entries
+					 WHERE payload LIKE ? ORDER BY at DESC LIMIT ?`,
+				)
+				.all(`%${phrase}%`, limit) as Record<string, unknown>[];
+			return rows.map((row) => {
+				const entry = toEntry(row);
+				const said = typeof entry.payload.text === "string" ? entry.payload.text : JSON.stringify(entry.payload);
+				const at = said.toLowerCase().indexOf(phrase.toLowerCase());
+				const from = Math.max(0, at - 60);
+				return {
+					threadId: entry.threadId,
+					seq: entry.seq,
+					at: entry.at,
+					kind: entry.kind,
+					snippet: said.slice(from, from + 160).replace(/\s+/g, " "),
+				};
+			});
 		},
 		busyBetween(from, to, exclude) {
 			const rows = db

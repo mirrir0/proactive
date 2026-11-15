@@ -97,7 +97,10 @@ export interface RouterDependencies {
 
 export interface TaskInput {
 	title: string;
+	/** What the task is for: a line for the person, shown on the card and in the thread. */
 	description: string;
+	/** The brief the Worker is told, when it is more than the description. */
+	instructions?: string;
 	threadId?: string;
 	channelId?: string;
 	replyTo?: string;
@@ -155,6 +158,14 @@ interface TurnState {
 	startedAt: number;
 	replies: TurnReply[];
 	dispatches: string[];
+	/** Stops asked for during this turn (the `stop_task` tool counts one). */
+	stops: number;
+	/**
+	 * Threads the person stopped while this turn was running. A turn mid-flight
+	 * can still dispatch a moment later; a stop is "do not do this", not only
+	 * "end the turn".
+	 */
+	stoppedThreads: Set<string>;
 	captured: string;
 	/**
 	 * The thread this turn is answering, when its batch is about one.
@@ -167,7 +178,15 @@ interface TurnState {
 }
 
 function emptyTurn(originThreadId?: string): TurnState {
-	return { startedAt: Date.now(), replies: [], dispatches: [], captured: "", originThreadId };
+	return {
+		startedAt: Date.now(),
+		replies: [],
+		dispatches: [],
+		stops: 0,
+		stoppedThreads: new Set<string>(),
+		captured: "",
+		originThreadId,
+	};
 }
 
 /**
@@ -183,6 +202,42 @@ function isTrivial(description: string): boolean {
 		description.length <= 240 &&
 		!/\b(refactor|migrat|audit|review|debug|implement|investigat|design|rewrite|test suite)\b/i.test(description)
 	);
+}
+
+/**
+ * Whether a chat is still called what the stack mints it as.
+ *
+ * A new chat's row says "Chat" and its thread is named after its id, so a member's
+ * list is a column of identical rows they cannot tell apart. The agent is told to
+ * name its chat and does; this is what the Router checks, so "named" is a fact
+ * about the chat rather than a hope about the model.
+ */
+function isPlaceholderChatName(name: string | undefined, chatId: string): boolean {
+	const trimmed = (name ?? "").trim();
+	return trimmed === "" || trimmed === chatId || trimmed.toLowerCase() === "chat";
+}
+
+/** How long a derived name may be: a title someone can scan in a list, not a sentence. */
+const DERIVED_TITLE_MAX = 48;
+
+/**
+ * A chat's name taken from what the turn did, when the agent left the placeholder.
+ *
+ * Not a summary: the first words of a title the agent already wrote for the work
+ * ("List active Linear projects"), or, failing that, the person's own opening
+ * words. Cut at a word boundary, because a title broken mid-word reads as a bug.
+ */
+function derivedChatTitle(source: string): string | undefined {
+	const flat = source.replace(/\s+/g, " ").trim();
+	if (flat === "") return undefined;
+	let cut = flat;
+	if (cut.length > DERIVED_TITLE_MAX) {
+		const at = cut.lastIndexOf(" ", DERIVED_TITLE_MAX);
+		cut = cut.slice(0, at > 12 ? at : DERIVED_TITLE_MAX);
+	}
+	cut = cut.replace(/[\s.,;:!?\-–—]+$/u, "").trim();
+	if (cut === "") return undefined;
+	return cut[0]!.toUpperCase() + cut.slice(1);
 }
 
 /** Small helper so retry backoff does not block the event loop tests use. */
@@ -320,6 +375,7 @@ export class RouterLayer {
 			this.buildListWorkersTool(),
 			this.buildListTasksTool(),
 			this.buildListHandsTool(),
+			this.buildChatTitleTool(),
 			createRecallTool(this.deps.context),
 		];
 	}
@@ -335,8 +391,17 @@ export class RouterLayer {
 				"The Worker reports a conclusion back to you, which arrives as a new turn. This call returns immediately, so say one short line first.",
 			].join("\n"),
 			parameters: Type.Object({
-				title: Type.String({ description: "Short task title." }),
-				description: Type.String({ description: "What the Worker should do, self-contained." }),
+				title: Type.String({ description: "Short task title: what this is, in a few words." }),
+				description: Type.String({
+					description:
+						"What this is for, in one sentence, as you would say it to the person: the card and the thread show this, and it is all they read.",
+				}),
+				instructions: Type.Optional(
+					Type.String({
+						description:
+							"The brief the Worker is told: paths, constraints, what a good answer looks like. Write it for an agent doing the work, not for the person reading the card. Omit when the description already says everything.",
+					}),
+				),
 				channel: Type.Optional(Type.String({ description: "Channel id the task originated from." })),
 				thread: Type.Optional(Type.String({ description: "Thread id the task belongs to." })),
 				reply_to: Type.Optional(Type.String({ description: "Event id to reply to when done." })),
@@ -356,6 +421,7 @@ export class RouterLayer {
 					args: {
 						title: params.title,
 						description: params.description,
+						...(params.instructions === undefined ? {} : { instructions: params.instructions }),
 						...(params.endpoint === undefined ? {} : { endpoint: params.endpoint }),
 					},
 				});
@@ -430,6 +496,59 @@ export class RouterLayer {
 						isError: true,
 					};
 				}
+			},
+		});
+	}
+
+	/**
+	 * Name the chat this turn is answering.
+	 *
+	 * A chat is a conversation, and its name is the one thing about it a person
+	 * sees before they open it — so it is worth the agent's judgement once the
+	 * subject is clear, and worth nothing as a running commentary. Called with no
+	 * title it answers with what the chat is called now, which is how the agent
+	 * can tell a placeholder ("Chat") from a name someone chose.
+	 */
+	private buildChatTitleTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "chat_title",
+			label: "Name this chat",
+			description: [
+				"Read or set the name of the chat you are talking in.",
+				"With no `title`: answers what this chat is called now.",
+				"With a `title`: renames it — four or five words in the person's own language, naming what this conversation is about (\"Linear projects in flight\", \"Fixing the login redirect\"). Name it once you know what they are after, especially while it is still called \"Chat\"; rename it later only when the subject genuinely changes. Not every turn, and never as a summary of a single request.",
+				"A title is not a reply: renaming says nothing to the person, so say your line as usual.",
+			].join("\n"),
+			parameters: Type.Object({
+				title: Type.Optional(
+					Type.String({ description: "The chat's new name, or omitted to read the current one." }),
+				),
+			}),
+			async execute(_id, params): Promise<AgentToolResult<any>> {
+				const threadId = router.turn.originThreadId;
+				const log = router.deps.threadLog;
+				if (threadId === undefined || log === undefined) {
+					return {
+						content: [{ type: "text", text: "this turn answers no chat, so it has no name to change" }],
+						details: { renamed: false },
+					};
+				}
+				const title = params.title?.trim();
+				if (title === undefined || title === "") {
+					const current = log.name(threadId) ?? "(unnamed)";
+					return {
+						content: [{ type: "text", text: `this chat is called "${current}"` }],
+						details: { title: current },
+					};
+				}
+				const entry = log.rename(threadId, title);
+				router.deps.publishEntry?.(threadId, entry);
+				metrics.counter("mir_router_chat_renamed_total");
+				return {
+					content: [{ type: "text", text: `renamed this chat to "${title}"` }],
+					details: { title, renamed: true },
+				};
 			},
 		});
 	}
@@ -594,7 +713,63 @@ export class RouterLayer {
 		} finally {
 			this.turnInFlightSince = 0;
 			metrics.gauge("mir_router_turn_in_flight", 0);
+			// A stopped turn says nothing, and a name is not what the person stopped:
+			// leave it as it is. Any other turn ends with the chat named.
+			if (this.turn.stoppedThreads.size === 0) this.nameChatIfPlaceholder(batch);
 			this.onTurnDone();
+		}
+	}
+
+	/**
+	 * Name the chat, when the agent did not.
+	 *
+	 * The prompt asks for a name on the first real request and again whenever the
+	 * subject moves, and a model that skips it leaves the member with a chat called
+	 * "Chat" that they cannot find again. Advice is not a mechanism: this runs at
+	 * the end of every turn and gives the chat the name the work already carries.
+	 *
+	 * A work thread is left alone — its name is its task's — and so is a chat the
+	 * agent has named, whatever it called it.
+	 */
+	private nameChatIfPlaceholder(batch: InboxItem[]): void {
+		const threadId = this.turn.originThreadId;
+		const threadLog = this.deps.threadLog;
+		if (threadId === undefined || threadLog === undefined) return;
+		const chatId = threadLog.chatOf(threadId);
+		if (chatId === undefined) return;
+		if (!isPlaceholderChatName(threadLog.name(threadId), chatId)) return;
+
+		let source: string | undefined;
+		for (const taskId of this.turn.dispatches) {
+			const title = this.tasks.get(taskId)?.title;
+			if (title !== undefined && title.trim() !== "") {
+				source = title;
+				break;
+			}
+		}
+		if (source === undefined) {
+			// Failing that, the person's own opening words — but only when they name
+			// something. "Hey there" is not a title, and a chat called after a greeting
+			// is no easier to find than one called "Chat": a turn with no work and no
+			// subject leaves the name to the agent, who can see there is none.
+			for (const item of batch) {
+				if (item.kind !== "trigger") continue;
+				const words = item.trigger.text.trim().split(/\s+/).filter((word) => word !== "");
+				if (words.length < 4) continue;
+				source = item.trigger.text;
+				break;
+			}
+		}
+		const title = source === undefined ? undefined : derivedChatTitle(source);
+		if (title === undefined) return;
+
+		try {
+			const entry = threadLog.rename(threadId, title);
+			this.deps.publishEntry?.(threadId, entry);
+			metrics.counter("mir_router_chat_named_from_turn_total");
+			log.info("named the chat from the turn", { thread: threadId, title });
+		} catch (err) {
+			log.warn("could not name the chat", { thread: threadId, error: (err as Error).message });
 		}
 	}
 
@@ -622,6 +797,18 @@ export class RouterLayer {
 	private async handleTurnFailure(batch: InboxItem[], err: Error): Promise<void> {
 		metrics.counter("mir_router_turn_errors_total");
 		log.error("router turn failed", { error: err.message, items: batch.length });
+
+		// An aborted turn is a stopped turn, not a failed one: a retry would run
+		// the work the person just cancelled, one backoff later.
+		if (this.turn.stoppedThreads.size > 0) {
+			log.info("router turn stopped; not retrying", { items: batch.length, threads: [...this.turn.stoppedThreads] });
+			for (const item of batch) {
+				if (item.kind === "trigger") {
+					this.deps.store.markEvent(item.trigger.id, "failed", "the person stopped this");
+				}
+			}
+			return;
+		}
 
 		const retryable: InboxItem[] = [];
 		const exhausted: InboxItem[] = [];
@@ -663,6 +850,7 @@ export class RouterLayer {
 
 	/** Deliver the model's plain text when it acted through no tool at all. */
 	private async ensureReply(batch: InboxItem[]): Promise<void> {
+		if (this.turn.stoppedThreads.size > 0) return;
 		if (this.turn.replies.length > 0 || this.turn.dispatches.length > 0) return;
 		const text = this.turn.captured.trim();
 		if (!text) return;
@@ -831,7 +1019,7 @@ export class RouterLayer {
 			"=== How to act ===",
 			"You do not do work. A Worker does.",
 			"",
-			`Your tools: ${channelTools} (say something to the person), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), recall (read spilled context by id).`,
+			`Your tools: ${channelTools} (say something to the person), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), chat_title (read or set this chat's name), recall (read spilled context by id).`,
 			"You have no bash, no file tools, no browser, and none of the member's connected services (Linear, Context7, whatever else they linked) — a Worker is handed those at dispatch. So \"I don't have that tool\" is never an answer: it is a dispatch.",
 			"",
 			"**Dispatch, unless it is one of these five:**",
@@ -846,6 +1034,7 @@ export class RouterLayer {
 			"**Answer first, then work.** Someone is waiting on you, so the first thing you do in a turn is say something to them:",
 			"- If the answer is one of the five, say it now — one or two sentences, no preamble.",
 			"- If it is work, say in one short line what you are about to do, then dispatch. A confirmation is a reply: \"Checking the repo now.\" beats ten seconds of silence, and the person should never watch a spinner wondering whether you heard them.",
+			"- That line is conversation, not a label. \"Checking your Linear projects now.\" — never the task title (\"List active Linear projects\"), never an imperative, never a summary of what you were asked.",
 			"- A dispatch already tells the person it started, in the words of the thing that started it. Do not repeat it: add only what that line does not say, or nothing.",
 			"",
 			"Then act with tools, and do not wait for the Worker: your turn ends and its conclusion arrives as a new turn.",
@@ -856,7 +1045,14 @@ export class RouterLayer {
 			"",
 			`Channels: ${this.deps.channels.map((c) => c.id).join(", ")}. Always reply through respond_<channel> with reply_to = the event id — never as plain assistant text.`,
 			"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
+			"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and no describing a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
 			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
+			"",
+			"**Name the chat, and keep naming it.** The title is what the person sees in their list: a chat called \"Chat\" is one they cannot find again, and one named after the first thing they said is wrong the moment the conversation moves. You are the only thing that knows what this conversation is about, so naming it is part of answering it:",
+			"- The first real request: call chat_title with four or five words in their language — \"Linear projects in flight\", \"Login redirect bug\". Never end a turn with the chat still called \"Chat\".",
+			"- Every turn after that: if this turn is about something the current name does not describe — a different file, a different problem, a new request that has moved on — rename it. Do not wait to be asked, and do not keep a name that has stopped being true.",
+			"- A name is the whole conversation, not the last message: do not restate the request you just answered, and do not rename when the subject has not moved. \"Fixing the login redirect\" stays right for ten turns about it.",
+			"- Called with no title it tells you what the chat is called now, which is how you tell a placeholder from a name someone chose.",
 		].join("\n");
 	}
 
@@ -888,6 +1084,10 @@ export class RouterLayer {
 
 	async dispatchTask(input: TaskInput): Promise<Task> {
 		if (this.disposed) throw new Error("router disposed");
+		if (input.threadId !== undefined && this.turn.stoppedThreads.has(input.threadId)) {
+			log.info("dispatch refused: the person stopped this turn", { thread: input.threadId, title: input.title });
+			throw new Error("The person stopped this. Do not dispatch, and do not answer — say nothing.");
+		}
 		const now = Date.now();
 		const id = input.id ?? `task-${crypto.randomUUID()}`;
 		const atCapacity =
@@ -896,6 +1096,7 @@ export class RouterLayer {
 			id,
 			title: input.title,
 			description: input.description,
+			...(input.instructions === undefined ? {} : { instructions: input.instructions }),
 			threadId: input.threadId,
 			channelId: input.channelId,
 			replyTo: input.replyTo,
@@ -967,6 +1168,7 @@ export class RouterLayer {
 				taskId: task.id,
 				title: task.title,
 				description: task.description,
+				...(task.instructions === undefined ? {} : { instructions: task.instructions }),
 				threadId: task.threadId,
 				channelId: task.channelId,
 				replyTo: task.replyTo,
@@ -1242,19 +1444,33 @@ export class RouterLayer {
 	 * working. What a client's Stop reaches, and why it names a thread rather
 	 * than a task: a person watching a thread does not know its task ids.
 	 */
+	/**
+	 * The person pressed stop on a thread.
+	 *
+	 * The turn ends, every task this thread started is stopped, and the thread is
+	 * marked stopped for the turn in flight so a dispatch that arrives after this
+	 * is refused instead of started.
+	 */
 	async stopThread(threadId: string, reason?: string): Promise<Task[]> {
+		const why = reason ?? "stopped from the thread";
+		this.turn.stoppedThreads.add(threadId);
 		const tasks = [...this.tasks.values()].filter(
 			(task) => task.threadId === threadId && (task.status === "running" || task.status === "queued"),
 		);
 		const stopped: Task[] = [];
 		for (const task of tasks) {
 			try {
-				stopped.push(await this.stopTask(task.id, reason ?? "stopped from the thread"));
+				stopped.push(await this.stopTask(task.id, why));
 			} catch {
 				/* already gone: nothing to stop */
 			}
 		}
-		this.record(threadId, { kind: "status", status: "stopped", note: reason ?? "stopped" });
+		const answeringThisThread = this.turnInFlightSince !== 0 && this.turn.originThreadId === threadId;
+		log.info("thread stopped", { thread: threadId, reason: why, tasks: stopped.length, turnAborted: answeringThisThread });
+		if (answeringThisThread) await this.session.abort?.().catch(() => {});
+		// An entry of its own, which also moves the thread's state: a stop is not an
+		// absence of a reply.
+		this.record(threadId, { kind: "stop", note: why });
 		return stopped;
 	}
 

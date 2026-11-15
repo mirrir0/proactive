@@ -202,7 +202,19 @@ export class HandsClient {
 	/** One unit of work. Never throws: failures come back as `ok: false`. */
 	async call(
 		call: HandCall,
-		options: { onChunk?: (stream: StreamName, data: string) => void; timeoutMs?: number } = {},
+		options: {
+			onChunk?: (stream: StreamName, data: string) => void;
+			timeoutMs?: number;
+			/**
+			 * Stop the call, and the command behind it.
+			 *
+			 * The daemon stops a task by aborting its turn; a turn that is waiting
+			 * on a shell command on a hand has nothing to abort unless the cancel
+			 * travels. This is that path: `cancel` to the hub, which cancels the
+			 * work, which signals the executor, which kills the process tree.
+			 */
+			signal?: AbortSignal;
+		} = {},
 	): Promise<HandCallResult> {
 		try {
 			await this.connect();
@@ -226,11 +238,29 @@ export class HandsClient {
 				});
 			}, timeoutMs + 5000);
 			timer.unref?.();
+			const onAbort = (): void => {
+				this.send({ type: "cancel", id });
+				this.settle(id, {
+					ok: false,
+					error: "cancelled",
+					durationMs: Date.now() - startedAt,
+					endpointId: call.endpointId ?? "",
+				});
+			};
+			const startedAt = Date.now();
+			if (options.signal?.aborted === true) {
+				onAbort();
+				return;
+			}
+			options.signal?.addEventListener("abort", onAbort, { once: true });
 			this.pending.set(id, {
-				resolve,
+				resolve: (result) => {
+					options.signal?.removeEventListener("abort", onAbort);
+					resolve(result);
+				},
 				timer,
 				onChunk: options.onChunk,
-				startedAt: Date.now(),
+				startedAt,
 			});
 			try {
 				this.send({ type: "call", id, call: { ...call, timeoutMs } });

@@ -24,7 +24,10 @@ export interface WorkerSpec {
 	workerId: string;
 	taskId: string;
 	title: string;
+	/** What the task is for: the person's line. */
 	description: string;
+	/** The brief the Worker is told, when it is more than the description. */
+	instructions?: string;
 	threadId?: string;
 	channelId?: string;
 	replyTo?: string;

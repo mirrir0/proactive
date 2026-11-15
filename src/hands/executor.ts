@@ -64,8 +64,33 @@ export interface HandExecutorOptions {
 	sandbox?: SandboxWrapper;
 }
 
+/** A process a hand started and does not wait for. */
+interface RunningJob {
+	jobId: string;
+	argv: string[];
+	pid: number | undefined;
+	startedAt: number;
+	child: import("node:child_process").ChildProcess;
+	stdout: string;
+	stderr: string;
+	exited: boolean;
+	exitCode?: number | null;
+	signal?: string | null;
+	killTree: (signal: NodeJS.Signals) => void;
+}
+
+/** How much of a background job's output is kept for a later read. */
+const JOB_OUTPUT_CAP = 64 * 1024;
+
 export class HandExecutor {
 	private running = 0;
+	/**
+	 * Commands started with `background: true`, still owned by this hand.
+	 *
+	 * They outlive the call that started them — that is the point — and they die
+	 * with the hand, so a brain that stops does not leave a server on a port.
+	 */
+	private readonly jobs = new Map<string, RunningJob>();
 
 	constructor(private readonly options: HandExecutorOptions) {}
 
@@ -100,6 +125,12 @@ export class HandExecutor {
 					return await this.shell(input as ShellInput, ctx, started);
 				case "git":
 					return await this.git(input as GitInput, ctx, started);
+				case "jobs":
+					return this.listJobs(started);
+				case "jobOutput":
+					return this.jobOutput(input as { jobId?: string; stream?: "stdout" | "stderr" }, started);
+				case "killJob":
+					return this.killJob(input as { jobId?: string }, started);
 				case "readFile":
 					return await this.read(input as ReadFileInput, started);
 				case "writeFile":
@@ -208,6 +239,16 @@ export class HandExecutor {
 			shell,
 			sandbox: sandbox ? "srt" : "none",
 		});
+
+		if (input.background === true) {
+			return this.startBackground({
+				argv: rawArgv,
+				cwd: cwd ?? policy.roots[0] ?? process.cwd(),
+				env,
+				commandId,
+				started,
+			});
+		}
 
 		return await new Promise<HandResult>((resolve) => {
 			let stdout = "";
@@ -339,6 +380,134 @@ export class HandExecutor {
 			}, timeoutMs);
 			killTimer.unref?.();
 		});
+	}
+
+	/**
+	 * Start a command and return at once.
+	 *
+	 * Its output is kept in a capped buffer rather than streamed: a server writes
+	 * forever, and a caller that has already been answered is not reading. The job
+	 * belongs to this hand, so `jobs` and `jobOutput` can find it later and a hand
+	 * that closes takes it with it.
+	 */
+	private startBackground(input: {
+		argv: string[];
+		cwd: string;
+		env: NodeJS.ProcessEnv;
+		commandId: string;
+		started: number;
+	}): HandResult {
+		const detached = process.platform !== "win32";
+		const jobId = input.commandId;
+		const child = spawn(input.argv[0]!, input.argv.slice(1), {
+			cwd: input.cwd,
+			env: input.env,
+			shell: false,
+			detached,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const killTree = (signal: NodeJS.Signals): void => {
+			try {
+				if (detached && child.pid) process.kill(-child.pid, signal);
+				else child.kill(signal);
+			} catch {
+				try {
+					child.kill(signal);
+				} catch {
+					/* already gone */
+				}
+			}
+		};
+		const job: RunningJob = {
+			jobId,
+			argv: input.argv,
+			pid: child.pid,
+			startedAt: input.started,
+			child,
+			stdout: "",
+			stderr: "",
+			exited: false,
+			killTree,
+		};
+		const keep = (stream: "stdout" | "stderr", chunk: Buffer): void => {
+			const next = job[stream] + chunk.toString("utf8");
+			job[stream] = next.length > JOB_OUTPUT_CAP ? next.slice(next.length - JOB_OUTPUT_CAP) : next;
+		};
+		child.stdout?.on("data", (chunk: Buffer) => keep("stdout", chunk));
+		child.stderr?.on("data", (chunk: Buffer) => keep("stderr", chunk));
+		child.on("close", (code, signal) => {
+			job.exited = true;
+			job.exitCode = code;
+			job.signal = signal;
+		});
+		child.on("error", (err) => {
+			job.exited = true;
+			job.stderr += `\nspawn failed: ${err.message}`;
+		});
+		this.jobs.set(jobId, job);
+		this.options.log.info("hand exec started in the background", {
+			job: jobId,
+			file: path.basename(input.argv[0]!),
+			pid: child.pid,
+		});
+		return {
+			ok: true,
+			durationMs: Date.now() - input.started,
+			data: { jobId, pid: child.pid, background: true },
+		};
+	}
+
+	/** Every job this hand still holds, running or finished. */
+	private listJobs(started: number): HandResult {
+		return {
+			ok: true,
+			durationMs: Date.now() - started,
+			data: {
+				jobs: [...this.jobs.values()].map((job) => ({
+					jobId: job.jobId,
+					argv: job.argv,
+					pid: job.pid,
+					startedAt: job.startedAt,
+					stdoutBytes: Buffer.byteLength(job.stdout),
+					stderrBytes: Buffer.byteLength(job.stderr),
+					exited: job.exited,
+					...(job.exited ? { exitCode: job.exitCode ?? null, signal: job.signal ?? null } : {}),
+				})),
+			},
+		};
+	}
+
+	/** What a job has written, capped. */
+	private jobOutput(input: { jobId?: string; stream?: "stdout" | "stderr" }, started: number): HandResult {
+		const job = input.jobId === undefined ? undefined : this.jobs.get(input.jobId);
+		if (job === undefined) {
+			return { ok: false, error: `no job ${input.jobId ?? "(none named)"} on this hand`, durationMs: Date.now() - started };
+		}
+		const stream = input.stream ?? "stdout";
+		return {
+			ok: true,
+			durationMs: Date.now() - started,
+			data: { jobId: job.jobId, stream, output: job[stream], exited: job.exited },
+			stdout: job[stream],
+		};
+	}
+
+	/** Stop a job. Its output stays readable. */
+	private killJob(input: { jobId?: string }, started: number): HandResult {
+		const job = input.jobId === undefined ? undefined : this.jobs.get(input.jobId);
+		if (job === undefined) {
+			return { ok: false, error: `no job ${input.jobId ?? "(none named)"} on this hand`, durationMs: Date.now() - started };
+		}
+		job.killTree("SIGTERM");
+		const hard = setTimeout(() => job.killTree("SIGKILL"), 2000);
+		hard.unref?.();
+		return { ok: true, durationMs: Date.now() - started, data: { jobId: job.jobId, stopped: true } };
+	}
+
+	/** Stop every background job. Called when the hand closes. */
+	stopJobs(): void {
+		for (const job of this.jobs.values()) job.killTree("SIGTERM");
+		this.jobs.clear();
 	}
 
 	private async git(input: GitInput, ctx: ExecutorRunContext, started: number): Promise<HandResult> {

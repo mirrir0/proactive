@@ -45,7 +45,17 @@ export interface Thread {
 export interface Task {
 	id: string;
 	title: string;
+	/** What the task is for, in the words of the person who asked: what a card shows. */
 	description: string;
+	/**
+	 * The brief handed to the Worker, when it is more than the description.
+	 *
+	 * The description is what this is *for* — a line a person reads on a card. The
+	 * brief is what the Worker is *told*: the paths, the constraints, the shape of
+	 * the answer. One field could not be both, and a card that shows a full prompt
+	 * is a card nobody reads.
+	 */
+	instructions?: string;
 	threadId?: string;
 	channelId?: string;
 	replyTo?: string;

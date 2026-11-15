@@ -37,11 +37,29 @@ export type WorkerToDaemon =
 	| { type: "delta"; text: string }
 	| { type: "mcp_catalog"; servers: McpServerReport[]; tools: McpCatalogEntry[] }
 	| { type: "release"; eventId: string; reason?: string }
+	/** A Worker stopping a check it dispatched. */
+	| { type: "stop_child"; requestId: string; taskId: string }
+	/** A Worker asking the daemon to run a task for it (a subagent), and to wait. */
+	| {
+			type: "dispatch_child";
+			requestId: string;
+			title: string;
+			description: string;
+			instructions?: string;
+	  }
+	/** A Worker saying something to another agent: its parent, or a child. */
+	| { type: "message"; to: string; text: string }
 	| { type: "unsubscribe"; threadId: string; reason?: string };
 
 export type DaemonToWorker =
 	| { type: "event"; event: ChannelEvent }
 	| { type: "abort"; reason?: string }
+	/** The answer to a `stop_child`. */
+	| { type: "stop_result"; requestId: string; ok: boolean; error?: string }
+	/** The answer to a `dispatch_child`: the child's conclusion, or why it stopped. */
+	| { type: "child_result"; requestId: string; text: string; ok: boolean }
+	/** Another agent's words, delivered at this Worker's next turn boundary. */
+	| { type: "message"; from: string; text: string }
 	/** System signal: MCP server set changed; workers should hot-reload their MCP connections. */
 	| {
 			type: "system";
@@ -151,6 +169,10 @@ export class ControlServer {
 		return this.send(workerId, { type: "event", event });
 	}
 
+	sendStopResult(workerId: string, requestId: string, ok: boolean, error?: string): void {
+		this.send(workerId, { type: "stop_result", requestId, ok, ...(error === undefined ? {} : { error }) });
+	}
+
 	abort(workerId: string, reason?: string): boolean {
 		return this.send(workerId, { type: "abort", reason });
 	}
@@ -208,6 +230,10 @@ export class ControlClient {
 	private readonly eventHandlers = new Set<(e: ChannelEvent) => void>();
 	private readonly abortHandlers = new Set<(reason?: string) => void>();
 	private readonly systemHandlers = new Set<(msg: SystemMessage) => void>();
+	/** Child dispatches waiting on the daemon: requestId → resolve. */
+	private readonly childWaits = new Map<string, (result: { text: string; ok: boolean }) => void>();
+	/** Stops waiting on the daemon: requestId → resolve. */
+	private readonly stopWaits = new Map<string, (result: { ok: boolean; error?: string }) => void>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -237,6 +263,20 @@ export class ControlClient {
 				if (msg.type === "event") for (const h of this.eventHandlers) h(msg.event);
 				if (msg.type === "abort") for (const h of this.abortHandlers) h(msg.reason);
 				if (msg.type === "system") for (const h of this.systemHandlers) h(msg);
+				if (msg.type === "child_result") {
+					const resolve = this.childWaits.get(msg.requestId);
+					if (resolve !== undefined) {
+						this.childWaits.delete(msg.requestId);
+						resolve({ text: msg.text, ok: msg.ok });
+					}
+				}
+				if (msg.type === "stop_result") {
+					const resolve = this.stopWaits.get(msg.requestId);
+					if (resolve !== undefined) {
+						this.stopWaits.delete(msg.requestId);
+						resolve({ ok: msg.ok, ...(msg.error === undefined ? {} : { error: msg.error }) });
+					}
+				}
 			}
 		});
 		this.send({ type: "hello", v: PROTOCOL_VERSION, workerId: this.workerId, taskId: this.taskId });
@@ -282,6 +322,44 @@ export class ControlClient {
 	/** "Stop routing this thread to me." */
 	unsubscribe(threadId: string, reason?: string): void {
 		this.send({ type: "unsubscribe", threadId, reason });
+	}
+
+	/**
+	 * Ask the daemon to run a task for this Worker, and wait for its conclusion.
+	 *
+	 * The daemon owns the process manager, so a Worker asks and blocks; the answer
+	 * is the child's conclusion, never a task id to poll.
+	 */
+	dispatchChild(
+		requestId: string,
+		title: string,
+		description: string,
+		instructions?: string,
+	): Promise<{ text: string; ok: boolean }> {
+		return new Promise((resolve) => {
+			this.childWaits.set(requestId, resolve);
+			this.send({
+				type: "dispatch_child",
+				requestId,
+				title,
+				description,
+				...(instructions === undefined ? {} : { instructions }),
+			});
+		});
+	}
+
+	/** Say something to another agent: `to` is a task id, or "parent". */
+	message(to: string, text: string): void {
+		this.send({ type: "message", to, text });
+	}
+
+	/** Stop a check this Worker dispatched. */
+	stopTask(taskId: string): Promise<{ ok: boolean; error?: string }> {
+		return new Promise((resolve) => {
+			const requestId = crypto.randomUUID();
+			this.stopWaits.set(requestId, resolve);
+			this.send({ type: "stop_child", requestId, taskId });
+		});
 	}
 
 	private send(msg: WorkerToDaemon): void {

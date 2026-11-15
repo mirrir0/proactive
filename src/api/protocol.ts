@@ -53,7 +53,14 @@ export type ClientToBrain =
 	 * the one request that turns one into the other, and it is idempotent: the
 	 * second turn of the same chat gets the same thread.
 	 */
-	| { type: "chat"; id: string; chatId: string; since?: number }
+	| {
+			type: "chat";
+			id: string;
+			chatId: string;
+			/** What the chat is called, when the client knows: the name a person sees. */
+			title?: string;
+			since?: number;
+	  }
 	| { type: "close"; id: string; threadId: string }
 	| { type: "say"; id: string; threadId: string; content: string }
 	| { type: "stop"; id: string; threadId: string }
@@ -83,8 +90,11 @@ export type BrainToClient =
 export interface BrainHost {
 	/** Every thread, newest activity first. */
 	listThreads(filter?: ThreadFilter): ThreadSummary[];
-	/** The thread a chat shows, minted on first use. */
-	chatThread(chatId: string): string;
+	/**
+	 * The thread a chat shows, minted on first use — holding the chat's name when
+	 * the client knows it, so the agent can read what this chat is called.
+	 */
+	chatThread(chatId: string, title?: string): string;
 	/** One thread's entries after `since`, oldest first. */
 	entries(threadId: string, since: number): ThreadEntry[];
 	/** A thread's status right now. */

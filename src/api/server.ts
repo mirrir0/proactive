@@ -194,7 +194,7 @@ export class BrainServer {
 			}
 
 			case "chat": {
-				const threadId = host.chatThread(message.chatId);
+				const threadId = host.chatThread(message.chatId, message.title);
 				const since = message.since ?? 0;
 				const entries = host.entries(threadId, since);
 				send({

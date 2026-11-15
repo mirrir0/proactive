@@ -629,3 +629,87 @@ test("thread log: a worker's stream is coalesced, not a line per token", async (
 		await h.cleanup();
 	}
 });
+
+test("the Router can name the chat it is answering, and read the name back", async () => {
+	// A chat called "Chat" is one the person cannot find again. The agent knows
+	// what the conversation came to be about, so the name is its call — and a call
+	// with no title is how it tells a placeholder from a name someone chose.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [
+			{ type: "tool", name: "chat_title", args: {} },
+			{ type: "tool", name: "chat_title", args: { title: "Linear projects in flight" } },
+			{ type: "tool", name: "chat_title", args: {} },
+			{ type: "tool", name: "respond_terminal", args: { text: "on it" } },
+		],
+	});
+	try {
+		h.router.submitTrigger(makeTrigger({ threadId: "thread-9", text: "what is going on with linear" }));
+		await waitFor(() => h.channel.replies.length === 1, 2000, "the reply");
+
+		const answers = h.sessions[0]!.calls
+			.filter((call) => call.name === "chat_title")
+			.map((call) => String(call.result?.content?.[0]?.text ?? ""));
+		assert.match(answers[0] ?? "", /^this chat is called "/, "a call with no title answers what the chat was called");
+		assert.equal(answers[1], 'renamed this chat to "Linear projects in flight"');
+		assert.equal(answers[2], 'this chat is called "Linear projects in flight"', "and the next read agrees");
+
+		const entries = h.threadLog!.entries("thread-9");
+		const title = entries.find((entry) => entry.kind === "title");
+		assert.ok(title, "the rename is in the conversation's log");
+		assert.equal(h.threadLog!.name("thread-9"), "Linear projects in flight", "and the thread's own name moved with it");
+		assert.ok(
+			h.published.some((item) => item.entry.kind === "title"),
+			"a watching client was told, so the header and the list change without a reload",
+		);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a chat the agent left called \"Chat\" is named from the work it did", async () => {
+	// Advice is not a mechanism. A model that never calls chat_title leaves the
+	// member with a chat called "Chat" in a list of chats called "Chat" — so the
+	// turn's own work names it, from the title the agent already wrote for it.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [
+			{ type: "tool", name: "dispatch_task", args: { title: "List active Linear projects", description: "run it" } },
+			{ type: "tool", name: "respond_terminal", args: { text: "on it" } },
+		],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-7", "Chat");
+		h.router.submitTrigger(makeTrigger({ threadId, text: "what is going on with linear" }));
+		await waitFor(() => h.channel.replies.length === 1, 2000, "the reply");
+
+		assert.equal(h.threadLog!.name(threadId), "List active Linear projects", "the chat is named after what it did");
+		assert.ok(
+			h.published.some((item) => item.entry.kind === "title"),
+			"and a client is told, so the header and the list change",
+		);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a greeting does not name the chat: a chat called after \"Hey there\" is no easier to find", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "hey" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-6", "Chat");
+		h.router.submitTrigger(makeTrigger({ threadId, text: "hey there" }));
+		await waitFor(() => h.channel.replies.length === 1, 2000, "the reply");
+
+		assert.equal(h.threadLog!.name(threadId), "Chat", "the placeholder stands until there is something to name");
+		assert.equal(
+			h.threadLog!.entries(threadId).filter((entry) => entry.kind === "title").length,
+			0,
+			"and nothing was renamed",
+		);
+	} finally {
+		await h.cleanup();
+	}
+});

@@ -38,6 +38,15 @@ export interface WorkerReporter {
 	release?(eventId: string, reason?: string): void;
 	/** "Stop sending me this thread." */
 	unsubscribe?(threadId: string, reason?: string): void;
+	/**
+	 * A tool this worker called, and what came back.
+	 *
+	 * Reported, because a task's thread is where its work is written down: without
+	 * this the thread holds the worker's prose and none of what it *did*, which is
+	 * the part a member opens a dispatch card to see.
+	 */
+	toolCall?(call: { id: string; name: string; args: unknown }): void;
+	toolResult?(result: { id: string; isError: boolean; result: unknown }): void;
 }
 
 export interface WorkerRuntimeOptions {
@@ -52,6 +61,8 @@ export interface WorkerRuntimeOptions {
 	mcpTools?: CodemodeTool[];
 	/** Custom tools (MCP tool definitions + codemode tool) for the model to call. */
 	customTools?: any[];
+	/** Where pi reads global config and extensions from. Isolated for a Worker. */
+	agentDir?: string;
 	/** What the Worker may reach. */
 	capabilities?: WorkerCapabilities;
 	/** Heartbeat interval; 0 disables. */
@@ -180,6 +191,15 @@ export class WorkerRuntime {
 	private currentStatus: "idle" | "busy" | "done" | "failed" = "idle";
 	private currentProgress: string | undefined;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
+	/**
+	 * Aborted when the daemon stops this task.
+	 *
+	 * A turn stuck inside a tool call is not something `dispose()` can wait out:
+	 * the tool may be a shell command on a hand, and the hand holds the process.
+	 * This signal is what the hand tools watch, so the stop reaches the command
+	 * that is actually running.
+	 */
+	private readonly aborter = new AbortController();
 
 	private constructor(options: WorkerRuntimeOptions) {
 		this.options = options;
@@ -206,12 +226,43 @@ export class WorkerRuntime {
 			modelRuntime: options.modelRuntime,
 			sessionManager,
 			thinkingLevel: options.thinkingLevel ?? "high",
+			// Exactly the tools this runtime hands it — its hand's, and the
+			// assistant's — and nothing else:
+			//
+			//   - `noTools: "all"` starts from an empty set. `"builtin"` was not
+			//     enough: it leaves *extension* tools on, so a machine with pi
+			//     extensions installed gave every Worker `subagent`, `todo` and
+			//     `AskClaude` — tools the assistant never had.
+			//   - `tools` names the ones that survive, so even an extension that
+			//     loads cannot add a tool to a Worker that was not given it.
+			//   - `agentDir` keeps the Worker away from the machine's own pi config.
+			noTools: "all",
+			tools: (options.customTools ?? []).map((tool) => String(tool.name)),
+			agentDir: options.agentDir ?? join(options.sessionDir, "agent"),
 			customTools: options.customTools ?? [],
 		});
 		worker.session.subscribe((event: any) => {
 			if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
 				const delta = event.assistantMessageEvent.delta;
 				if (delta) options.reporter.delta(String(delta));
+				return;
+			}
+			// What the worker did, not only what it said: the task's thread carries
+			// both, and a display draws a tool call as a tool call.
+			if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
+				options.reporter.toolCall?.({
+					id: String(event.toolCallId ?? ""),
+					name: event.toolName,
+					args: event.args ?? {},
+				});
+				return;
+			}
+			if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+				options.reporter.toolResult?.({
+					id: event.toolCallId,
+					isError: event.isError === true,
+					result: event.result ?? null,
+				});
 			}
 		});
 
@@ -333,10 +384,23 @@ export class WorkerRuntime {
 		if (this.disposed) throw new Error("worker disposed");
 		this.busy = true;
 		this.report("busy", this.currentEventId ? "handling follow-up" : "running task");
+		// The conclusion is the text of the **last** assistant message, not everything
+		// the model said. A Worker narrates as it works ("let me find the file…",
+		// "now I'll write it…") and those sentences are the work's commentary; the
+		// answer is what it says once it has stopped calling tools. Accumulating
+		// across tool calls produced a monologue delivered to a person as the result.
 		let result = "";
+		let sinceToolCall = "";
 		const sink = (event: any) => {
+			if (event.type === "tool_execution_start") {
+				// A new tool call ends the previous message: what follows is a new one.
+				sinceToolCall = "";
+				return;
+			}
 			if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-				result += event.assistantMessageEvent.delta ?? "";
+				const delta = String(event.assistantMessageEvent.delta ?? "");
+				result += delta;
+				sinceToolCall += delta;
 			}
 		};
 		const unsub = this.session.subscribe(sink);
@@ -349,7 +413,9 @@ export class WorkerRuntime {
 		}
 		// Pick up anything that arrived while this turn was running.
 		void this.drainFollowUps();
-		return result;
+		// The last message after the last tool call; if the model stopped without
+		// saying anything new, its whole turn is better than nothing.
+		return sinceToolCall.trim() === "" ? result : sinceToolCall;
 	}
 
 	private report(status: "idle" | "busy" | "done" | "failed", progress?: string): void {
@@ -379,9 +445,21 @@ export class WorkerRuntime {
 		});
 	}
 
+	/**
+	 * Stop the work now: abort the turn and everything it is waiting on.
+	 *
+	 * Called on the daemon's `abort` frame. It does not wait for the session —
+	 * a tool call that ignores the signal would make the stop a hang.
+	 */
+	async abort(reason = "stopped"): Promise<void> {
+		this.aborter.abort(new Error(reason));
+		await this.session.abort?.().catch(() => {});
+	}
+
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.aborter.abort(new Error("disposed"));
 		if (this.heartbeatTimer) {
 			clearInterval(this.heartbeatTimer);
 			this.heartbeatTimer = null;
@@ -452,4 +530,116 @@ export function createWorkerControlTools(runtime: WorkerRuntime, threadIds: stri
 			},
 		}),
 	];
+}
+
+/**
+ * What a Worker may do to *other agents*: dispatch one, or talk to one.
+ *
+ * A Worker used to be a leaf. It is not: a task big enough to need three
+ * independent checks should run them in parallel rather than serialise them
+ * through one context, and a Worker is the only thing that can see its own task
+ * clearly enough to split it. So a top-level Worker gets `dispatch_task`, and
+ * the daemon runs the child and returns its conclusion as this call's result.
+ *
+ * A subagent gets neither. Depth stops at one level, and it stops here — as a
+ * list of tools, not as an instruction the model could reason its way around.
+ */
+export interface AgentChannel {
+	dispatchChild(
+		requestId: string,
+		title: string,
+		description: string,
+		instructions?: string,
+	): Promise<{ text: string; ok: boolean }>;
+	message(to: string, text: string): void;
+	/** Stop a check this Worker dispatched. The daemon checks that it is theirs. */
+	stopTask(taskId: string): Promise<{ ok: boolean; error?: string }>;
+}
+
+export function createAgentTools(
+	channel: AgentChannel,
+	options: { readonly taskId: string; readonly canDispatch: boolean; readonly parentTaskId?: string },
+): ToolDefinition[] {
+	const tools: ToolDefinition[] = [
+		defineTool({
+			name: "message",
+			label: "Message another agent",
+			description: [
+				"A note to the agent that dispatched you (`to: \"parent\"`) or to a check you dispatched (its task id).",
+				"It is read at the other agent's next turn boundary, never mid-turn, so it is for what they should know — not a way to interrupt them.",
+				"Use it when the answer changes what they should do: the check is failing for a reason outside its brief, or the parent's instruction no longer matches what you found.",
+			].join("\n"),
+			parameters: Type.Object({
+				to: Type.String({ description: "\"parent\", or a task id of a check you dispatched." }),
+				text: Type.String({ description: "What they should know, in one or two sentences." }),
+			}),
+			exposure: "direct",
+			async execute(_id, params) {
+				channel.message(params.to, params.text);
+				return {
+					content: [{ type: "text", text: `sent to ${params.to}` }],
+					details: { to: params.to },
+				};
+			},
+		}),
+	];
+
+	if (!options.canDispatch) return tools;
+
+	tools.unshift(
+		defineTool({
+			name: "stop_task",
+			label: "Stop a check you dispatched",
+			description: [
+				"Stop one of your own checks — the ones `dispatch_task` returned a task id for.",
+				"Use it when a check is clearly going the wrong way, or has been running long enough that its answer will arrive too late to matter. You cannot stop anything you did not dispatch.",
+			].join("\n"),
+			parameters: Type.Object({
+				task_id: Type.String({ description: "The task id of the check to stop." }),
+			}),
+			exposure: "direct",
+			async execute(_id, params) {
+				const result = await channel.stopTask(params.task_id);
+				return {
+					content: [{ type: "text", text: result.ok ? `stopped ${params.task_id}` : `could not stop it: ${result.error ?? "unknown"}` }],
+					details: { taskId: params.task_id, ok: result.ok },
+					...(result.ok ? {} : { isError: true }),
+				};
+			},
+		}),
+	);
+
+	tools.unshift(
+		defineTool({
+			name: "dispatch_task",
+			label: "Dispatch a check",
+			description: [
+				"Run one independent check in a subagent and wait for its conclusion.",
+				"Dispatch when the work splits into parts that do not need each other's answers — three files to read, three suspects to verify. Do not dispatch a single question: that is your own job, and a subagent costs a process and a model turn.",
+				"The result is that subagent's conclusion, written for you rather than for a person. Its thread is on the rail if you want the raw detail.",
+			].join("\n"),
+			parameters: Type.Object({
+				title: Type.String({ description: "Short title: what this check is." }),
+				description: Type.String({ description: "What this check is for, in one sentence." }),
+				instructions: Type.Optional(
+					Type.String({
+						description:
+							"The brief the check is told: which files, what to decide, what to report. Omit when the description says everything.",
+					}),
+				),
+			}),
+			exposure: "direct",
+			async execute(_id, params) {
+				const requestId = crypto.randomUUID();
+				const result = await channel.dispatchChild(requestId, params.title, params.description, params.instructions);
+				return {
+					content: [{ type: "text", text: result.text }],
+					details: { title: params.title, ok: result.ok },
+					...(result.ok ? {} : { isError: true }),
+				};
+			},
+		}),
+	);
+
+	return tools;
 }

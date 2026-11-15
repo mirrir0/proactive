@@ -66,7 +66,23 @@ export type ThreadEntry =
 			ok: boolean;
 			durationMs?: number;
 	  }
-	| { seq: number; at: number; kind: "status"; status: ThreadStatus; note?: string };
+	| { seq: number; at: number; kind: "status"; status: ThreadStatus; note?: string }
+	/**
+	 * The person pressed stop.
+	 *
+	 * Its own entry rather than a `status`: a stop is something that happened in
+	 * the conversation, and a chat stopped half-way has to say so where the
+	 * person is reading.
+	 */
+	| { seq: number; at: number; kind: "stop"; note?: string }
+	/**
+	 * The chat was renamed.
+	 *
+	 * Not something anyone said, so it is not drawn in the transcript — but it is
+	 * a fact about the conversation, and the log is where a conversation's facts
+	 * live: a client that opens the chat later reads the same name it has now.
+	 */
+	| { seq: number; at: number; kind: "title"; title: string }
 
 /** What a client needs to list a thread without reading it. */
 export interface ThreadSummary {
@@ -134,6 +150,9 @@ export class ThreadLog {
 			// and nothing new is written.
 			if (said_ !== null && said_.text === said.text) return said_;
 		}
+		// A stop moves the thread's own state as well as the log: the column a list
+		// reads and the entry a panel reads are one event, written once.
+		if (entry.kind === "stop") this.store.setThreadStatus(threadId, "stopped");
 		const at = entry.at ?? Date.now();
 		const seq = this.store.appendThreadEntry(threadId, at, entry.kind, payloadOf(entry));
 		const stored = { ...entry, seq, at } as ThreadEntry;
@@ -179,8 +198,25 @@ export class ThreadLog {
 	 * Idempotent and safe to race: two turns of the same chat arriving at once
 	 * get the same id, because the store decides it under one statement.
 	 */
-	chatThread(chatId: string): string {
-		return this.store.threadForChat(chatId, () => newThreadId());
+	chatThread(chatId: string, title?: string): string {
+		return this.store.threadForChat(chatId, () => newThreadId(), title);
+	}
+
+	/** What a thread is called: a chat's title, for a chat's thread. */
+	name(threadId: string): string | undefined {
+		return this.store.threadName(threadId);
+	}
+
+	/**
+	 * Rename a thread, and record it.
+	 *
+	 * The name column is what a list reads; the entry is what a chat reads, so the
+	 * two cannot disagree about what this conversation came to be about. Returns
+	 * the entry, which the caller publishes.
+	 */
+	rename(threadId: string, title: string): ThreadEntry {
+		this.store.renameThread(threadId, title);
+		return this.append(threadId, { kind: "title", title });
 	}
 
 	/** The chat a thread shows, if it shows one. */

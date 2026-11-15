@@ -127,7 +127,19 @@ export const DEFAULT_HAND_POLICY: HandPolicy = {
 // Operations
 // ---------------------------------------------------------------------------
 
-export type HandOp = "exec" | "shell" | "readFile" | "writeFile" | "editFile" | "listDir" | "stat" | "git";
+export type HandOp =
+	| "exec"
+	| "shell"
+	| "readFile"
+	| "writeFile"
+	| "editFile"
+	| "listDir"
+	| "stat"
+	| "git"
+	/** Background jobs started by `exec { background: true }`. */
+	| "jobs"
+	| "jobOutput"
+	| "killJob";
 
 export interface ExecInput {
 	/** argv form is the default; it is never passed through a shell. */
@@ -137,6 +149,28 @@ export interface ExecInput {
 	/** Only honoured when the hand's capabilities allow a shell. */
 	shell?: boolean;
 	env?: Record<string, string>;
+	/**
+	 * Start it and return at once, with a job id.
+	 *
+	 * A server, a watcher, anything that does not exit on its own: waiting for it
+	 * would hold the task's turn until the hand's timeout, and the thing it was
+	 * meant to serve would never be reachable while it waited.
+	 */
+	background?: boolean;
+}
+
+/** A job started in the background, as `jobs` lists it. */
+export interface BackgroundJob {
+	jobId: string;
+	argv: string[];
+	pid: number | undefined;
+	startedAt: number;
+	/** Bytes kept from stdout/stderr (the buffers are capped). */
+	stdoutBytes: number;
+	stderrBytes: number;
+	exited: boolean;
+	exitCode?: number | null;
+	signal?: string | null;
 }
 
 /**

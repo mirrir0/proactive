@@ -61,6 +61,9 @@ export class LocalHand implements EndpointConnection {
 		this.connected = false;
 		for (const controller of this.aborts.values()) controller.abort();
 		this.aborts.clear();
+		// A job started in the background is this hand's: the hand closing is the
+		// end of it, so a stopped brain does not leave a server holding a port.
+		this.executor.stopJobs();
 	}
 
 	private async runWork(work: WorkItem): Promise<void> {

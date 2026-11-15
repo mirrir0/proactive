@@ -35,6 +35,20 @@ export interface CreateSessionOptions {
 	sessionManager?: any;
 	thinkingLevel?: string;
 	noTools?: "all" | "builtin";
+	/**
+	 * The tools this session may use, by name. With `noTools: "all"` this is the
+	 * whole surface: an extension the machine happens to have installed cannot add
+	 * a tool to a Worker that was not given it.
+	 */
+	tools?: string[];
+	/**
+	 * Where pi reads its global config and extensions from.
+	 *
+	 * A Worker (and the Router) must not inherit the machine's pi extensions: those
+	 * are someone's own tools — `subagent`, `todo`, `AskClaude` — and a Worker that
+	 * has them is a Worker that can do things the assistant never could.
+	 */
+	agentDir?: string;
 	customTools?: ToolDefinition[];
 }
 
@@ -48,6 +62,8 @@ export const createPiSession: SessionFactory = async (options) => {
 		sessionManager: options.sessionManager,
 		thinkingLevel: options.thinkingLevel as any,
 		noTools: options.noTools,
+		...(options.tools === undefined ? {} : { tools: options.tools }),
+		...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
 		customTools: options.customTools,
 	});
 	return result.session as unknown as AgentSessionLike;

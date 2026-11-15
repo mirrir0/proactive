@@ -677,7 +677,7 @@ export class SuperAgent {
 					? summaries
 					: summaries.filter((thread) => thread.status === filter.status);
 			},
-			chatThread: (chatId) => this.threadLog.chatThread(chatId),
+			chatThread: (chatId, title) => this.threadLog.chatThread(chatId, title),
 			entries: (threadId, since) => this.threadLog.entries(threadId, since),
 			status: (threadId) => this.threadLog.status(threadId),
 			say: (threadId, content) => {

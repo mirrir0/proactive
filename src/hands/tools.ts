@@ -25,6 +25,8 @@ export interface HandToolsOptions {
 	endpointId?: string;
 	/** Cap on characters returned to the model. */
 	maxResultChars?: number;
+	/** Aborted when the task is stopped: the running command goes with it. */
+	signal?: AbortSignal;
 }
 
 const DEFAULT_MAX_RESULT_CHARS = 24_000;
@@ -83,7 +85,7 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 		input: Record<string, unknown>,
 		timeoutMs?: number,
 	): Promise<HandCallResult> =>
-		client.call({ op, input, endpointId: pinned, timeoutMs });
+		client.call({ op, input, endpointId: pinned, timeoutMs }, options.signal === undefined ? {} : { signal: options.signal });
 
 	return [
 		defineTool({
@@ -101,6 +103,12 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				timeout_ms: Type.Optional(Type.Number({ description: "Timeout in milliseconds." })),
 				shell: Type.Optional(
 					Type.Boolean({ description: "Run through /bin/sh -c (only if the hand grants shell)." }),
+				),
+				background: Type.Optional(
+					Type.Boolean({
+						description:
+							"Start it and return at once, with a job id. Use for a server or a watcher — anything that does not exit on its own. Its output is kept in a ring buffer; read it with job_output.",
+					}),
 				),
 			}),
 			async execute(_id, params): Promise<AgentToolResult<any>> {
@@ -164,13 +172,71 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 			},
 		}),
 		defineTool({
-			name: "list_hands",
-			label: "List available hands",
+			name: "jobs",
+			label: "Background jobs on the hand",
 			description:
-				"List the execution environments (hands) reachable from here, with their capabilities and roots. Use it when you need to know what this task can reach.",
+				"The commands this task started with `background: true`, running or finished. A server started this way keeps running after the call that started it.",
 			parameters: Type.Object({}),
 			async execute(): Promise<AgentToolResult<any>> {
-				const hands = await client.refreshHands();
+				const result = await call("jobs", {});
+				return {
+					content: [{ type: "text", text: formatHandResult(result, maxChars) }],
+					details: { ...(result.data ?? {}), ok: result.ok },
+					...(result.ok ? {} : { isError: true }),
+				};
+			},
+		}),
+		defineTool({
+			name: "job_output",
+			label: "Read a background job's output",
+			description:
+				"What a job started with `background: true` has written so far. The buffer is capped, so it holds the most recent output.",
+			parameters: Type.Object({
+				job_id: Type.String({ description: "The job id `exec` returned." }),
+				stream: Type.Optional(
+					Type.Union([Type.Literal("stdout"), Type.Literal("stderr")], { description: "Which stream (default stdout)." }),
+				),
+			}),
+			async execute(_id, params): Promise<AgentToolResult<any>> {
+				const result = await call("jobOutput", {
+					jobId: params.job_id,
+					...(params.stream === undefined ? {} : { stream: params.stream }),
+				});
+				return {
+					content: [{ type: "text", text: formatHandResult(result, maxChars) }],
+					details: { ...(result.data ?? {}), ok: result.ok },
+					...(result.ok ? {} : { isError: true }),
+				};
+			},
+		}),
+		defineTool({
+			name: "kill_job",
+			label: "Stop a background job",
+			description: "Stop a job started with `background: true`. Its output stays readable.",
+			parameters: Type.Object({ job_id: Type.String({ description: "The job id `exec` returned." }) }),
+			async execute(_id, params): Promise<AgentToolResult<any>> {
+				const result = await call("killJob", { jobId: params.job_id });
+				return {
+					content: [{ type: "text", text: formatHandResult(result, maxChars) }],
+					details: { ...(result.data ?? {}), ok: result.ok },
+					...(result.ok ? {} : { isError: true }),
+				};
+			},
+		}),
+		defineTool({
+			name: "list_hands",
+			label: "List the hand this task runs on",
+			description:
+				"List the execution environment (hand) this task is pinned to, with its capabilities and roots. " +
+				"A task runs on one hand and can reach nothing else, so this is the whole list.",
+			parameters: Type.Object({}),
+			async execute(): Promise<AgentToolResult<any>> {
+				// Scoped to this task's own hand. The hub knows every hand the member
+				// has — their laptop, each of their spaces — and a Worker pinned to one
+				// space has no business seeing the others' roots, let alone their names.
+				const hands = (await client.refreshHands()).filter(
+					(hand) => pinned === undefined || hand.endpointId === pinned,
+				);
 				const text = hands.length
 					? hands
 							.map(

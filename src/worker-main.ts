@@ -74,6 +74,8 @@ async function main(): Promise<void> {
 	// not the filesystem. If a hand is configured, filesystem access moves there.
 	let handsClient: HandsClient | null = null;
 	let handTools: any[] = [];
+	/** Aborted when the daemon stops this task: the hand tools watch it. */
+	const stopSignal = new AbortController();
 	if (spec.handsSocketPath) {
 		handsClient = new HandsClient({
 			socketPath: spec.handsSocketPath,
@@ -89,7 +91,11 @@ async function main(): Promise<void> {
 				});
 				return false;
 			});
-		handTools = createHandTools({ client: handsClient, endpointId: spec.endpointId });
+		handTools = createHandTools({
+			client: handsClient,
+			endpointId: spec.endpointId,
+			signal: stopSignal.signal,
+		});
 		if (connected) {
 			const hands = await handsClient.refreshHands().catch(() => []);
 			log.info("hands available to this worker", {
@@ -172,8 +178,11 @@ async function main(): Promise<void> {
 	const taskPrompt = [
 		`Task: ${spec.title}`,
 		"",
-		`Description: ${spec.description}`,
-		"",
+		// Two parts, because they answer different questions: what this is for (the
+		// line the person sees on the card) and what to do about it (the brief).
+		...(spec.instructions === undefined
+			? [`Description: ${spec.description}`, ""]
+			: [`What this is for: ${spec.description}`, "", spec.instructions, ""]),
 		`Capabilities granted to you: ${JSON.stringify(capabilities)}.`,
 		handsClient
 			? [
@@ -280,7 +289,15 @@ async function main(): Promise<void> {
 			event.id,
 		);
 	});
-	client.onAbort(() => void finish());
+	// A stop must land even when the turn is inside a tool: abort the session so
+	// the tool sees it, then exit on a deadline rather than waiting for a turn
+	// that may never finish.
+	client.onAbort(() => {
+		stopSignal.abort();
+		void worker.abort("stopped by the daemon").catch(() => {});
+		setTimeout(() => process.exit(0), 2000).unref();
+		void finish();
+	});
 
 	try {
 		client.status("busy", "running task");

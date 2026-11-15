@@ -87,6 +87,7 @@ interface TaskRow {
 	id: string;
 	title: string;
 	description: string;
+	instructions: string | null;
 	thread_id: string | null;
 	channel_id: string | null;
 	reply_to: string | null;
@@ -205,6 +206,7 @@ export class MirStore {
 				id          TEXT PRIMARY KEY,
 				title       TEXT NOT NULL,
 				description TEXT NOT NULL,
+				instructions TEXT,
 				thread_id   TEXT,
 				channel_id  TEXT,
 				reply_to    TEXT,
@@ -371,11 +373,12 @@ export class MirStore {
 		this.db
 			.prepare(
 				`INSERT INTO tasks
-				 (id, title, description, thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 (id, title, description, instructions, thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET
 					title = excluded.title,
 					description = excluded.description,
+					instructions = excluded.instructions,
 					thread_id = excluded.thread_id,
 					channel_id = excluded.channel_id,
 					reply_to = excluded.reply_to,
@@ -390,6 +393,7 @@ export class MirStore {
 				task.id,
 				task.title,
 				task.description,
+				task.instructions ?? null,
 				task.threadId ?? null,
 				task.channelId ?? null,
 				task.replyTo ?? null,
@@ -589,19 +593,44 @@ export class MirStore {
 		return row?.chat_id ?? undefined;
 	}
 
-	threadForChat(chatId: string, mint: () => string): string {
-		const row = this.db.prepare(`SELECT id FROM threads WHERE chat_id = ?`).get(chatId) as
-			| { id: string }
+	/**
+	 * The thread a chat shows, minting it on first use — and, when the chat's own
+	 * name is handed over, holding it.
+	 *
+	 * The name a thread carries is the chat's title as the person sees it, so the
+	 * agent can answer "what is this chat called" without asking anyone. The host
+	 * reads the title from the chat's row, which is the authority; this is the
+	 * brain's copy of it, refreshed whenever the chat is opened.
+	 */
+	threadForChat(chatId: string, mint: () => string, title?: string): string {
+		const row = this.db.prepare(`SELECT id, name FROM threads WHERE chat_id = ?`).get(chatId) as
+			| { id: string; name: string }
 			| undefined;
-		if (row !== undefined) return row.id;
+		if (row !== undefined) {
+			if (title !== undefined && title !== "" && title !== row.name) this.renameThread(row.id, title);
+			return row.id;
+		}
 		const id = mint();
 		this.db
 			.prepare(
 				`INSERT INTO threads (id, name, channel_id, last_event_at, status, seq, chat_id)
 				 VALUES (?, ?, 'anomalous', ?, 'idle', 0, ?)`,
 			)
-			.run(id, chatId, Date.now(), chatId);
+			.run(id, title === undefined || title === "" ? chatId : title, Date.now(), chatId);
 		return id;
+	}
+
+	/** What a thread is called, or undefined for one that does not exist. */
+	threadName(threadId: string): string | undefined {
+		const row = this.db.prepare(`SELECT name FROM threads WHERE id = ?`).get(threadId) as
+			| { name: string }
+			| undefined;
+		return row?.name;
+	}
+
+	/** Rename a thread: what a chat is called, for a chat's thread. */
+	renameThread(threadId: string, name: string): void {
+		this.db.prepare(`UPDATE threads SET name = ? WHERE id = ?`).run(name, threadId);
 	}
 
 	listThreadSummaries(limit: number): ThreadSummary[] {
@@ -875,6 +904,7 @@ function rowToTask(row: TaskRow): Task {
 		id: row.id,
 		title: row.title,
 		description: row.description,
+		instructions: row.instructions ?? undefined,
 		threadId: row.thread_id ?? undefined,
 		channelId: row.channel_id ?? undefined,
 		replyTo: row.reply_to ?? undefined,

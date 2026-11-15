@@ -37,7 +37,6 @@ import type { Channel, ChannelEvent, ReplyContext, ReplyRecorder } from "./chann
 import { ContextManager, createRecallTool } from "./context.ts";
 import { ThreadManager } from "./thread.ts";
 import type { WorkerSpawner } from "./process-manager.ts";
-import { createMcpQueryTool } from "./mcp-query.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 import type { McpCatalogEntry } from "./mcp-catalog.ts";
 import type { McpConfig } from "./mcp.ts";
@@ -169,6 +168,21 @@ interface TurnState {
 
 function emptyTurn(originThreadId?: string): TurnState {
 	return { startedAt: Date.now(), replies: [], dispatches: [], captured: "", originThreadId };
+}
+
+/**
+ * Whether a task is small enough for the lightweight model.
+ *
+ * The Router used to be asked this, which made a cost decision one more thing to
+ * get right before dispatching. It is a cost knob, not a correctness one: a
+ * wrong guess spends tokens, it does not change the answer, so a plain rule is
+ * better than another judgement call in the turn.
+ */
+function isTrivial(description: string): boolean {
+	return (
+		description.length <= 240 &&
+		!/\b(refactor|migrat|audit|review|debug|implement|investigat|design|rewrite|test suite)\b/i.test(description)
+	);
 }
 
 /** Small helper so retry backoff does not block the event loop tests use. */
@@ -307,7 +321,6 @@ export class RouterLayer {
 			this.buildListTasksTool(),
 			this.buildListHandsTool(),
 			createRecallTool(this.deps.context),
-			createMcpQueryTool(this.deps.getMcpCatalog ?? (() => [])),
 		];
 	}
 
@@ -316,17 +329,17 @@ export class RouterLayer {
 		return defineTool({
 			name: "dispatch_task",
 			label: "Dispatch task to a Worker",
-			description:
-				"Dispatch an isolated background Worker (its own OS process) to carry out a task. Use for any work that takes more than a quick reply. The Worker reports a conclusion back to you, which arrives as a new turn. This call returns immediately.",
+			description: [
+				"The only way work gets done. Dispatch an isolated background Worker (its own OS process) to carry out one job.",
+				"Anything not in the five exceptions in \"How to act\" is this call — a question about their repo, their files, their machine, their accounts or their connected services included. If you are unsure whether it is a quick reply, it is not.",
+				"The Worker reports a conclusion back to you, which arrives as a new turn. This call returns immediately, so say one short line first.",
+			].join("\n"),
 			parameters: Type.Object({
 				title: Type.String({ description: "Short task title." }),
 				description: Type.String({ description: "What the Worker should do, self-contained." }),
 				channel: Type.Optional(Type.String({ description: "Channel id the task originated from." })),
 				thread: Type.Optional(Type.String({ description: "Thread id the task belongs to." })),
 				reply_to: Type.Optional(Type.String({ description: "Event id to reply to when done." })),
-				fast: Type.Optional(
-					Type.Boolean({ description: "True if this is a fast task → Worker uses the lightweight model." }),
-				),
 				endpoint: Type.Optional(
 					Type.String({
 						description:
@@ -353,7 +366,7 @@ export class RouterLayer {
 						threadId: params.thread,
 						channelId: params.channel,
 						replyTo: params.reply_to,
-						fast: params.fast ?? false,
+						fast: isTrivial(params.description),
 						endpointId: params.endpoint,
 					});
 					router.turn.dispatches.push(task.id);
@@ -816,16 +829,33 @@ export class RouterLayer {
 		const channelTools = this.deps.channels.map((c) => `respond_${c.id}`).join(", ");
 		return [
 			"=== How to act ===",
-			`Your tools: ${channelTools} (reply on a channel), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), recall (read spilled context by id), mcp_query (informational).`,
-			"You do NOT have bash, read, write, edit, or any execution tool — never run tasks yourself.",
-			"Nor do you have the member's connected services (Linear, Context7, and whatever else they linked). A Worker does: it is handed them at dispatch. So \"I don't have that tool\" is not an answer — a request that needs one is a reason to dispatch, and the Worker reports what it found.",
-			"Decide for each item and ACT with tools — do not just describe:",
-			"- reply to a human → call the matching respond_<channel> tool, passing reply_to = the event id.",
-			"- a real task → call dispatch_task (pass endpoint=<hand id> only if the task needs a specific machine), then briefly tell the user it started.",
-			"- a worker conclusion → tell the user the outcome; dispatch follow-up work only if it is clearly needed.",
+			"You do not do work. A Worker does.",
+			"",
+			`Your tools: ${channelTools} (say something to the person), dispatch_task (start a Worker on a hand), stop_task, list_workers, list_tasks, list_hands (execution environments), recall (read spilled context by id).`,
+			"You have no bash, no file tools, no browser, and none of the member's connected services (Linear, Context7, whatever else they linked) — a Worker is handed those at dispatch. So \"I don't have that tool\" is never an answer: it is a dispatch.",
+			"",
+			"**Dispatch, unless it is one of these five:**",
+			"1. A greeting or a thank you — reply in kind.",
+			"2. Something already in this turn or the State block — answer from it.",
+			"3. A refusal or a policy answer — say it.",
+			"4. \"What are you doing?\" — answer from the State block.",
+			"5. \"Stop that\" — stop_task.",
+			"",
+			"Anything else is dispatch_task. If you are unsure whether it is a quick reply, it is not a quick reply: a question about their machine, their repo, their files, their accounts or their services is a dispatch.",
+			"",
+			"**Answer first, then work.** Someone is waiting on you, so the first thing you do in a turn is say something to them:",
+			"- If the answer is one of the five, say it now — one or two sentences, no preamble.",
+			"- If it is work, say in one short line what you are about to do, then dispatch. A confirmation is a reply: \"Checking the repo now.\" beats ten seconds of silence, and the person should never watch a spinner wondering whether you heard them.",
+			"- A dispatch already tells the person it started, in the words of the thing that started it. Do not repeat it: add only what that line does not say, or nothing.",
+			"",
+			"Then act with tools, and do not wait for the Worker: your turn ends and its conclusion arrives as a new turn.",
+			"- one job → one dispatch_task. Independent jobs (a fix and its docs) may go as two, up to three per turn; never split one question into research and answer.",
+			"- a running Worker that needs a correction → message it, do not dispatch a second one at the same files.",
+			"- a worker conclusion → tell the person the outcome, once. Add a sentence only if it changes what they should do; otherwise say nothing at all.",
 			"- pure noise → do nothing.",
-			`Channels: ${this.deps.channels.map((c) => c.id).join(", ")}.`,
-			"Never write the reply as plain assistant text; it must go through a response tool.",
+			"",
+			`Channels: ${this.deps.channels.map((c) => c.id).join(", ")}. Always reply through respond_<channel> with reply_to = the event id — never as plain assistant text.`,
+			"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
 			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
 		].join("\n");
 	}

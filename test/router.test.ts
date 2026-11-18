@@ -713,3 +713,56 @@ test("a greeting does not name the chat: a chat called after \"Hey there\" is no
 		await h.cleanup();
 	}
 });
+
+test("the procedure is in the skills, not in the turn prompt", async () => {
+	// A rule stated twice drifts: the prompt had the five exceptions and the naming
+	// rules, and the skills have them too. The prompt keeps what must hold on every
+	// turn — the invariants and the deployment's own facts — and points at the skill
+	// for the procedure.
+	const h = await makeRouter({ script: () => [{ type: "tool", name: "respond_terminal", args: { text: "hi" } }] });
+	try {
+		h.router.submitTrigger(makeTrigger({ threadId: "the-chat", text: "hello there" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const prompt = h.sessions[0]!.prompts[0] ?? "";
+
+		// Gone: the procedure, now a skill.
+		assert.doesNotMatch(prompt, /Dispatch, unless it is one of these five/, "the five exceptions are a skill");
+		assert.doesNotMatch(prompt, /If you are unsure whether it is a quick reply/, "the dispatch bias is a skill");
+		assert.doesNotMatch(prompt, /Name the chat, and keep naming it/, "naming is a skill");
+		assert.doesNotMatch(prompt, /call chat_title with four or five words/, "and so are its rules");
+
+		// Still here: the invariants, and the fact of which channels exist.
+		assert.match(prompt, /You do not do work yourself: a Worker does\./);
+		assert.match(prompt, /Read the `dispatch` skill before you act/);
+		assert.match(prompt, /Read `chat-title` before you end a turn/);
+		assert.match(prompt, /Never mention the machinery/);
+		assert.match(prompt, /Never promise to come back/);
+		assert.match(prompt, /Channels: terminal/);
+		assert.match(prompt, /use_skill \(read one of your skills\)/);
+
+		// And the skill has what the prompt no longer says, so nothing was lost in
+		// the move.
+		const { readSkill } = await import("../src/skills.ts");
+		const dispatch = (await readSkill("dispatch")).replace(/\s+/g, " ");
+		assert.match(dispatch, /Dispatch, unless it is one of these five/);
+		assert.match(dispatch, /If you are unsure whether it is a quick reply, it is not a quick reply/);
+		const naming = (await readSkill("chat-title")).replace(/\s+/g, " ");
+		assert.match(naming, /four or five words/);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("the Router is offered use_skill, so the skills it is advertised can be read", async () => {
+	// pi advertises a skill's name, description and path; the Router has no file
+	// tools by design, so without this the skills are decoration.
+	const h = await makeRouter({ script: () => [{ type: "tool", name: "respond_terminal", args: { text: "hi" } }] });
+	try {
+		h.router.submitTrigger(makeTrigger({ threadId: "the-chat", text: "hello" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const names = h.sessions[0]!.tools.map((tool) => tool.name);
+		assert.ok(names.includes("use_skill"), `expected use_skill, saw ${names.join(", ")}`);
+	} finally {
+		await h.cleanup();
+	}
+});

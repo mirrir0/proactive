@@ -622,8 +622,8 @@ export function createAgentTools(
 			label: "Dispatch a check",
 			description: [
 				"Run one independent check in a subagent and wait for its conclusion.",
-				"Dispatch when the work splits into parts that do not need each other's answers — three files to read, three suspects to verify. Do not dispatch a single question: that is your own job, and a subagent costs a process and a model turn.",
-				"The result is that subagent's conclusion, written for you rather than for a person. Its thread is on the rail if you want the raw detail.",
+				"The `subagents` skill says when the work divides and how to write the brief — read it before you split anything.",
+				"The result is that subagent's conclusion, written for you rather than for a person.",
 			].join("\n"),
 			parameters: Type.Object({
 				title: Type.String({ description: "Short title: what this check is." }),

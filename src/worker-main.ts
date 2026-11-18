@@ -21,6 +21,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadEnv } from "./env.ts";
 import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerSpec } from "./process-manager.ts";
+import { taskMessage } from "./task-message.ts";
 import { WorkerRuntime, createWorkerControlTools } from "./worker.ts";
 import { ControlClient } from "./ipc.ts";
 import { McpManager, type McpConfig } from "./mcp.ts";
@@ -175,30 +176,8 @@ async function main(): Promise<void> {
 	const threadIds = spec.threadId ? [spec.threadId] : [];
 	worker.addTools(createWorkerControlTools(worker, threadIds));
 
-	const taskPrompt = [
-		`Task: ${spec.title}`,
-		"",
-		// Two parts, because they answer different questions: what this is for (the
-		// line the person sees on the card) and what to do about it (the brief).
-		...(spec.instructions === undefined
-			? [`Description: ${spec.description}`, ""]
-			: [`What this is for: ${spec.description}`, "", spec.instructions, ""]),
-		`Capabilities granted to you: ${JSON.stringify(capabilities)}.`,
-		handsClient
-			? [
-					"Execution happens on a hand (an execution environment), not in this process:",
-					"- exec({ argv }) runs a command there (argv form, no shell unless granted)",
-					"- read_file / write_file / list_dir touch its filesystem, confined to its roots",
-					"- git({ args }) runs git there, using the machine's own credentials",
-					"- list_hands() shows the hand you run on, and nothing else",
-					`You are pinned to hand: ${spec.endpointId ?? "(the hub picks the least-loaded capable one)"}.`,
-					"Your local codemode has no filesystem access; use the hand tools for anything on disk.",
-				].join("\n")
-			: "No hand is configured; use your local tools.",
-		"You can call mcp_query to search which MCP tools are available.",
-		"Use the tools you have as needed to complete the task, then report a concise conclusion (what you did, what you found, the outcome).",
-		"If a follow-up message arrives that is not part of this task, call release_event instead of answering it.",
-	].join("\n");
+	// One renderer for every task: the person's line, the brief, what it may touch.
+	const taskPrompt = taskMessage({ ...spec, hasHands: handsClient !== null });
 
 	let idleTimer: NodeJS.Timeout | null = null;
 	let stopping = false;

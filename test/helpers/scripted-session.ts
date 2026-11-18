@@ -37,7 +37,8 @@ export class ScriptedSession implements AgentSessionLike {
 	disposed = false;
 
 	private readonly listeners = new Set<(event: any) => void>();
-	private readonly tools: ToolDefinition[];
+	/** The tool surface this session was created with, for a test that asserts it. */
+	readonly tools: ToolDefinition[];
 	private readonly options: ScriptedSessionOptions;
 	private pending: Promise<void> | null = null;
 	private streaming = false;

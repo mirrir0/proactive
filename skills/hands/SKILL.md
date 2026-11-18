@@ -4,8 +4,8 @@ description: Work on the machine the member pointed you at — files, commands, 
 ---
 
 Execution happens on a hand: an execution environment with a filesystem, a shell and git.
-This process has none of them, so the hand's tools are the only way anything on disk
-changes.
+This process has none of them — when a hand is configured, even the local codemode loses
+its file access — so the hand's tools are the only way anything on disk changes.
 
 - `exec({ argv })` runs a command there. argv form, no shell unless the hand granted one.
 - `read_file`, `write_file`, `list_dir` touch its filesystem, confined to its roots. A

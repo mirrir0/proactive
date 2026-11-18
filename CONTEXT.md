@@ -235,6 +235,18 @@ sandbox globals, re-reports its catalog, and injects a `[system]` note into its
 session. A corrupt save is logged and skipped — the last good config stays
 active.
 
+**Skills** — the brain's instructions are pi skills, at `skills/<name>/SKILL.md`
+in the package root (`src/skills.ts`). pi advertises each one's name, description
+and path; `use_skill({ name })` reads the body, because the Router has no file
+tools by design. A session's resource loader is built by `brainResourceLoader()`
+and allow-listed to two roots — the package's `skills/` and the session's own
+agent dir — because the SDK's default loader also scans `~/.pi/agent/skills`, so
+a brain without one advertises every skill on the host it runs on (measured: 63,
+none of them the brain's). The same filter keeps a `SKILL.md` in a Worker's
+working directory out: a space folder is a member's files, not instructions.
+Extensions and context files are off for the same reason. Invariants that must
+hold on every turn stay in the system prompt; procedures live in skills.
+
 **`mcp_query` tool** — every agent (each Worker *and* the Router) can search the
 available MCP tools. Workers search their live `McpManager`; the Router searches
 the daemon's cached catalog merged from worker reports.
@@ -252,7 +264,8 @@ within a Worker session.
 
 Only Workers get MCP tools and codemode — the Router never executes tasks and
 only has `respond_<channel>`, `dispatch_task`, `stop_task`, `list_workers`,
-`list_tasks`, `list_hands`, `recall` and the informational `mcp_query`.
+`list_tasks`, `list_hands`, `recall`, `use_skill` and the informational
+`mcp_query`.
 
 Workers get the hand tools (`exec`, `read_file`, `write_file`, `list_dir`, `git`,
 `list_hands`) when a hub is configured. When a hand is present the Worker's local

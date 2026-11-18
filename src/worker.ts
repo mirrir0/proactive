@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { type WorkerCapabilities, DEFAULT_WORKER_CAPABILITIES } from "./security.ts";
 import { createPiSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
+import { brainResourceLoader, useSkillTool } from "./skills.ts";
 import { metrics, log } from "./telemetry.ts";
 
 /** How a Worker reports to the Router (implemented over the IPC control channel). */
@@ -221,6 +222,11 @@ export class WorkerRuntime {
 		const sessionManager = SessionManager.open(sessionFile);
 
 		const factory = options.sessionFactory ?? createPiSession;
+		const agentDir = options.agentDir ?? join(options.sessionDir, "agent");
+		// The same skills the Router has. A Worker's working directory is the
+		// member's space, and its loader is allow-listed to the brain's roots, so a
+		// `SKILL.md` in that folder is not instructions it follows.
+		const resourceLoader = await brainResourceLoader({ cwd: process.cwd(), agentDir });
 		worker.session = await factory({
 			model: options.model,
 			modelRuntime: options.modelRuntime,
@@ -238,8 +244,9 @@ export class WorkerRuntime {
 			//   - `agentDir` keeps the Worker away from the machine's own pi config.
 			noTools: "all",
 			tools: (options.customTools ?? []).map((tool) => String(tool.name)),
-			agentDir: options.agentDir ?? join(options.sessionDir, "agent"),
-			customTools: options.customTools ?? [],
+			agentDir,
+			resourceLoader,
+			customTools: [...(options.customTools ?? []), useSkillTool()],
 		});
 		worker.session.subscribe((event: any) => {
 			if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {

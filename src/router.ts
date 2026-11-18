@@ -31,6 +31,7 @@ import {
 	type AgentToolResult,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { Type } from "typebox";
 import type { RouterStatus, SuperAgentConfig, Task, TaskStatus, Trigger, WorkerInfo } from "./types.ts";
 import type { Channel, ChannelEvent, ReplyContext, ReplyRecorder } from "./channels/types.ts";
@@ -44,6 +45,7 @@ import type { MirStore } from "./store.ts";
 import { metrics, log } from "./telemetry.ts";
 import { redactSecrets } from "./security.ts";
 import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
+import { brainResourceLoader, useSkillTool } from "./skills.ts";
 import type { NewThreadEntry, ThreadEntry, ThreadLog } from "./threadlog.ts";
 
 /**
@@ -345,12 +347,19 @@ export class RouterLayer {
 				return SessionManager.inMemory();
 			}
 		})();
+		// The Router's instructions are skills, not a template literal: the loader
+		// advertises the brain's own set and refuses everything the host machine
+		// happens to have installed.
+		const agentDir = join(deps.config.stateDir, "router-agent");
+		const resourceLoader = await brainResourceLoader({ cwd: deps.config.stateDir, agentDir });
 		router.session = await factory({
 			model: deps.model,
 			modelRuntime: deps.modelRuntime,
 			sessionManager,
 			thinkingLevel: deps.config.thinkingLevel,
 			noTools: "builtin",
+			agentDir,
+			resourceLoader,
 			customTools,
 		});
 		router.session.subscribe((event: any) => {
@@ -369,6 +378,7 @@ export class RouterLayer {
 
 	private buildTools(): ToolDefinition[] {
 		return [
+			useSkillTool(),
 			...this.deps.channels.map((c) => c.responseTool(this.recorder)),
 			this.buildDispatchTool(),
 			this.buildStopTaskTool(),

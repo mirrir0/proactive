@@ -49,6 +49,15 @@ export interface CreateSessionOptions {
 	 * has them is a Worker that can do things the assistant never could.
 	 */
 	agentDir?: string;
+	/**
+	 * What the session may take skills, extensions and context files from.
+	 *
+	 * Built by `skills.ts`, never left to the default: the default loader scans the
+	 * machine's own pi home, so a brain without one advertises every skill on the
+	 * host it runs on. `agentDir` alone is not enough — it is one more place
+	 * scanned, not the only one.
+	 */
+	resourceLoader?: any;
 	customTools?: ToolDefinition[];
 }
 
@@ -64,6 +73,7 @@ export const createPiSession: SessionFactory = async (options) => {
 		noTools: options.noTools,
 		...(options.tools === undefined ? {} : { tools: options.tools }),
 		...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
+		...(options.resourceLoader === undefined ? {} : { resourceLoader: options.resourceLoader }),
 		customTools: options.customTools,
 	});
 	return result.session as unknown as AgentSessionLike;

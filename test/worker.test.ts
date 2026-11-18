@@ -195,3 +195,16 @@ test("dispose: a disposed worker refuses further turns", async () => {
 	await assert.rejects(() => worker.run("again"), /disposed/);
 	rmDir(dir);
 });
+
+test("a Worker is handed the brain's skills, and use_skill to read one", async () => {
+	// The Worker's procedure lives in the same six files the Router's does — it is
+	// the same brain — and it is given the one tool that makes them readable.
+	const { sessions } = await makeWorker();
+	const loader = sessions[0]!.resourceLoader as {
+		getSkills(): { skills: Array<{ name: string }> };
+	};
+	const names = loader.getSkills().skills.map((skill) => skill.name).sort();
+	assert.deepEqual(names, ["chat-title", "conclusion", "connected-services", "dispatch", "hands", "subagents"]);
+	const tools = sessions[0]!.tools.map((tool) => tool.name);
+	assert.ok(tools.includes("use_skill"), `expected use_skill among ${tools.join(", ")}`);
+});

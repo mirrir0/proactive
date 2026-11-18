@@ -7,7 +7,7 @@ credentials actually are: your laptop, a build box, a container.
 ```
   brain (daemon)                          hands (this machine)
   ┌───────────────────────┐              ┌──────────────────────────┐
-  │ Router                │              │ mir-endpoint             │
+  │ Router                │              │ mir endpoint             │
   │  └─ Worker ───────────┼─ exec() ────▶│  • runs commands         │
   │     (model + tools)   │◀── result ───│  • reads/writes files    │
   │                       │              │  • uses local git remote │
@@ -30,7 +30,7 @@ mir hands add my-laptop --name "Orchid's MacBook"
 Prints a token **once** and the exact command to run on that machine:
 
 ```
-  mir-endpoint --hub hub.example.com:4700 --id my-laptop --token <token> \
+  mir endpoint --hub hub.example.com:4700 --id my-laptop --token <token> \
                --root ~/work --allow git,ls,cat,rg,node,pnpm --fs rw
 ```
 
@@ -48,9 +48,9 @@ mir hands rm <id>       # forget it entirely
 ## 2. Install the endpoint (on the machine)
 
 ```bash
-npm install -g .          # from a checkout; installs the `mir-endpoint` binary
+npm install -g .          # from a checkout; installs the `mir` binary
 # or run without installing:
-npx tsx src/endpoint/main.ts --help
+npx tsx src/index.ts endpoint --help
 ```
 
 Everything is a flag or a `MIR_HANDS_*` environment variable, so it works as a
@@ -68,7 +68,8 @@ service unit with the token in the environment.
   <key>Label</key><string>dev.mir.endpoint</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/mir-endpoint</string>
+    <string>/usr/local/bin/mir</string>
+    <string>endpoint</string>
     <string>--hub</string><string>hub.example.com:4700</string>
     <string>--id</string><string>my-laptop</string>
     <string>--root</string><string>/Users/me/work</string>
@@ -82,8 +83,8 @@ service unit with the token in the environment.
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/mir-endpoint.err.log</string>
-  <key>StandardOutPath</key><string>/tmp/mir-endpoint.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mir-hand.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/mir-hand.out.log</string>
 </dict>
 </plist>
 ```
@@ -94,7 +95,7 @@ launchctl load ~/Library/LaunchAgents/dev.mir.endpoint.plist
 
 ### Linux — systemd
 
-`/etc/systemd/system/mir-endpoint.service`:
+`/etc/systemd/system/mir-hand.service`:
 
 ```ini
 [Unit]
@@ -106,7 +107,7 @@ Type=simple
 User=build
 Environment=MIR_HANDS_TOKEN=REPLACE_ME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/mir-endpoint \
+ExecStart=/usr/local/bin/mir \
   --hub hub.example.com:4700 --id build-box \
   --root /srv/work --allow git,make,node,pnpm,tsc --fs rw \
   --tls --ca /etc/ssl/certs/hub-ca.pem
@@ -118,7 +119,7 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable --now mir-endpoint
+sudo systemctl enable --now mir-hand
 ```
 
 ### Container
@@ -132,7 +133,7 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN npm install -g /opt/mir        # or COPY the built dist + bin
 WORKDIR /work
-ENTRYPOINT ["mir-endpoint"]
+ENTRYPOINT ["mir", "endpoint"]
 ```
 
 ```bash
@@ -176,7 +177,7 @@ The sandbox is **on by default**. That means a fresh hand has **no network**:
 `git push`, `npm install` and `curl` fail until you name the hosts they need.
 
 ```bash
-mir-endpoint --hub hub:4700 --id my-laptop --token …   --root ~/work   --allow git,node,pnpm,ls,cat,rg   --allow-net github.com,registry.npmjs.org,objects.githubusercontent.com   --deny-read ~/.ssh --deny-read ~/.aws --deny-read ~/.config/gh   --deny-write ~/work/.env
+mir endpoint --hub hub:4700 --id my-laptop --token …   --root ~/work   --allow git,node,pnpm,ls,cat,rg   --allow-net github.com,registry.npmjs.org,objects.githubusercontent.com   --deny-read ~/.ssh --deny-read ~/.aws --deny-read ~/.config/gh   --deny-write ~/work/.env
 ```
 
 What that buys you:

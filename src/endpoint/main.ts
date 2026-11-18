@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `mir-endpoint` — the installable hand.
+ * The hand — `mir endpoint`.
  *
  * This is the program that runs on the machine where work actually happens: a
  * laptop, a build box, a container. It is deliberately small and deliberately
@@ -16,7 +16,7 @@
  *     token.
  *
  * Usage:
- *   mir-endpoint --hub cloud.example.com:4700 --id my-laptop --token <token> \
+ *   mir endpoint --hub cloud.example.com:4700 --id my-laptop --token <token> \
  *                --root ~/work --allow git,ls,cat,rg,node,pnpm --fs rw
  *
  * Every flag has an environment fallback (MIR_HANDS_*), so it can be installed
@@ -333,9 +333,9 @@ function hasFlag(argv: string[], name: string): boolean {
 
 export function usage(): string {
 	return [
-		"mir-endpoint — run work for a mir hub on this machine",
+		"mir endpoint — run work for a mir hub on this machine",
 		"",
-		"  mir-endpoint --hub <host:port> --id <id> --token <token> [options]",
+		"  mir endpoint --hub <host:port> --id <id> --token <token> [options]",
 		"",
 		"  --hub <host:port>       hub address (env MIR_HANDS_HUB)            required",
 		"  --id <id>               hand id registered with the hub           required",
@@ -458,7 +458,7 @@ export async function runEndpoint(argv = process.argv.slice(2)): Promise<void> {
 	try {
 		options = parseEndpointArgs(argv);
 	} catch (err) {
-		console.error(`mir-endpoint: ${(err as Error).message}\n`);
+		console.error(`mir endpoint: ${(err as Error).message}\n`);
 		console.error(usage());
 		process.exit(1);
 	}

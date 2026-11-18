@@ -74,7 +74,7 @@ Losing a hand is a failed tool call, not a lost task.
 **Brain** — everything that holds the model loop and the session: the Router and
 the Workers. A brain never touches files directly; it asks a hand.
 
-**Endpoint** (`mir-endpoint`) — the installable process that makes one machine a
+**Endpoint** (`mir endpoint`) — the process that makes one machine a
 hand. It dials **out** to the hub, so no inbound port or static address is
 needed, and it enforces the machine owner's policy.
 
@@ -124,6 +124,42 @@ after filtering. Events are recorded in the **trigger log** before processing.
 (`respond_terminal`, `respond_http`, `respond_queue`). Each Channel carries its
 own **reply norms** (IM short, GitHub/email structured). A reply is a tool call,
 not free-form text, and it is what the **reply recorder** counts.
+
+## Files and paths
+
+One executable, `mir`. Everything is a subcommand of it: the brain (`daemon`,
+`serve`, `start`), its administration (`status`, `hands`, `recall`, `metrics`,
+`paths`, `init`), and the hand (`endpoint`). `bin/mir.js` resolves the compiled
+`dist/index.js` when there is one and falls back to `src/index.ts` through tsx,
+always from its own location — so `mir` behaves the same from a shell, from pm2,
+and from a launchd unit. There is no second binary: a hand is a role, not another
+program.
+
+`src/paths.ts` decides where files go, per platform:
+
+| | macOS | Linux |
+|---|---|---|
+| config | `~/Library/Application Support/mir/config` | `~/.config/mir` |
+| data (SQLite, queue, sessions) | `…/mir/data` | `~/.local/share/mir` |
+| state (pid, worker state) | `…/mir/state` | `~/.local/state/mir` |
+| cache (MCP tool lists) | `~/Library/Caches/mir` | `~/.cache/mir` |
+| logs | `~/Library/Logs/mir` | `~/.local/state/mir/logs` |
+| sockets | `…/mir/run` | `$XDG_RUNTIME_DIR/mir`, else `~/.local/state/mir/run` |
+
+Linux follows the XDG Base Directory specification, including each variable
+(`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`,
+`XDG_RUNTIME_DIR`). macOS follows Apple's layout. `MIR_HOME` puts everything under
+one directory (what a container mounts), and the per-path variables
+(`MIR_STATE_DIR`, `MIR_SOCKET_PATH`, `MIR_QUEUE_DIR`, …) still win over
+everything, because they are what an existing deployment sets.
+
+`mir init` creates the layout and writes `config.json` (which records where things
+are, never a secret); `mir paths` prints it without touching disk. A unix socket
+path is capped by the kernel — 103 bytes on macOS, 107 on Linux — so `init` checks
+the two sockets it will bind and names the limit and the variable that moves them
+rather than failing later at bind time. An install that predates this layout lives
+in `~/.local/share/mir`; `init` reports it and refuses to guess, since splitting a
+brain from its store is worse than telling someone to set `MIR_HOME`.
 
 ## Processes
 

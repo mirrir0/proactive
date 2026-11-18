@@ -1,7 +1,7 @@
 /**
  * End-to-end smoke test for the installable hand.
  *
- * Starts a hub, spawns `bin/mir-endpoint.js` as a real subprocess (exactly what
+ * Starts a hub, spawns `mir endpoint` as a real subprocess (exactly what
  * an operator installs), waits for it to register, runs one allowed command and
  * one denied one, then tears everything down.
  *
@@ -37,7 +37,8 @@ await server.start();
 console.log("hub listening on", server.port);
 
 const child = spawn(process.execPath, [
-  path.resolve("bin/mir-endpoint.js"),
+  path.resolve("bin/mir.js"),
+  "endpoint",
   "--hub", `127.0.0.1:${server.port}`,
   "--id", "smoke",
   "--token", token,

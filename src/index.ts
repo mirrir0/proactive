@@ -17,15 +17,18 @@ import { MirStore } from "./store.ts";
 import crypto from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hashToken } from "./hands/protocol.ts";
 import { runEndpoint } from "./endpoint/main.ts";
+import { ensurePaths, legacyHome, mirPaths, requiredDirs, socketFits, socketLimit } from "./paths.ts";
 
 function usage(): void {
 	console.log(
 		[
 			"mir <command>",
 			"",
+			"  init              create this machine's mir directories and config",
+			"  paths             print where this install keeps its files",
 			"  serve             run the daemon with its client API on (see MIR_API_*)",
 			"  daemon            run the daemon in the foreground (dev)",
 			"  start             start mir-daemon under pm2",
@@ -42,7 +45,7 @@ function usage(): void {
 			"  hands rm <id>     forget a hand",
 			"  hands work        recent work dispatched to hands",
 			"",
-			"  endpoint          run the hand daemon on this machine (mir-endpoint)",
+			"  endpoint          run the hand on this machine: the endpoint that does the work",
 			"",
 		].join("\n"),
 	);
@@ -124,7 +127,7 @@ async function main(): Promise<void> {
 	 * is not one to leave running.
 	 */
 	if (cmd === "serve") {
-		const socket = process.env.MIR_API_SOCKET ?? join(homedir(), ".local", "share", "mir", "brain.sock");
+		const socket = process.env.MIR_API_SOCKET ?? join(mirPaths().runtime, "brain.sock");
 		const token = process.env.MIR_API_TOKEN ?? "";
 		if (token === "") {
 			console.error(
@@ -306,6 +309,80 @@ async function main(): Promise<void> {
 		}
 	}
 
+	/**
+	 * `mir init` — put the files where this platform says they go.
+	 *
+	 * Idempotent: it creates what is missing, keeps a config it finds, and refuses
+	 * to guess when an older install's data is sitting somewhere else.
+	 */
+	if (cmd === "init") {
+		if (rest.includes("--help") || rest.includes("-h")) {
+			usage();
+			return;
+		}
+		const paths = mirPaths();
+		const force = rest.includes("--force");
+		const created = ensurePaths(paths);
+		const config = configExists(paths.configFile) && !force ? "kept" : writeConfig(paths.configFile, paths);
+		const sockets = [paths.daemonSocket, paths.handsSocket].filter((path) => !socketFits(path));
+
+		console.log(`mir home   ${paths.home}`);
+		for (const dir of requiredDirs(paths)) console.log(`  ${dir.name.padEnd(10)} ${dir.path}`);
+		console.log(`  config file ${paths.configFile} (${config})`);
+
+		const legacy = legacyHome();
+		// Only when the platform default was used: an operator who set MIR_HOME has
+		// already decided where their files go, and telling them about an old
+		// directory they chose to leave is noise.
+		if (process.env.MIR_HOME === undefined && paths.home !== legacy && dirHasFiles(legacy)) {
+			console.log(
+				[
+					"",
+					`Found an older install at ${legacy}.`,
+					"This init did not move it: set MIR_HOME to that directory to keep using it,",
+					"or move its contents into the paths above.",
+				].join("\n"),
+			);
+		}
+
+		if (sockets.length > 0) {
+			console.error(
+				[
+					"",
+					`This socket path is too long to bind (limit ${socketLimit()} bytes):`,
+					...sockets.map((path) => `  ${path}`),
+					"Set MIR_HOME (or MIR_SOCKET_PATH / MIR_HANDS_SOCKET) to a shorter directory.",
+				].join("\n"),
+			);
+			process.exitCode = 1;
+		}
+
+		if (created.length === 0) console.log("\nnothing to create: this install was already initialized.");
+		console.log(
+			[
+				"",
+				"next:",
+				"  mir daemon        run the brain in the foreground",
+				"  mir start         run it under pm2",
+				"  mir hands add <id>  register a machine that does the work",
+				"  mir endpoint --hub host:port --id <id> --token <token>   run a hand",
+			].join("\n"),
+		);
+		return;
+	}
+
+	/** `mir paths` — the same layout, without touching the disk. */
+	if (cmd === "paths") {
+		const paths = mirPaths();
+		const width = Math.max(...requiredDirs(paths).map((dir) => dir.name.length));
+		console.log(`home       ${paths.home}`);
+		for (const dir of requiredDirs(paths)) console.log(`${dir.name.padEnd(width)}   ${dir.path}`);
+		console.log(`config file ${paths.configFile}`);
+		console.log(`daemon     ${paths.daemonSocket}`);
+		console.log(`hands      ${paths.handsSocket}`);
+		return;
+	}
+
 	if (cmd === "endpoint") {
 		await runEndpoint(rest);
 		return;
@@ -322,6 +399,54 @@ async function main(): Promise<void> {
 	}
 
 	usage();
+}
+
+function configExists(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Write the config an install starts from.
+ *
+ * It records where things are rather than what they should be: a person looking
+ * at this file is asking "where did my data go", and the answer should not be
+ * "read the source".
+ */
+function writeConfig(path: string, paths: ReturnType<typeof mirPaths>): string {
+	mkdirSync(dirname(path), { recursive: true });
+	const body = {
+		version: 1,
+		home: paths.home,
+		paths: {
+			data: paths.data,
+			state: paths.state,
+			cache: paths.cache,
+			logs: paths.logs,
+			runtime: paths.runtime,
+			daemonSocket: paths.daemonSocket,
+			handsSocket: paths.handsSocket,
+			queue: paths.queueDir,
+			sessions: paths.sessions,
+			mcpOauth: paths.mcpOauth,
+		},
+		// Channels and model are environment variables, not this file: a config
+		// holding a key is a key in a backup.
+		env: ["MIR_HTTP_PORT", "MIR_MODEL", "MIR_OPENROUTER_API_KEY", "MIR_API_TOKEN"],
+	};
+	writeFileSync(path, `${JSON.stringify(body, null, "\t")}\n`, { mode: 0o600 });
+	return "written";
+}
+
+function dirHasFiles(path: string): boolean {
+	try {
+		return readdirSync(path).length > 0;
+	} catch {
+		return false;
+	}
 }
 
 main().catch((err) => {

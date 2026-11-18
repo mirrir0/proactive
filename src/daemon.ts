@@ -12,6 +12,7 @@
 
 import { homedir } from "node:os";
 import { loadEnv, expandHome } from "./env.ts";
+import { mirPaths } from "./paths.ts";
 import { join } from "node:path";
 import { SuperAgent } from "./superagent.ts";
 import type { Channel } from "./channels/types.ts";
@@ -73,6 +74,10 @@ export function semanticPoliciesFromEnv(env: NodeJS.ProcessEnv = process.env): S
 }
 
 export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentConfig {
+	// Where this install keeps its files, on this platform (see paths.ts). Every
+	// value below can still be overridden by its own environment variable, which is
+	// what an existing deployment and a container both rely on.
+	const paths = mirPaths();
 	// The stack this brain belongs to, when it has one. Absent, this brain runs on
 	// its own config file and reaches no connected service.
 	const stackUrl = env.MIR_STACK_URL ?? "";
@@ -100,10 +105,10 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		httpPort: numEnv("MIR_HTTP_PORT", 4599),
 		httpToken: env.MIR_HTTP_TOKEN || undefined,
 		httpHmacSecret: env.MIR_HTTP_HMAC_SECRET || undefined,
-		queueDir: expandHome(env.MIR_QUEUE_DIR ?? join(homedir(), ".local", "share", "mir", "queue")),
+		queueDir: expandHome(env.MIR_QUEUE_DIR ?? paths.queueDir),
 		queuePollMs: numEnv("MIR_QUEUE_POLL_MS", 2000),
 		socketPath: expandHome(
-			env.MIR_SOCKET_PATH ?? join(homedir(), ".local", "share", "mir", "daemon.sock"),
+			env.MIR_SOCKET_PATH ?? paths.daemonSocket,
 		),
 		// The door a display connects to. Off unless a socket is named: a daemon
 		// that serves threads to nobody should not be listening.
@@ -114,10 +119,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		workerIdleExitMs: numEnv("MIR_WORKER_IDLE_MS", 120_000),
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),
 		maxTokens: numEnv("MIR_MAX_TOKENS", 8192),
-		workerSessionDir: expandHome(
-			env.MIR_WORKER_STATE_DIR ?? join(homedir(), ".local", "share", "mir", "worker-state"),
-		),
-		stateDir: expandHome(env.MIR_STATE_DIR ?? join(homedir(), ".local", "share", "mir", "state")),
+		workerSessionDir: expandHome(env.MIR_WORKER_STATE_DIR ?? join(paths.state, "worker-state")),
+		stateDir: expandHome(env.MIR_STATE_DIR ?? join(paths.state, "state")),
 		mcpConfigPath: env.MIR_MCP_CONFIG_PATH ?? "mcp.config.json",
 		// The stack says what this member may reach; without one, the file does.
 		...(stackUrl === "" ? {} : { mcpServers: new McpServers({ stackUrl, token: env.MIR_API_TOKEN ?? "", log }) }),
@@ -154,7 +157,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			host: env.MIR_HANDS_HOST ?? "127.0.0.1",
 			port: numEnv("MIR_HANDS_PORT", 4700),
 			socketPath: expandHome(
-				env.MIR_HANDS_SOCKET ?? join(homedir(), ".local", "share", "mir", "hands.sock"),
+				env.MIR_HANDS_SOCKET ?? paths.handsSocket,
 			),
 			tlsCert: env.MIR_HANDS_TLS_CERT || undefined,
 			tlsKey: env.MIR_HANDS_TLS_KEY || undefined,
@@ -190,7 +193,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 				git: boolEnv("MIR_HANDS_LOCAL_GIT", true),
 			},
 		},
-		sessionDir: expandHome(env.MIR_ROUTER_SESSION ?? join(homedir(), ".local", "share", "mir", "router.session")),
+		sessionDir: expandHome(env.MIR_ROUTER_SESSION ?? paths.sessions),
 	};
 }
 

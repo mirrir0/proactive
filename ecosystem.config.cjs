@@ -6,15 +6,24 @@
  *
  *   pm2 start ecosystem.config.cjs
  */
+const fs = require("node:fs");
+const path = require("node:path");
+
+// Resolve from this file, not from the working directory: a global install runs
+// `mir start` from anywhere, and pm2 inherits whatever cwd the caller had.
+const root = __dirname;
+const built = path.join(root, "dist", "index.js");
+const compiled = fs.existsSync(built);
+
 module.exports = {
 	apps: [
 		{
 			name: "mir-daemon",
-			script: "src/index.ts",
+			script: compiled ? built : path.join(root, "src", "index.ts"),
 			args: "daemon",
-			cwd: __dirname,
+			cwd: root,
 			interpreter: process.execPath,
-			interpreter_args: "--import tsx",
+			...(compiled ? {} : { interpreter_args: "--import tsx" }),
 			autorestart: true,
 			max_restarts: 20,
 			restart_delay: 2000,

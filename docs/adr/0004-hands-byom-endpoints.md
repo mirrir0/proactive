@@ -104,3 +104,10 @@ the operation, preferring local on ties.
   granting the hand a capability later. This is a known, documented limitation.
 - A hand's policy is per-machine, so `list_hands` is the source of truth for what
   a task can do. The Router must read it rather than assume.
+
+---
+
+**Later:** the endpoint is not a second binary. `bin/mir-endpoint.js` was merged
+into a single `mir` executable (`mir endpoint`), so installing one command gives
+both the brain and the hand; the reasoning above is unchanged — the hand is still
+a separate *process* with its own policy, and still dials out.

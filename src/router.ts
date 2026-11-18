@@ -254,6 +254,21 @@ function sleep(ms: number): Promise<void> {
  */
 const PERSON_CHANNELS: ReadonlySet<string> = new Set<string>(["anomalous", "terminal"]);
 
+/**
+ * What holds on every turn, whatever a skill says.
+ *
+ * These are appended to the Router's system prompt rather than restated in each
+ * turn's message. Two reasons: a rule that must never be optional cannot compete
+ * with the turn's content for attention, and pi's own system prompt describes a
+ * coding agent with tools — which this is not — so the conflict is resolved where
+ * the framing lives.
+ */
+export const ROUTER_INVARIANTS: readonly string[] = [
+	"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and never describe a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
+	"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
+	"Never promise to come back: no \"I'll report back\", \"I'll let you know\", \"I'll update you\". The answer simply arrives — saying you will send it is a line about the conversation instead of a line about the work.",
+];
+
 export class RouterLayer {
 	private session!: AgentSessionLike;
 	private readonly deps: RouterDependencies;
@@ -351,7 +366,11 @@ export class RouterLayer {
 		// advertises the brain's own set and refuses everything the host machine
 		// happens to have installed.
 		const agentDir = join(deps.config.stateDir, "router-agent");
-		const resourceLoader = await brainResourceLoader({ cwd: deps.config.stateDir, agentDir });
+		const resourceLoader = await brainResourceLoader({
+			cwd: deps.config.stateDir,
+			agentDir,
+			invariants: ROUTER_INVARIANTS,
+		});
 		router.session = await factory({
 			model: deps.model,
 			modelRuntime: deps.modelRuntime,
@@ -1033,11 +1052,6 @@ export class RouterLayer {
 			// that says when it applies, is loaded when it matters.
 			"You do not do work yourself: a Worker does. Read the `dispatch` skill before you act on a request — it holds the five things you answer yourself, and why everything else is a dispatch. Read `chat-title` before you end a turn.",
 			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
-			"",
-			"**These hold on every turn, whatever a skill says:**",
-			"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and never describe a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
-			"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
-			"Never promise to come back: no \"I'll report back\", \"I'll let you know\", \"I'll update you\". The answer simply arrives — saying you will send it is a line about the conversation instead of a line about the work.",
 			"",
 			`Channels: ${this.deps.channels.map((c) => c.id).join(", ")}. Always reply through respond_<channel> with reply_to = the event id — never as plain assistant text.`,
 		].join("\n");

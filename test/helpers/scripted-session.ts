@@ -39,14 +39,17 @@ export class ScriptedSession implements AgentSessionLike {
 	private readonly listeners = new Set<(event: any) => void>();
 	/** The tool surface this session was created with, for a test that asserts it. */
 	readonly tools: ToolDefinition[];
+	/** What the layer handed the session: the loader is where a test reads the system prompt. */
+	readonly resourceLoader: unknown;
 	private readonly options: ScriptedSessionOptions;
 	private pending: Promise<void> | null = null;
 	private streaming = false;
 	private idleWaiters: Array<() => void> = [];
 
-	constructor(tools: ToolDefinition[], options: ScriptedSessionOptions) {
+	constructor(tools: ToolDefinition[], options: ScriptedSessionOptions, resourceLoader?: unknown) {
 		this.tools = tools;
 		this.options = options;
+		this.resourceLoader = resourceLoader;
 	}
 
 	get isStreaming(): boolean {
@@ -173,7 +176,7 @@ export function scriptedFactory(options: ScriptedSessionOptions): {
 } {
 	const sessions: ScriptedSession[] = [];
 	const factory: SessionFactory = async (createOptions) => {
-		const session = new ScriptedSession(createOptions.customTools ?? [], options);
+		const session = new ScriptedSession(createOptions.customTools ?? [], options, createOptions.resourceLoader);
 		sessions.push(session);
 		return session;
 	};

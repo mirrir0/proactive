@@ -731,14 +731,14 @@ test("the procedure is in the skills, not in the turn prompt", async () => {
 		assert.doesNotMatch(prompt, /Name the chat, and keep naming it/, "naming is a skill");
 		assert.doesNotMatch(prompt, /call chat_title with four or five words/, "and so are its rules");
 
-		// Still here: the invariants, and the fact of which channels exist.
+		// Still here: what only this deployment knows, and the pointer at the skill.
 		assert.match(prompt, /You do not do work yourself: a Worker does\./);
 		assert.match(prompt, /Read the `dispatch` skill before you act/);
 		assert.match(prompt, /Read `chat-title` before you end a turn/);
-		assert.match(prompt, /Never mention the machinery/);
-		assert.match(prompt, /Never promise to come back/);
 		assert.match(prompt, /Channels: terminal/);
 		assert.match(prompt, /use_skill \(read one of your skills\)/);
+		// And the invariants are not in the turn at all: they are the system prompt's.
+		assert.doesNotMatch(prompt, /Never mention the machinery/, "invariants belong to the system prompt");
 
 		// And the skill has what the prompt no longer says, so nothing was lost in
 		// the move.
@@ -762,6 +762,31 @@ test("the Router is offered use_skill, so the skills it is advertised can be rea
 		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
 		const names = h.sessions[0]!.tools.map((tool) => tool.name);
 		assert.ok(names.includes("use_skill"), `expected use_skill, saw ${names.join(", ")}`);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("the invariants go to the system prompt, and the skills go with them", async () => {
+	// The system prompt is where a rule that must hold on every turn belongs. What
+	// this holds is the hand-over: the loader carries the invariants and the brain's
+	// six skills, and pi assembles both into the prompt the model is given.
+	const h = await makeRouter({ script: () => [{ type: "tool", name: "respond_terminal", args: { text: "hi" } }] });
+	try {
+		h.router.submitTrigger(makeTrigger({ threadId: "the-chat", text: "hello" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const loader = h.sessions[0]!.resourceLoader as {
+			getAppendSystemPrompt(): string[];
+			getSkills(): { skills: Array<{ name: string }> };
+		};
+
+		const appended = loader.getAppendSystemPrompt().join("\n");
+		assert.match(appended, /Never mention the machinery/);
+		assert.match(appended, /Write like a person talking to a person/);
+		assert.match(appended, /Never promise to come back/);
+
+		const names = loader.getSkills().skills.map((skill) => skill.name).sort();
+		assert.deepEqual(names, ["chat-title", "conclusion", "connected-services", "dispatch", "hands", "subagents"]);
 	} finally {
 		await h.cleanup();
 	}

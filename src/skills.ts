@@ -50,6 +50,15 @@ export interface SkillRoots {
 	readonly cwd: string;
 	/** The session's pi home: where a member's own skills would be installed. */
 	readonly agentDir: string;
+	/**
+	 * The invariants, appended to the system prompt.
+	 *
+	 * A rule that must hold on every turn goes here rather than into the turn's own
+	 * message: the system prompt is where the harness's own framing is resolved, and
+	 * a rule restated every turn competes with the turn's content instead of
+	 * governing it.
+	 */
+	readonly invariants?: readonly string[];
 }
 
 /**
@@ -98,6 +107,9 @@ export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultRes
 		additionalSkillPaths: [SKILLS_ROOT],
 		noExtensions: true,
 		noContextFiles: true,
+		...(roots.invariants === undefined || roots.invariants.length === 0
+			? {}
+			: { appendSystemPrompt: [...roots.invariants] }),
 		skillsOverride: (base) => {
 			const skills = base.skills.filter((skill) => under(skill.filePath, allowed));
 			const dropped = base.skills.length - skills.length;

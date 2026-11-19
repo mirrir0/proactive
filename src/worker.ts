@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { type WorkerCapabilities, DEFAULT_WORKER_CAPABILITIES } from "./security.ts";
 import { createPiSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
-import { brainResourceLoader, useSkillTool } from "./skills.ts";
+import { brainResourceLoader, skillCatalogue, useSkillTool } from "./skills.ts";
 import { metrics, log } from "./telemetry.ts";
 
 /** How a Worker reports to the Router (implemented over the IPC control channel). */
@@ -49,6 +49,26 @@ export interface WorkerReporter {
 	toolCall?(call: { id: string; name: string; args: unknown }): void;
 	toolResult?(result: { id: string; isError: boolean; result: unknown }): void;
 }
+
+/**
+ * What a Worker is, in its own words.
+ *
+ * Not "a coding assistant running inside pi": a Worker is the half of one assistant that
+ * does the work, and its tools are a hand's — a machine with a folder and a policy. The
+ * difference matters: a Worker that believes it is a coding agent with a shell invents
+ * paths and reports files it never touched.
+ */
+export const WORKER_PROMPT = [
+	"You are the part of one assistant that does the work.",
+	"Your tools are a hand's: a machine with a folder, a policy and a name. What you can read is what that folder holds, and a refusal from the hand is a fact about the machine, not a limitation of the assistant.",
+	"You are not talking to the person. Your conclusion is what they will be told, in their assistant's voice, so say what you found and what it means — not what you did.",
+].join("\n");
+
+export const WORKER_INVARIANTS: readonly string[] = [
+	"Never say you cannot read files: if a read was refused, say what was refused and why, in one sentence, and report what you did find.",
+	"Never invent a path. A path comes from the task, from `list_hands`, or from listing a folder you were given.",
+	"Your conclusion is the answer, not a status report: no \"I will now\", no headings, no restating the task.",
+];
 
 export interface WorkerRuntimeOptions {
 	taskId: string;
@@ -238,7 +258,12 @@ export class WorkerRuntime {
 		// prompt, and left to `process.cwd()` that is whatever started the brain — so a
 		// Worker asked about "this space" answered with the brain's own source tree.
 		const workerCwd = options.cwd ?? process.cwd();
-		const resourceLoader = await brainResourceLoader({ cwd: workerCwd, agentDir });
+		const resourceLoader = await brainResourceLoader({
+			cwd: workerCwd,
+			agentDir,
+			invariants: WORKER_INVARIANTS,
+			systemPrompt: [WORKER_PROMPT, await skillCatalogue()].filter((part) => part !== "").join("\n\n"),
+		});
 		worker.session = await factory({
 			cwd: workerCwd,
 			model: options.model,

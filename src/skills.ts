@@ -59,6 +59,25 @@ export interface SkillRoots {
 	 * governing it.
 	 */
 	readonly invariants?: readonly string[];
+	/**
+	 * What this session is, in its own words — replacing pi's preamble.
+	 *
+	 * pi's default preamble is "You are a coding assistant running inside pi", followed by
+	 * a tools section, a rules section and a documentation section. None of that is true of
+	 * a Router (which has no tools and no filesystem) or of a Worker (whose tools are a
+	 * hand's), and a model that believes it is a coding agent goes looking for a working
+	 * directory — which is how a Router came to name its own state directory as the
+	 * person's space. Replacing the preamble removes the whole default section set.
+	 */
+	readonly systemPrompt?: string;
+	/**
+	 * Whether the session's cwd is stripped from the prompt.
+	 *
+	 * pi always adds a `<cwd>` section. A Worker's cwd is its hand's root, so the path is
+	 * true and useful; a Router has no filesystem, and any path it is shown is a path it
+	 * may quote. Only the Router sets this.
+	 */
+	readonly hideCwd?: boolean;
 }
 
 /**
@@ -110,6 +129,10 @@ export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultRes
 		...(roots.invariants === undefined || roots.invariants.length === 0
 			? {}
 			: { appendSystemPrompt: [...roots.invariants] }),
+		...(roots.systemPrompt === undefined ? {} : { systemPrompt: roots.systemPrompt }),
+		...(roots.hideCwd === true
+			? { systemPromptOverride: (base: string | undefined) => (base ?? "").replace(/<cwd>[\s\S]*?<\/cwd>\n?/, "") }
+			: {}),
 		skillsOverride: (base) => {
 			const skills = base.skills.filter((skill) => under(skill.filePath, allowed));
 			const dropped = base.skills.length - skills.length;
@@ -127,6 +150,32 @@ export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultRes
 export async function brainSkills(roots: SkillRoots): Promise<Skill[]> {
 	const loader = await brainResourceLoader(roots);
 	return loader.getSkills().skills;
+}
+
+/**
+ * The skills, as a line each, for a prompt that has to advertise them itself.
+ *
+ * pi only renders a skills section when the session has a `read` or `bash` tool — and
+ * neither the Router nor a Worker has one, because their file access is a hand's. So
+ * `use_skill` would be a tool with no catalogue: the model could call it and would not
+ * know what to call it with. This is that catalogue, in the prompt, from the same files.
+ */
+export async function skillCatalogue(): Promise<string> {
+	const skills = await Promise.all(
+		SKILL_NAMES.map(async (name) => {
+			const body = await readSkill(name).catch(() => undefined);
+			if (body === undefined) return undefined;
+			const description = /^description:\s*(.+)$/m.exec(body)?.[1]?.trim() ?? "";
+			return `- \`${name}\`: ${description}`;
+		}),
+	);
+	const listed = skills.filter((line): line is string => line !== undefined);
+	if (listed.length === 0) return "";
+	return [
+		"You have skills: procedures for a kind of work, written down so you do not have to remember them.",
+		"Call `use_skill` with a name before doing that kind of work. They are short.",
+		...listed,
+	].join("\n");
 }
 
 /** A skill's body, without the frontmatter the loader already parsed. */

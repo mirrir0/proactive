@@ -46,7 +46,7 @@ import type { MirStore } from "./store.ts";
 import { metrics, log } from "./telemetry.ts";
 import { redactSecrets } from "./security.ts";
 import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
-import { brainResourceLoader, useSkillTool } from "./skills.ts";
+import { brainResourceLoader, skillCatalogue, useSkillTool } from "./skills.ts";
 import { JOURNAL_MAX_CHARS, type Journal , safeName } from "./journal.ts";
 import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
@@ -422,6 +422,20 @@ const PERSON_CHANNELS: ReadonlySet<string> = new Set<string>(["anomalous", "term
  * coding agent with tools — which this is not — so the conflict is resolved where
  * the framing lives.
  */
+/**
+ * What the Router is, in its own words.
+ *
+ * Replaces pi's "You are a coding assistant running inside pi" preamble, which described a
+ * different program: one with a working directory, built-in tools and documentation. The
+ * Router has none of those, and a model told it has a working directory answers questions
+ * about that directory.
+ */
+export const ROUTER_PROMPT = [
+	"You are one person's assistant, in a chat with them.",
+	"You have no filesystem, no shell and no working directory: nothing here can read or run anything. What you have is a set of hands — machines with a folder, a policy and a name — and Workers, which use them.",
+	"You reply, or you dispatch work. There is nothing else you can do, and that is the design.",
+].join("\n");
+
 export const ROUTER_INVARIANTS: readonly string[] = [
 	"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and never describe a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
 	"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
@@ -648,6 +662,10 @@ export class RouterLayer {
 			cwd: routerCwd,
 			agentDir,
 			invariants: ROUTER_INVARIANTS,
+			systemPrompt: [ROUTER_PROMPT, await skillCatalogue()].filter((part) => part !== "").join("\n\n"),
+			// No filesystem, so no path in the prompt: a cwd section is a directory the
+			// model quotes as if it were the person's.
+			hideCwd: true,
 		});
 		router.sessionOptions = {
 			cwd: routerCwd,

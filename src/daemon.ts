@@ -123,6 +123,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			port: numEnv("MIR_MCP_APP_PORT", 0),
 			token: env.MIR_API_TOKEN ?? "",
 		},
+		dashboard: {
+			host: env.MIR_DASHBOARD_HOST ?? "127.0.0.1",
+			port: numEnv("MIR_DASHBOARD_PORT", 0),
+			token: env.MIR_API_TOKEN ?? "",
+		},
 		workerIdleExitMs: numEnv("MIR_WORKER_IDLE_MS", 120_000),
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),
 		maxTokens: numEnv("MIR_MAX_TOKENS", 8192),

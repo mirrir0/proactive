@@ -212,6 +212,8 @@ export interface SuperAgentConfig {
 	 * without a token.
 	 */
 	mcpApp: { host: string; port: number; token: string };
+	/** The web dashboard: what this brain is doing, for a person. Off by default. */
+	dashboard: { host: string; port: number; token: string };
 	/** HTTP webhook channel bind address. */
 	httpHost: string;
 	httpPort: number;
@@ -276,6 +278,7 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 	providerRouting: undefined,
 	socketPath: "",
 	mcpApp: { host: "127.0.0.1", port: 0, token: "" },
+	dashboard: { host: "127.0.0.1", port: 0, token: "" },
 	api: { socketPath: "", token: "" },
 	httpHost: "127.0.0.1",
 	httpPort: 4599,

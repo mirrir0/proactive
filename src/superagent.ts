@@ -49,6 +49,7 @@ import type { BrainHost } from "./api/protocol.ts";
 import { ThreadLog, newThreadId } from "./threadlog.ts";
 import { Journal } from "./journal.ts";
 import { AppServer } from "./mcp-app/server.ts";
+import { DashboardServer } from "./dashboard/server.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 
 export interface SuperAgentDeps {
@@ -67,6 +68,8 @@ export class SuperAgent {
 	private modelRuntime!: ModelRuntime;
 	private readonly config: SuperAgentConfig;
 	private readonly store: MirStore;
+	/** When this brain came up, for the dashboard's uptime. */
+	private readonly startedWhen = Date.now();
 	private readonly context: ContextManager;
 	private readonly threads: ThreadManager;
 	private triggerSystem!: TriggerSystem;
@@ -94,6 +97,8 @@ export class SuperAgent {
 	private readonly journal: Journal;
 	/** This brain's views, for a client that renders MCP Apps. Off unless configured. */
 	private appServer: AppServer | null = null;
+	/** The dashboard, for a person looking at what this brain is doing. */
+	private dashboard: DashboardServer | null = null;
 	private housekeepingTimer: NodeJS.Timeout | null = null;
 	/** Daemon-side MCP tool catalog (merged from worker `mcp_catalog` reports). */
 	private readonly mcpCatalog = new Map<string, McpCatalogEntry>();
@@ -431,6 +436,30 @@ export class SuperAgent {
 			log.info("metrics endpoint listening", { port: this.metricsServer.port, host: this.config.metricsHost });
 		}
 
+		// The dashboard: the same brain, for a person rather than a client. Off
+		// unless a port is set, and never without a token.
+		if (this.config.dashboard.port > 0) {
+			if (this.config.dashboard.token === "") {
+				log.warn("dashboard not started: no token", { hint: "set MIR_API_TOKEN" });
+			} else {
+				this.dashboard = new DashboardServer({
+					host: this.config.dashboard.host,
+					port: this.config.dashboard.port,
+					token: this.config.dashboard.token,
+					log,
+					agent: "mir",
+					state: () => this.dashboardState(),
+					stopTask: async (taskId) => {
+						await this.router?.stopTask(taskId, "stopped from the dashboard");
+					},
+				});
+				await this.dashboard.start().catch((err: unknown) => {
+					this.dashboard = null;
+					log.warn("dashboard could not start", { error: (err as Error).message });
+				});
+			}
+		}
+
 		this.housekeepingTimer = setInterval(() => this.housekeeping(), 60 * 60_000);
 		this.housekeepingTimer.unref();
 
@@ -692,6 +721,63 @@ export class SuperAgent {
 		};
 	}
 
+	/**
+	 * What the dashboard draws.
+	 *
+	 * Assembled from the readers the brain already has — the thread log, the
+	 * router's tasks, the scratchpad, the hub's hands, the metric registry — so the
+	 * page cannot disagree with the brain about what is true. `tasks` is reversed so
+	 * a person sees the newest work first.
+	 */
+	private dashboardState() {
+		const snapshot = metrics.snapshot();
+		return {
+			agent: "mir",
+			identity: this.router ? "brain" : "starting",
+			startedAt: this.startedWhen,
+			threads: this.threadLog.summaries(200).map((thread) => ({
+				id: thread.id,
+				name: thread.name,
+				status: thread.status,
+				seq: thread.seq,
+				lastEventAt: thread.lastEventAt,
+			})),
+			tasks: [...(this.router?.listTasks() ?? [])]
+				.sort((a, b) => b.createdAt - a.createdAt)
+				.map((task) => ({
+					id: task.id,
+					title: task.title,
+					description: task.description,
+					status: task.status,
+					...(task.workerId === undefined ? {} : { workerId: task.workerId }),
+					...(task.endpointId === undefined ? {} : { endpointId: task.endpointId }),
+					...(task.result === undefined ? {} : { result: task.result }),
+					...(task.error === undefined ? {} : { error: task.error }),
+					createdAt: task.createdAt,
+					updatedAt: task.updatedAt,
+				})),
+			scratchpad: this.store
+				.listScratchpad()
+				.filter((item) => item.status === "open")
+				.map((item) => ({
+					id: item.id,
+					kind: item.kind,
+					text: item.text,
+					...(item.threadId === undefined ? {} : { threadId: item.threadId }),
+					createdAt: item.createdAt,
+				})),
+			hands: (this.handsHub?.listHands() ?? []).map((hand) => ({
+				endpointId: hand.endpointId,
+				name: hand.name,
+				connected: hand.connected,
+				running: hand.running,
+				capabilities: hand.capabilities as unknown as Record<string, unknown>,
+				policy: { maxConcurrent: hand.policy.maxConcurrent, roots: hand.policy.roots },
+			})),
+			metrics: { counters: snapshot.counters ?? {}, gauges: snapshot.gauges ?? {} },
+		};
+	}
+
 	listTasks() {
 		return this.router?.listTasks() ?? [];
 	}
@@ -786,6 +872,8 @@ export class SuperAgent {
 		this.apiServer = null;
 		await this.appServer?.stop().catch(() => {});
 		this.appServer = null;
+		await this.dashboard?.stop().catch(() => {});
+		this.dashboard = null;
 		await this.watchdog?.dispose();
 		await this.handsServer?.stop();
 		this.handsHub?.dispose();

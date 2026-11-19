@@ -76,6 +76,22 @@ detail. When the tail drops lines it says so, and says what to do about it: *the
 belong in your journal, and `read_log` will fetch them*. That sentence is what keeps
 the journal current without a timer.
 
+## The dashboard
+
+`MIR_DASHBOARD_PORT` turns on a page a person reads: work in flight, threads, hands,
+the scratchpad, metrics. It is one document served by the brain (`src/dashboard/`),
+with the product's tokens copied as values — the soft-corner radii, the Between
+surfaces, the status fills — so it reads as the same system without importing a
+stylesheet the brain cannot depend on. Filled boxes on a quiet ground: no borders,
+no shadows; separation is space and a shade.
+
+Live by stream: one `EventSource` on `/api/events`, and the whole state is pushed
+every couple of seconds while somebody is watching. A reload asks `/api/state` and
+gets the truth — the state is assembled per request from the brain's own readers, so
+a page left open overnight and a page opened just now agree. It refuses to start
+without `MIR_API_TOKEN`, takes the token in the query for the page (a browser cannot
+send a header for a navigation) and as a bearer for its API calls.
+
 ## The turn prompt
 
 A turn's message is the inbound events, then **the journal**, then **this

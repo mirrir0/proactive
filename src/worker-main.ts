@@ -134,15 +134,19 @@ async function main(): Promise<void> {
 				}),
 			);
 		}
-		// Tool policy: an allow/deny list on top of the capability grants.
-		const allowed = filterToolNames(
-			defs.map((d) => String(d.name)),
-			spec.toolPolicy ?? {},
-		);
-		return defs.filter((d) => allowed.includes(String(d.name)));
+		return defs;
 	};
 
-	let customTools = [...controlTools(), ...handTools];
+	// Tool policy: an allow/deny list on top of the capability grants, applied to
+	// everything the worker can call — the hand tools most of all. Filtering only the
+	// MCP and codemode set meant `MIR_WORKER_TOOL_DENY=exec` removed nothing that
+	// mattered: the tools that touch a disk are the hand's, and they went unfiltered.
+	const offered = [...controlTools(), ...handTools];
+	const permitted = filterToolNames(
+		offered.map((tool) => String(tool.name)),
+		spec.toolPolicy ?? {},
+	);
+	const customTools = offered.filter((tool) => permitted.includes(String(tool.name)));
 
 	const client = new ControlClient(spec.socketPath, spec.workerId, spec.taskId);
 	await client.connect();

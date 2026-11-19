@@ -107,6 +107,25 @@ export interface HandPolicy {
 	denyWritePaths: string[];
 }
 
+/**
+ * What no hand may read, unless its operator says otherwise.
+ *
+ * The sandbox's read fence is this list — reads are otherwise open, because a hand
+ * that cannot read its own toolchain is useless — so the list is where "this folder
+ * and nothing else" has to start: keys, cloud credentials, the brain's own state
+ * (which holds its token), and the shell's history.
+ */
+export const DEFAULT_DENY_READ: readonly string[] = [
+	"~/.ssh",
+	"~/.aws",
+	"~/.gnupg",
+	"~/.netrc",
+	"~/.config/gh",
+	"~/.anomalous",
+	"~/Library/Application Support/mir",
+	"~/.docker/config.json",
+];
+
 export const DEFAULT_HAND_POLICY: HandPolicy = {
 	roots: [],
 	allow: ["git", "ls", "cat", "pwd", "rg", "node", "npm", "pnpm", "npx", "make", "tsc"],
@@ -119,7 +138,7 @@ export const DEFAULT_HAND_POLICY: HandPolicy = {
 	envAllow: [],
 	sandbox: "srt",
 	network: { ...DEFAULT_HAND_NETWORK },
-	denyReadPaths: [],
+	denyReadPaths: [...DEFAULT_DENY_READ],
 	denyWritePaths: [],
 };
 

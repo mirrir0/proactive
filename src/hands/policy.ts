@@ -15,6 +15,7 @@
  *      environment are never passed down, and are redacted from output.
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type {
 	ExecInput,
@@ -84,7 +85,12 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 			allowLocalBinding: merged.network?.allowLocalBinding ?? false,
 			allowUnixSockets: merged.network?.allowUnixSockets ?? [],
 		},
-		denyReadPaths: merged.denyReadPaths ?? [],
+		// An explicit list replaces the defaults rather than adding to them: an operator
+		// who names what to deny means that, and a hand with nothing denied is a
+		// decision, not an oversight.
+		denyReadPaths: (merged.denyReadPaths ?? []).map((entry) =>
+			entry.startsWith("~/") ? path.join(process.env["HOME"] ?? "", entry.slice(2)) : entry,
+		),
 		denyWritePaths: merged.denyWritePaths ?? [],
 		maxOutputBytes: Math.max(1024, merged.maxOutputBytes),
 		maxFileBytes: Math.max(1024, merged.maxFileBytes),
@@ -117,6 +123,37 @@ export function parsePolicy(raw: string | undefined | null, base: HandPolicy = D
 }
 
 /** Resolve `p` inside one of the policy roots, or throw. */
+/** The real path of a root, so a root that is itself a symlink still matches. */
+function realRoots(roots: string[]): string[] {
+	return roots.map((root) => {
+		try {
+			return fs.realpathSync(root);
+		} catch {
+			return path.resolve(root);
+		}
+	});
+}
+
+/**
+ * The real path of `candidate`, walking to the nearest ancestor that exists.
+ *
+ * A write target usually does not exist yet, and `realpath` throws on it. Resolving
+ * the parent is enough: a symlink anywhere above it is what an escape needs.
+ */
+function realCandidate(candidate: string): string {
+	let current = candidate;
+	for (let hops = 0; hops < 64; hops += 1) {
+		try {
+			return path.join(fs.realpathSync(current), path.relative(current, candidate));
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return candidate;
+			current = parent;
+		}
+	}
+	return candidate;
+}
+
 export function resolveInRoots(roots: string[], p: string, label = "path"): string {
 	if (typeof p !== "string" || p.length === 0) {
 		throw new HandPolicyError("bad-input", `${label} must be a non-empty string`);
@@ -124,10 +161,19 @@ export function resolveInRoots(roots: string[], p: string, label = "path"): stri
 	if (roots.length === 0) {
 		throw new HandPolicyError("path-outside-roots", `${label}: this hand has no filesystem roots configured`);
 	}
-	const absolute = path.resolve(roots[0]!, p);
-	for (const root of roots) {
+	// Real paths, both sides. `path.resolve` alone lets a symlink inside a root point
+	// anywhere — `files/link -> /Users/orchid` passes the check and reads the disk — and
+	// the hand's own file tools run in this process, where no OS sandbox is watching.
+	// Resolving the candidate also accepts the root's own aliases: on macOS a temp dir
+	// arrives as `/var/...` and is really `/private/var/...`.
+	const real = realRoots(roots);
+	for (let index = 0; index < roots.length; index += 1) {
+		const root = roots[index]!;
+		const realRoot = real[index]!;
 		const candidate = path.resolve(root, p);
-		const rel = path.relative(root, candidate);
+		const rel = path.relative(realRoot, realCandidate(candidate));
+		// Returned as the caller wrote it: a root that is itself a symlink should not
+		// change the paths a Worker sees, only which ones are refused.
 		if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) return candidate;
 	}
 	throw new HandPolicyError("path-outside-roots", `${label} escapes the allowed roots: ${p}`);
@@ -141,9 +187,9 @@ export function resolveInRoots(roots: string[], p: string, label = "path"): stri
  * or the model could step around the sandbox by asking the hand directly.
  */
 export function isPathDenied(deniedPaths: string[], target: string): boolean {
-	const absolute = path.resolve(target);
+	const absolute = realCandidate(path.resolve(target));
 	for (const entry of deniedPaths) {
-		const denied = path.resolve(entry);
+		const denied = realCandidate(path.resolve(entry));
 		if (absolute === denied) return true;
 		const rel = path.relative(denied, absolute);
 		if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) return true;

@@ -705,3 +705,24 @@ test("a daemon that starts settles what the last one left running", async () => 
 	store.close();
 	await rmDir(dir);
 });
+
+test("a symlink out of a root is refused, not followed", async () => {
+	const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mir-outside-"));
+	await fs.promises.writeFile(path.join(outside, "secret.txt"), "not yours");
+	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mir-root-"));
+	await fs.promises.symlink(outside, path.join(root, "link"));
+	// The lexical path is inside the root; the file it names is not.
+	assert.throws(() => resolveInRoots([root], "link/secret.txt"), /out of the allowed roots|escapes/);
+	// And a plain read still works.
+	await fs.promises.writeFile(path.join(root, "ok.txt"), "mine");
+	assert.equal(resolveInRoots([root], "ok.txt"), path.join(root, "ok.txt"));
+	await fs.promises.rm(outside, { recursive: true, force: true });
+	await fs.promises.rm(root, { recursive: true, force: true });
+});
+test("the default deny list covers keys and the brain's own state", () => {
+	const policy = normalizePolicy({ roots: [process.cwd()] });
+	const denied = policy.denyReadPaths.join(" ");
+	for (const path of [".ssh", ".aws", ".anomalous", ".netrc"]) {
+		assert.ok(denied.includes(path), `${path} is denied by default`);
+	}
+});

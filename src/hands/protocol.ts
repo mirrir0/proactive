@@ -99,7 +99,7 @@ export interface HandPolicy {
 	 *
 	 * Requested-but-unavailable is an error, never a silent downgrade.
 	 */
-	sandbox: "none" | "srt";
+	sandbox: "none" | "srt" | "confined";
 	network: HandNetworkPolicy;
 	/** Paths the sandboxed process may not read (e.g. ~/.ssh, ~/.aws). */
 	denyReadPaths: string[];
@@ -307,7 +307,7 @@ export type StreamName = "stdout" | "stderr";
  * narrow, not every program it may run.
  */
 export interface HandPolicySummary {
-	sandbox: "none" | "srt";
+	sandbox: "none" | "srt" | "confined";
 	roots: string[];
 	allowCount: number;
 	shell: boolean;

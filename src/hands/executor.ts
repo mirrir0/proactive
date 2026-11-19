@@ -191,11 +191,13 @@ export class HandExecutor {
 		const cap = Math.min(ctx.maxOutputBytes ?? policy.maxOutputBytes, policy.maxOutputBytes);
 
 		const sandbox = this.options.sandbox;
-		if (policy.sandbox === "srt" && !sandbox) {
+		if (policy.sandbox !== "none" && !sandbox) {
+			// A hand that says it is sandboxed and is not must refuse: the difference
+			// between "confined to this folder" and "whatever the account can reach" is
+			// not one to discover later.
 			return {
 				ok: false,
-				error:
-					"sandbox-required: this hand is configured for sandboxed execution but no sandbox is initialized",
+				error: `sandbox-required: this hand is configured for ${policy.sandbox} execution but no sandbox is initialized`,
 				durationMs: Date.now() - started,
 			};
 		}
@@ -237,7 +239,7 @@ export class HandExecutor {
 			args: rawArgv.slice(1, 7),
 			cwd,
 			shell,
-			sandbox: sandbox ? "srt" : "none",
+			sandbox: sandbox?.kind ?? "none",
 		});
 
 		if (input.background === true) {

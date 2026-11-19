@@ -78,7 +78,8 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 		allow: merged.allow ?? [],
 		deny: merged.deny ?? [],
 		envAllow: merged.envAllow ?? [],
-		sandbox: merged.sandbox === "none" ? "none" : "srt",
+		sandbox:
+			merged.sandbox === "none" ? "none" : merged.sandbox === "confined" ? "confined" : "srt",
 		network: {
 			allowedDomains: merged.network?.allowedDomains ?? [],
 			deniedDomains: merged.network?.deniedDomains ?? [],

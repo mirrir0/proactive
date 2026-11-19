@@ -30,7 +30,7 @@ import os from "node:os";
 import { homedir } from "node:os";
 import { loadEnv } from "../env.ts";
 import { HandExecutor } from "../hands/executor.ts";
-import { createSrtSandbox, type SandboxWrapper } from "../hands/sandbox.ts";
+import { createSandbox, type SandboxWrapper } from "../hands/sandbox.ts";
 import {
 	FrameDecoder,
 	HANDS_PROTOCOL_VERSION,
@@ -91,8 +91,12 @@ export class EndpointDaemon {
 	 * cannot enforce its policy refuses to start rather than run unconfined.
 	 */
 	async start(): Promise<void> {
-		if (this.options.policy.sandbox === "srt") {
-			this.sandbox = await createSrtSandbox(this.options.policy, this.options.log);
+		if (this.options.policy.sandbox !== "none") {
+			this.sandbox = await createSandbox(
+				this.options.policy,
+				this.options.capabilities,
+				this.options.log,
+			);
 		} else {
 			this.options.log.warn("sandbox disabled; path and network policy are not enforced", {
 				endpoint: this.options.id,
@@ -327,6 +331,21 @@ function multiFlag(argv: string[], name: string): string[] {
 	return values;
 }
 
+/**
+ * Which sandbox a hand runs under.
+ *
+ * `srt` is the default because it is the one that works everywhere and fences
+ * network; `confined` is what a space asks for, because its promise is about what a
+ * Worker may *read* and `srt` has no read fence.
+ */
+function sandboxKind(requested: string | undefined, noSandbox: boolean): "none" | "srt" | "confined" {
+	if (noSandbox) return "none";
+	const wanted = (requested ?? "").trim().toLowerCase();
+	if (wanted === "0" || wanted === "none" || wanted === "off" || wanted === "false") return "none";
+	if (wanted === "confined" || wanted === "strict") return "confined";
+	return "srt";
+}
+
 function hasFlag(argv: string[], name: string): boolean {
 	return argv.includes(`--${name}`);
 }
@@ -353,6 +372,7 @@ export function usage(): string {
 		"  --max-timeout <ms>      hard cap on a caller-supplied timeout",
 		"  --max-output <bytes>    output cap per command",
 		"  --env-allow <A,B>       extra env var names passed to children",
+		"  --sandbox <kind>        none | srt (write fence, reads open) | confined (reads and writes in the roots)",
 		"  --no-sandbox            disable the OS sandbox (allowlist only; not recommended)",
 		"  --allow-net <a,b>       domains the hand may reach (default: none)",
 		"  --deny-net <a,b>        domains to deny even if allowed",
@@ -418,7 +438,7 @@ export function parseEndpointArgs(argv: string[], env: NodeJS.ProcessEnv = proce
 		maxTimeoutMs: num(flag(argv, "max-timeout") ?? env.MIR_HANDS_MAX_TIMEOUT_MS, DEFAULT_HAND_POLICY.maxTimeoutMs),
 		maxOutputBytes: num(flag(argv, "max-output") ?? env.MIR_HANDS_MAX_OUTPUT, DEFAULT_HAND_POLICY.maxOutputBytes),
 		envAllow: splitList(flag(argv, "env-allow") ?? env.MIR_HANDS_ENV_ALLOW) ?? [],
-		sandbox: hasFlag(argv, "no-sandbox") || env.MIR_HANDS_SANDBOX === "0" ? "none" : "srt",
+		sandbox: sandboxKind(flag(argv, "sandbox") ?? env.MIR_HANDS_SANDBOX, hasFlag(argv, "no-sandbox")),
 		network: {
 			allowedDomains: splitList(flag(argv, "allow-net") ?? env.MIR_HANDS_ALLOW_NET) ?? [],
 			deniedDomains: splitList(flag(argv, "deny-net") ?? env.MIR_HANDS_DENY_NET) ?? [],

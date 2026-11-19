@@ -40,9 +40,7 @@ import { metrics, log, startMetricsServer, type MetricsServerHandle } from "./te
 import { secrets, redactSecrets } from "./security.ts";
 import { HandsHub } from "./hands/hub.ts";
 import { HandsServer } from "./hands/server.ts";
-import { LocalHand } from "./hands/local.ts";
 import { HandExecutor } from "./hands/executor.ts";
-import { createSrtSandbox, type SandboxWrapper } from "./hands/sandbox.ts";
 import { BrainServer } from "./api/server.ts";
 import { AnomalousChannel } from "./channels/anomalous.ts";
 import type { BrainHost } from "./api/protocol.ts";
@@ -85,8 +83,6 @@ export class SuperAgent {
 	private metricsServer: MetricsServerHandle | null = null;
 	private handsHub: HandsHub | null = null;
 	private handsServer: HandsServer | null = null;
-	private localHand: LocalHand | null = null;
-	private localSandbox: SandboxWrapper | null = null;
 	private apiServer: BrainServer | null = null;
 	/**
 	 * The product's own channel, when the client API is on. It is how a reply
@@ -268,29 +264,6 @@ export class SuperAgent {
 				requestTimeoutMs: this.config.hands.requestTimeoutMs,
 			});
 			this.handsHub.start();
-			if (this.config.hands.local) {
-				// The local hand enforces the same boundary as a remote one; a
-				// failure here is fatal rather than a quiet downgrade.
-				if (this.config.hands.localPolicy.sandbox === "srt") {
-					this.localSandbox = await createSrtSandbox(this.config.hands.localPolicy, handsLog);
-				}
-				const executor = new HandExecutor({
-					policy: this.config.hands.localPolicy,
-					capabilities: this.config.hands.localCapabilities,
-					secrets,
-					log: handsLog,
-					sandbox: this.localSandbox ?? undefined,
-				});
-				this.localHand = new LocalHand(
-					executor,
-					(message) => this.handsHub?.handleEndpointMessage("local", message),
-					{
-						name: "daemon-local",
-						meta: { platform: process.platform, arch: process.arch },
-					},
-				);
-				this.handsHub.registerEndpoint(this.localHand);
-			}
 			this.handsServer = new HandsServer({
 				hub: this.handsHub,
 				store: this.store,
@@ -921,13 +894,6 @@ export class SuperAgent {
 			 */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
-				// The hub's policy for a remote hand is a placeholder — the hand enforces
-				// its own, and what it says it enforces is display only. But the *host*
-				// knows where the folder is (it is starting the hand there), so the roots
-				// it names are kept here: without them `list_hands` says "(none)" and a
-				// Worker is never told where "here" is, so it searches the local hand and
-				// reports the brain's own directory as the repository.
-				if (request.roots.length > 0) this.handRoots.set(request.handId, [...request.roots]);
 				this.store.createEndpoint({
 					id: request.handId,
 					name: request.name ?? request.handId,
@@ -971,9 +937,6 @@ export class SuperAgent {
 		this.handsHub?.dispose();
 		this.handsServer = null;
 		this.handsHub = null;
-		this.localHand = null;
-		await this.localSandbox?.dispose().catch(() => {});
-		this.localSandbox = null;
 		this.mcpWatcher?.stop();
 		this.mcpWatcher = null;
 		this.stopMcpServers?.();

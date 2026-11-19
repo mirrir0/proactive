@@ -190,38 +190,6 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			heartbeatMs: numEnv("MIR_HANDS_HEARTBEAT_MS", 15_000),
 			offlineGraceMs: numEnv("MIR_HANDS_OFFLINE_GRACE_MS", 90_000),
 			requestTimeoutMs: numEnv("MIR_HANDS_REQUEST_TIMEOUT_MS", 10 * 60_000),
-			local: boolEnv("MIR_HANDS_LOCAL", true),
-			localPolicy: normalizePolicy(
-				{
-					// The daemon's own machine, rooted at *its* home — not at whatever
-					// directory it was started from. A brain started from a checkout
-					// otherwise hands its Workers the repository, and a task that asked
-					// about a space folder reads and writes the source tree instead.
-					roots: csvEnv("MIR_HANDS_LOCAL_ROOTS") ?? [paths.home],
-					allow: csvEnv("MIR_HANDS_LOCAL_ALLOW") ?? DEFAULT_HAND_POLICY.allow,
-					deny: csvEnv("MIR_HANDS_LOCAL_DENY") ?? [],
-					maxConcurrent: numEnv("MIR_HANDS_LOCAL_MAX_CONCURRENT", DEFAULT_HAND_POLICY.maxConcurrent),
-					defaultTimeoutMs: numEnv("MIR_HANDS_TIMEOUT_MS", DEFAULT_HAND_POLICY.defaultTimeoutMs),
-					maxTimeoutMs: numEnv("MIR_HANDS_MAX_TIMEOUT_MS", DEFAULT_HAND_POLICY.maxTimeoutMs),
-					maxOutputBytes: numEnv("MIR_HANDS_MAX_OUTPUT", DEFAULT_HAND_POLICY.maxOutputBytes),
-					sandbox: boolEnv("MIR_HANDS_LOCAL_SANDBOX", false) ? "srt" : "none",
-					network: {
-						allowedDomains: csvEnv("MIR_HANDS_LOCAL_ALLOW_NET") ?? [],
-						deniedDomains: csvEnv("MIR_HANDS_LOCAL_DENY_NET") ?? [],
-						allowLocalBinding: boolEnv("MIR_HANDS_LOCAL_ALLOW_LOCAL_BINDING", false),
-						allowUnixSockets: csvEnv("MIR_HANDS_LOCAL_UNIX_SOCKETS") ?? [],
-					},
-					denyReadPaths: csvEnv("MIR_HANDS_LOCAL_DENY_READ") ?? [],
-					denyWritePaths: csvEnv("MIR_HANDS_LOCAL_DENY_WRITE") ?? [],
-				},
-				DEFAULT_HAND_POLICY,
-			),
-			localCapabilities: {
-				exec: boolEnv("MIR_HANDS_LOCAL_EXEC", true),
-				shell: boolEnv("MIR_HANDS_LOCAL_SHELL", false),
-				fs: (env.MIR_HANDS_LOCAL_FS as any) ?? "rw",
-				git: boolEnv("MIR_HANDS_LOCAL_GIT", true),
-			},
 		},
 		sessionDir: expandHome(env.MIR_ROUTER_SESSION ?? paths.sessions),
 	};

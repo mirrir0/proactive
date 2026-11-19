@@ -169,10 +169,6 @@ export interface HandsConfig {
 	heartbeatMs: number;
 	offlineGraceMs: number;
 	requestTimeoutMs: number;
-	/** Register the daemon's own machine as a hand. */
-	local: boolean;
-	localPolicy: HandPolicy;
-	localCapabilities: HandCapabilities;
 }
 
 export interface WorkerToolPolicy {
@@ -352,8 +348,5 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 		heartbeatMs: 15_000,
 		offlineGraceMs: 90_000,
 		requestTimeoutMs: 10 * 60_000,
-		local: true,
-		localPolicy: { ...DEFAULT_HAND_POLICY },
-		localCapabilities: { ...DEFAULT_HAND_CAPABILITIES },
 	},
 };

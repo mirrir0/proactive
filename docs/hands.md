@@ -257,19 +257,14 @@ MIR_HANDS_PORT=4700            # 0 = local hand only, no listener
 MIR_HANDS_SOCKET=~/.local/share/mir/hands.sock
 MIR_HANDS_TLS_CERT=/path/cert.pem
 MIR_HANDS_TLS_KEY=/path/key.pem
-MIR_HANDS_LOCAL=true           # register the daemon's own machine as a hand
-MIR_HANDS_LOCAL_ROOTS=/srv/work
-MIR_HANDS_LOCAL_ALLOW=git,ls,cat,node,pnpm
-MIR_HANDS_LOCAL_FS=rw
-MIR_HANDS_LOCAL_SANDBOX=true   # OS sandbox for the local hand
-MIR_HANDS_LOCAL_ALLOW_NET=github.com,registry.npmjs.org
-MIR_HANDS_LOCAL_DENY_READ=~/.ssh,~/.aws
-```
+The daemon offers no hand of its own. A brain's home is not a place anyone asked
+about: a Worker that named no hand read the brain's journal and its task specs and
+reported them as the space's files, which is a wrong answer shaped like a right one.
+Hands are the client's — a space, a laptop, a container — and a daemon with no hands
+says so instead of substituting its own directory.
 
-The local hand is off by default (`MIR_HANDS_LOCAL_SANDBOX=false`) so a dev
-machine is not silently cut off from the network; a real endpoint is sandboxed
-by default.
+For a single-machine dev loop, register one:
 
-With `MIR_HANDS_PORT=0` and `MIR_HANDS_LOCAL=true` you get the old behaviour —
-execution next to the daemon — but through the same interface, so switching to a
+    mir hands add --root . --name here --allow git,ls,cat,node
+
 remote hand later changes no code.

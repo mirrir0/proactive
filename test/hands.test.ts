@@ -12,8 +12,9 @@ import { HandExecutor } from "../src/hands/executor.ts";
 import { HandsHub } from "../src/hands/hub.ts";
 import { HandsServer } from "../src/hands/server.ts";
 import { HandsClient } from "../src/hands/client.ts";
-import { LocalHand } from "../src/hands/local.ts";
+import { InProcessHand } from "./helpers/in-process-hand.ts";
 import { EndpointDaemon, parseEndpointArgs } from "../src/endpoint/main.ts";
+import { SuperAgent } from "../src/superagent.ts";
 import { createHandTools, formatHandResult } from "../src/hands/tools.ts";
 import {
 	FrameDecoder,
@@ -274,7 +275,7 @@ async function makeHub() {
 		secrets: new SecretRegistry(),
 		log: silentLog,
 	});
-	const local = new LocalHand(executor, (message) => hub.handleEndpointMessage("local", message));
+	const local = new InProcessHand(executor, (message) => hub.handleEndpointMessage("local", message));
 	hub.registerEndpoint(local);
 
 	const server = new HandsServer({
@@ -673,10 +674,10 @@ test("endpoint CLI: missing required flags fail loudly", () => {
 	assert.equal(HANDS_PROTOCOL_VERSION, 2);
 });
 
-test("the local hand is rooted at the brain's home, not the directory it was started from", () => {
-	// A brain started from a checkout otherwise hands its Workers the repository: a
-	// task about a space folder reads and writes the source tree instead, and the
-	// answer looks like it came from the right place.
+test("the daemon offers no hand of its own", () => {
+	// A brain's own directory is not a place anyone asked about. Offering it meant a
+	// Worker that named no hand read the brain's journal and task specs and reported
+	// them as the space's files — a wrong answer that looked like a right one.
 	const config = buildConfig();
-	assert.deepEqual(config.hands.localPolicy.roots, [mirPaths().home]);
+	assert.equal("local" in config.hands, false);
 });

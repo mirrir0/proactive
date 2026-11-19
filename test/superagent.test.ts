@@ -29,7 +29,6 @@ async function makeAgent(options: { script?: Script; seed?: (store: MirStore) =>
 			port: 0,
 			enabled: true,
 			socketPath: `${dir}/hands.sock`,
-			localPolicy: { ...DEFAULT_CONFIG.hands.localPolicy, roots: [dir] },
 		},
 		...options.config,
 	};

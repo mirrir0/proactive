@@ -1,11 +1,10 @@
 /**
- * The daemon's own machine, as a hand.
+ * A hand in the same process, for tests.
  *
- * Registering local execution behind the same `EndpointConnection` interface as
- * a remote laptop means there is exactly one dispatch path and one failure model:
- * `exec` either comes back with a result or with a tool error, whether the work
- * ran three feet away or across the internet. It also means a deployment with no
- * endpoints configured still works — it just has one hand.
+ * The daemon itself never offers its own directory as a hand: a brain's home is not
+ * a place anyone asked about, and a Worker that named no hand read the brain's
+ * journal and reported it as the space's files. Tests still want a hand that needs no
+ * socket, so this one lives here rather than in `src/`.
  */
 
 import type {
@@ -15,12 +14,12 @@ import type {
 	HandPolicySummary,
 	HubToEndpoint,
 	WorkItem,
-} from "./protocol.ts";
-import { policySummary } from "./policy.ts";
-import type { EndpointConnection } from "./hub.ts";
-import type { HandExecutor } from "./executor.ts";
+} from "../../src/hands/protocol.ts";
+import { policySummary } from "../../src/hands/policy.ts";
+import type { EndpointConnection } from "../../src/hands/hub.ts";
+import type { HandExecutor } from "../../src/hands/executor.ts";
 
-export class LocalHand implements EndpointConnection {
+export class InProcessHand implements EndpointConnection {
 	readonly endpointId: string;
 	readonly kind = "local" as const;
 	readonly name: string;

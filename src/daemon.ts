@@ -115,6 +115,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		paths,
 		api: {
 			socketPath: env.MIR_API_SOCKET ? expandHome(env.MIR_API_SOCKET) : "",
+			// Its own token, when one is set: the dashboard is for a person, and its
+			// link ends up in a browser's history — it should not be the token a client
+			// uses to speak for a member.
 			token: env.MIR_API_TOKEN ?? "",
 			// One daemon can serve several members: a host signs a token per member
 			// with a secret both sides hold, and the token names who it is for.
@@ -131,7 +134,10 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		dashboard: {
 			host: env.MIR_DASHBOARD_HOST ?? "127.0.0.1",
 			port: numEnv("MIR_DASHBOARD_PORT", 0),
-			token: env.MIR_API_TOKEN ?? "",
+			// Its own token, when one is set: a dashboard link ends up in a browser's
+			// history, and it should not be the token a client uses to speak for a
+			// member.
+			token: env.MIR_DASHBOARD_TOKEN ?? env.MIR_API_TOKEN ?? "",
 		},
 		workerIdleExitMs: numEnv("MIR_WORKER_IDLE_MS", 120_000),
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),

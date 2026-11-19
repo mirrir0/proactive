@@ -43,13 +43,14 @@ test("a task with no brief still says what it is for", () => {
 
 test("the Worker is told what it may touch, and which hand", () => {
 	const text = taskMessage(base);
-	assert.match(text, /Capabilities granted to you: \{"net":false,"fs":"rw","mcp":false,"codemode":false\}\./);
+	assert.match(text, /In this process: no connected services, no computation sandbox, no network\./);
+	assert.match(text, /No files of your own — the hand has those\./);
 	assert.match(text, /You are on: "desk-1"|You are on: .*desk-1/);
 });
 
 test("a Worker with no hand is told so, rather than left to guess", () => {
 	const text = taskMessage({ ...base, hasHands: false, endpointId: undefined });
-	assert.match(text, /No hand is configured: use your local tools\./);
+	assert.match(text, /No hand is configured, so nothing here can read a file/);
 	assert.doesNotMatch(text, /pinned to/);
 });
 

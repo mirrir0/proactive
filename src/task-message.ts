@@ -54,9 +54,18 @@ export function taskMessage(spec: TaskSpec): string {
 			? [`Description: ${spec.description}`]
 			: [`What this is for: ${spec.description}`, "", spec.instructions]),
 		"",
-		`Capabilities granted to you: ${JSON.stringify(spec.capabilities)}.`,
+		// What this process may do *by itself*. It is deliberately not called "your
+		// capabilities": a Worker read `"fs":"none"` and told the person "filesystem
+		// access is disabled for this task", when the filesystem it needed was the
+		// hand's and was right there. The environment is the hand's job; this is only
+		// what runs here.
+		`In this process: ${describeOwnCapabilities(spec.capabilities)}.`,
 	];
 	if (spec.hasHands) {
+		// Said before the hand, so the sentence above cannot be read as "no files".
+		lines.push(
+			"Your files are not here: they are on the hand, and its tools are how you reach them. That is normal, not a limitation.",
+		);
 		// Where the work happens, and which machine — the `hands` skill says how to
 		// use it. A Worker told neither will run commands in its own process and
 		// report files that were never touched.
@@ -70,7 +79,9 @@ export function taskMessage(spec: TaskSpec): string {
 			lines.push(`Its files start at: ${spec.handRoot}. Relative paths begin there.`);
 		}
 	} else {
-		lines.push("No hand is configured: use your local tools.");
+		lines.push(
+			"No hand is configured, so nothing here can read a file: say what you cannot do rather than guessing at a directory.",
+		);
 	}
 	lines.push(
 		// The one control fact that is not a skill: an event that is not this task's
@@ -79,4 +90,19 @@ export function taskMessage(spec: TaskSpec): string {
 		"If a follow-up message arrives that is not part of this task, call release_event instead of answering it.",
 	);
 	return lines.join("\n");
+}
+
+/**
+ * What the Worker's own process may do, in words.
+ *
+ * Not JSON: a model that is shown `{"fs":"none"}` reports it to a person as "filesystem
+ * access is disabled", which is true of the process and false of the work.
+ */
+function describeOwnCapabilities(capabilities: WorkerCapabilities): string {
+	const parts = [
+		capabilities.mcp ? "connected services are available" : "no connected services",
+		capabilities.codemode ? "you can run pure computation" : "no computation sandbox",
+		capabilities.net ? "you can reach the network" : "no network",
+	];
+	return `${parts.join(", ")}. No files of your own — the hand has those.`;
 }

@@ -14,6 +14,7 @@ import type { WorkerCapabilities } from "./security.ts";
 import type { HandCapabilities, HandPolicy } from "./hands/protocol.ts";
 import type { McpServers } from "./mcp-servers.ts";
 import { DEFAULT_HAND_CAPABILITIES, DEFAULT_HAND_POLICY } from "./hands/protocol.ts";
+import { mirPaths, type MirPaths } from "./paths.ts";
 
 export type ModelProvider = "openrouter";
 
@@ -206,6 +207,8 @@ export interface SuperAgentConfig {
 	socketPath: string;
 	/** The client API a display connects to. Off by default. */
 	api: BrainApiConfig;
+	/** Where this install keeps its files (paths.ts). The instance record lives here. */
+	paths: MirPaths;
 	/**
 	 * The MCP app server: where a client fetches this brain's views (`ui://mir/work`)
 	 * and calls their tools. Off unless a port is set, and it refuses to start
@@ -289,6 +292,7 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 	mcpApp: { host: "127.0.0.1", port: 0, token: "" },
 	dashboard: { host: "127.0.0.1", port: 0, token: "" },
 	api: { socketPath: "", token: "" },
+	paths: mirPaths(),
 	httpHost: "127.0.0.1",
 	httpPort: 4599,
 	httpToken: undefined,

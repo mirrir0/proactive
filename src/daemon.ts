@@ -112,6 +112,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		),
 		// The door a display connects to. Off unless a socket is named: a daemon
 		// that serves threads to nobody should not be listening.
+		paths,
 		api: {
 			socketPath: env.MIR_API_SOCKET ? expandHome(env.MIR_API_SOCKET) : "",
 			token: env.MIR_API_TOKEN ?? "",

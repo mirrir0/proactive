@@ -49,6 +49,7 @@ import type { BrainHost } from "./api/protocol.ts";
 import { ThreadLog, newThreadId } from "./threadlog.ts";
 import { Journal } from "./journal.ts";
 import { AppServer } from "./mcp-app/server.ts";
+import { instanceFile, removeInstance, writeInstance } from "./instance.ts";
 import { hashToken } from "./hands/protocol.ts";
 import { DashboardServer } from "./dashboard/server.ts";
 import type { HandStatus } from "./hands/protocol.ts";
@@ -476,6 +477,22 @@ export class SuperAgent {
 					log.warn("dashboard could not start", { error: (err as Error).message });
 				});
 			}
+		}
+
+		// Say where this daemon is, so a client attaches to *this* mir instead of
+		// starting a second one. Written once the socket and the dashboard are up: a
+		// record that arrives before the listener is a record that lies.
+		if (this.config.api.socketPath !== "") {
+			writeInstance(this.config.paths, {
+				socket: this.config.api.socketPath,
+				token: this.config.api.token,
+				pid: process.pid,
+				startedAt: Date.now(),
+				protocol: 1,
+				...(this.config.hands.port > 0 ? { hands: { port: this.config.hands.port } } : {}),
+				...(this.dashboard === null || this.dashboard === undefined ? {} : { dashboard: { port: this.dashboard.port } }),
+			});
+			log.info("instance record written", { file: instanceFile(this.config.paths) });
 		}
 
 		this.housekeepingTimer = setInterval(() => this.housekeeping(), 60 * 60_000);
@@ -920,6 +937,9 @@ export class SuperAgent {
 		this.apiServer = null;
 		await this.appServer?.stop().catch(() => {});
 		this.appServer = null;
+		// The daemon is going away; a record left behind would send the next client
+		// to a socket nobody answers.
+		if (this.config.api.socketPath !== "") removeInstance(this.config.paths);
 		await this.dashboard?.stop().catch(() => {});
 		this.dashboard = null;
 		await this.watchdog?.dispose();

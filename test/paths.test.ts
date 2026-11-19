@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -112,4 +112,36 @@ test("ensurePaths creates the layout, and only reports what was missing", () => 
 		assert.ok(readdirSync(dir.path), `${dir.name} was not created`);
 	}
 	assert.deepEqual(ensurePaths(paths), [], "a second init creates nothing");
+});
+
+test("the instance record says which mir is running, and a stale one is discarded", async () => {
+	// One daemon, not one per client: a stack attaches to the running mir instead of
+	// starting a second brain, and a record left by a dead one must not send it to a
+	// socket nobody answers.
+	const { writeInstance, readInstance, instanceFile, removeInstance } = await import("../src/instance.ts");
+	const root = mkdtempSync(join(tmpdir(), "mir-instance-"));
+	const paths = mirPaths({ env: { MIR_HOME: root }, platform: "linux", home: root });
+	ensurePaths(paths);
+
+	writeInstance(paths, {
+		socket: join(paths.runtime, "brain.sock"),
+		token: "t-1",
+		pid: process.pid,
+		startedAt: 1,
+		protocol: 1,
+		hands: { port: 4700 },
+		dashboard: { port: 4788 },
+	});
+	const found = readInstance(paths);
+	assert.equal(found?.token, "t-1");
+	assert.equal(found?.hands?.port, 4700, "the hands hub's port travels with the record");
+	assert.equal(found?.dashboard?.port, 4788, "and so does the dashboard's");
+
+	// A record whose process is gone is removed, not returned.
+	writeInstance(paths, { socket: "/x", token: "t", pid: 999_999, startedAt: 1, protocol: 1 });
+	assert.equal(readInstance(paths), undefined);
+	assert.equal(existsSync(instanceFile(paths)), false, "the stale record is cleaned up");
+
+	removeInstance(paths);
+	assert.equal(readInstance(paths), undefined);
 });

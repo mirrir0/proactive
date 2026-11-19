@@ -22,6 +22,7 @@ import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:f
 import { hashToken } from "./hands/protocol.ts";
 import { runEndpoint } from "./endpoint/main.ts";
 import { ensurePaths, mirPaths, requiredDirs, socketFits, socketLimit } from "./paths.ts";
+import { instanceFile, readInstance } from "./instance.ts";
 
 function usage(): void {
 	console.log(
@@ -31,6 +32,7 @@ function usage(): void {
 			"  init              create this machine's mir directories and config",
 			"  paths             print where this install keeps its files",
 			"  manifest          print the agent manifest a client runs this brain from",
+			"  instance          which mir is running here, and how to reach it",
 			"  serve             run the daemon with its client API on (see MIR_API_*)",
 			"  daemon            run the daemon in the foreground (dev)",
 			"  start             start mir-daemon under pm2",
@@ -376,6 +378,24 @@ async function main(): Promise<void> {
 	 * knowing where mir is installed. It is the whole plug: command, transport,
 	 * placeholders, capabilities and views, with no client-specific knowledge in it.
 	 */
+	/**
+	 * `mir instance` — which daemon is running, and how to reach it.
+	 *
+	 * A client attaches to this instead of starting a second brain: one machine, one
+	 * mir, one store, one dashboard.
+	 */
+	if (cmd === "instance") {
+		const paths = mirPaths();
+		const found = readInstance(paths);
+		if (found === undefined) {
+			console.error(`no mir is running here (${instanceFile(paths)})`);
+			process.exitCode = 1;
+			return;
+		}
+		console.log(JSON.stringify(found, null, 2));
+		return;
+	}
+
 	if (cmd === "manifest") {
 		const path = fileURLToPath(new URL("../agent.manifest.json", import.meta.url));
 		const raw = readFileSync(path, "utf8");

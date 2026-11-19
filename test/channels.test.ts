@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { HttpChannel } from "../src/channels/http.ts";
+import { AnomalousChannel } from "../src/channels/anomalous.ts";
 import { ReplyBook } from "../src/channels/types.ts";
 import { signChannelBody } from "../src/security.ts";
 import { makeEvent, tick } from "./helpers/fakes.ts";
@@ -109,4 +110,18 @@ test("reply book: bounded so a long-running daemon cannot leak", () => {
 	const book = new ReplyBook();
 	for (let i = 0; i < 1200; i++) book.remember(makeEvent({ id: `e-${i}`, threadId: `t-${i}` }));
 	assert.ok(book.size <= 1000, `expected <= 1000 entries, got ${book.size}`);
+});
+
+test("a conclusion is delivered to its thread without resolving a chat", async () => {
+	const delivered: Array<{ threadId?: string; text: string }> = [];
+	const channel = new AnomalousChannel({
+		deliver: (target, text) => {
+			delivered.push({ ...target, text });
+		},
+	});
+	await channel.start(() => {});
+	// The thread is known; nothing may re-resolve it. A turn that heard from no chat
+	// through `submit` (an API poke) has an empty reply book, and resolving refused it.
+	await channel.deliverTo("thread-1", "the answer");
+	assert.deepEqual(delivered, [{ threadId: "thread-1", text: "the answer" }]);
 });

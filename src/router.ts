@@ -1728,6 +1728,18 @@ export class RouterLayer {
 			this.record(threadId, { kind: "text", role: "assistant", text });
 			return;
 		}
+		if (channel.id === "anomalous") {
+			// The product's channel writes into the thread it is given, with no
+			// resolution: `say` always knows the thread, and a second resolution is how a
+			// conclusion was refused for "no chat to answer" while answering a chat.
+			const deliverTo = (channel as { deliverTo?: (id: string, said: string) => Promise<void> }).deliverTo;
+			if (threadId !== undefined && deliverTo !== undefined) {
+				await deliverTo.call(channel, threadId, text).catch((err: unknown) =>
+					log.warn("could not deliver a reply", { channel: channelId, error: (err as Error).message }),
+				);
+				return;
+			}
+		}
 		if (channel.id !== "anomalous") this.record(threadId, { kind: "text", role: "assistant", text });
 		await channel
 			.respond(text, {

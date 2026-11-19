@@ -120,6 +120,19 @@ export class AnomalousChannel implements Channel {
 		await this.options.deliver(this.resolveTarget(ctx), text);
 	}
 
+	/**
+	 * Say something in a thread, with no resolution.
+	 *
+	 * `respond` exists for a model that knows a chat and must be resolved to a thread;
+	 * this exists for a caller that already has the thread — a conclusion, a fallback
+	 * reply, anything the Router decides rather than the model. Resolving again is how
+	 * a conclusion came to be refused for "no chat to answer" when the thread it was
+	 * answering was right there.
+	 */
+	async deliverTo(threadId: string, text: string): Promise<void> {
+		await this.options.deliver({ threadId }, text);
+	}
+
 	responseTool(recorder?: ReplyRecorder): ToolDefinition {
 		if (recorder === undefined) return (this.defaultTool ??= makeResponseTool(this));
 		let tool = this.tools.get(recorder);

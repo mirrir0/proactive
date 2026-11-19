@@ -849,6 +849,24 @@ export class MirStore {
 			.run(input.id, input.name, input.kind ?? "remote", input.tokenHash, input.createdAt ?? Date.now());
 	}
 
+	/**
+	 * Forget hands nobody has brought for a while.
+	 *
+	 * A hand is a machine a client runs; the client re-registers it every start, so a
+	 * row whose hand has not connected in `olderThanMs` names a space that is gone or
+	 * a laptop that is not coming back. Revoked rather than deleted: the row is the
+	 * record of a hand that existed, and `mir hands rm` is how a person erases one.
+	 *
+	 * Returns the ids, so the caller can say what it let go.
+	 */
+	revokeStaleEndpoints(olderThanMs: number, now = Date.now()): string[] {
+		const rows = this.db
+			.prepare(`SELECT id FROM endpoints WHERE kind = 'remote' AND revoked_at IS NULL AND last_seen < ?`)
+			.all(now - olderThanMs) as unknown as Array<{ id: string }>;
+		for (const row of rows) this.revokeEndpoint(row.id, now);
+		return rows.map((row) => row.id);
+	}
+
 	getEndpoint(id: string): EndpointRecord | undefined {
 		const row = this.db.prepare(`SELECT * FROM endpoints WHERE id = ?`).get(id) as unknown as
 			| EndpointRow

@@ -4,3 +4,8 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# A real .env holds provider keys; .env.example is the one that ships.
+.env
+.env.*
+!.env.example

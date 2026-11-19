@@ -236,3 +236,26 @@ test("a log search narrows in SQL: kinds and text, newest last, with a total", (
 	store.close();
 	rmSync(dir, { recursive: true, force: true });
 });
+
+test("a hand nobody has brought in a while is revoked, not deleted", () => {
+	const dir = mkdtempSync(join(tmpdir(), "mir-stale-hands-"));
+	const store = MirStore.open(dir);
+	const day = 24 * 60 * 60_000;
+	store.createEndpoint({ id: "space:gone", name: "Gone", tokenHash: "h1", kind: "remote", createdAt: 0 });
+	store.createEndpoint({ id: "space:here", name: "Here", tokenHash: "h2", kind: "remote", createdAt: 0 });
+	store.upsertEndpoint({ id: "space:here", name: "Here", kind: "remote", capabilities: {}, lastSeen: Date.now() });
+	store.upsertEndpoint({
+		id: "space:gone",
+		name: "Gone",
+		kind: "remote",
+		capabilities: {},
+		lastSeen: Date.now() - 30 * day,
+	});
+
+	const revoked = store.revokeStaleEndpoints(7 * day);
+	assert.deepEqual(revoked, ["space:gone"]);
+	assert.equal(store.getEndpoint("space:gone")?.revokedAt !== undefined, true, "revoked, still a record");
+	assert.equal(store.getEndpoint("space:here")?.revokedAt, undefined, "the hand that is here is left alone");
+	store.close();
+	rmSync(dir, { recursive: true, force: true });
+});

@@ -1,7 +1,7 @@
 {
 	"name": "mir",
 	"version": "1.0.0",
-	"description": "Super-agent 'mir' — Router+Workers, pm2 process manager, channel-based event sources",
+	"description": "Super-agent 'mir' \u2014 Router+Workers, pm2 process manager, channel-based event sources",
 	"private": true,
 	"type": "module",
 	"bin": {
@@ -36,5 +36,18 @@
 		"@types/node": "^22.0.0",
 		"tsx": "^4.19.0",
 		"typescript": "^5.7.0"
+	},
+	"files": [
+		"bin/",
+		"dist/",
+		"skills/",
+		"docs/",
+		"agent.manifest.json",
+		"ecosystem.config.cjs",
+		"README.md",
+		"CONTEXT.md"
+	],
+	"engines": {
+		"node": ">=22"
 	}
 }

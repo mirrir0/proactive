@@ -208,6 +208,8 @@ export class SuperAgent {
 		// settles them: the chat shows a loader forever, and the next turn queues
 		// behind work that does not exist. Started is not running, and a row that says
 		// running when nothing runs is a lie the whole UI repeats.
+		const stale = this.store.revokeStaleEndpoints(this.config.hands.staleAfterMs);
+		if (stale.length > 0) log.info("hands nobody brought in a while were revoked", { hands: stale });
 		const settled = this.store.settleInterrupted();
 		if (settled > 0) {
 			log.warn("tasks interrupted by a daemon restart were settled", { tasks: settled });

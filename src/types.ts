@@ -177,6 +177,13 @@ export interface HandsConfig {
 	heartbeatMs: number;
 	offlineGraceMs: number;
 	requestTimeoutMs: number;
+	/**
+	 * How long a hand's row survives without the hand connecting.
+	 *
+	 * A client re-registers its hands every start, so silence for a week means the
+	 * space is gone or the machine is not coming back.
+	 */
+	staleAfterMs: number;
 }
 
 export interface WorkerToolPolicy {
@@ -356,5 +363,6 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 		heartbeatMs: 15_000,
 		offlineGraceMs: 90_000,
 		requestTimeoutMs: 10 * 60_000,
+		staleAfterMs: 7 * 24 * 60 * 60_000,
 	},
 };

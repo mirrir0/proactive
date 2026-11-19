@@ -190,6 +190,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			heartbeatMs: numEnv("MIR_HANDS_HEARTBEAT_MS", 15_000),
 			offlineGraceMs: numEnv("MIR_HANDS_OFFLINE_GRACE_MS", 90_000),
 			requestTimeoutMs: numEnv("MIR_HANDS_REQUEST_TIMEOUT_MS", 10 * 60_000),
+			staleAfterMs: numEnv("MIR_HANDS_STALE_MS", 7 * 24 * 60 * 60_000),
 		},
 		sessionDir: expandHome(env.MIR_ROUTER_SESSION ?? paths.sessions),
 	};

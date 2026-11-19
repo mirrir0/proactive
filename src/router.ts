@@ -414,6 +414,15 @@ export class RouterLayer {
 	private readonly journalCache = new Map<string, string>();
 	private readonly inbox: InboxItem[] = [];
 	private turn: TurnState = emptyTurn();
+	/**
+	 * Set once the turn has said all it is going to say.
+	 *
+	 * A reply is the end of a turn: the person has their answer, or the work has
+	 * started and the card is the acknowledgement. The model does not know that — it
+	 * will keep calling tools while the loop lets it — so the loop is ended here, and
+	 * the refusal it gets for a second reply is not an invitation to try a third.
+	 */
+	private endRequested = false;
 	private drainTimer: NodeJS.Timeout | null = null;
 	private draining = false;
 	private pendingSpawns = 0;
@@ -1350,6 +1359,7 @@ export class RouterLayer {
 		// The turn knows the channel and event it is answering, so a dispatch it
 		// makes can inherit them: a task with no channel answers nobody.
 		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id);
+		this.endRequested = false;
 		this.turnInFlightSince = Date.now();
 		metrics.gauge("mir_router_turn_in_flight", 1);
 		await this.loadJournal();
@@ -1379,7 +1389,14 @@ export class RouterLayer {
 			this.turnCount++;
 			this.lastTurnAt = Date.now();
 		} catch (err) {
-			await this.handleTurnFailure(batch, err as Error);
+			// An abort this layer asked for is how a turn ends once it has answered:
+			// not a failure, and not a batch to retry.
+			if (this.endRequested) {
+				log.info("router turn ended after its reply", { thread: this.turn.originThreadId });
+				metrics.counter("mir_router_turns_ended_by_reply_total");
+			} else {
+				await this.handleTurnFailure(batch, err as Error);
+			}
 		} finally {
 			this.turnInFlightSince = 0;
 			metrics.gauge("mir_router_turn_in_flight", 0);
@@ -2490,6 +2507,25 @@ export class RouterLayer {
 			if (this.tasks.delete(task.id)) removed++;
 		}
 		return removed;
+	}
+
+	/**
+	 * End the turn now.
+	 *
+	 * `abort` is the only lever pi gives for "stop the loop": it cancels the provider
+	 * call and the queued steps, and `runTurn` treats it as a clean end because the
+	 * turn already said what it had to say.
+	 */
+	private requestTurnEnd(): void {
+		if (this.endRequested) return;
+		this.endRequested = true;
+		const session = this.session;
+		// A tick later: the tool call that decided this is still unwinding, and aborting
+		// inside its own execution is a fight with the loop it is trying to stop.
+		const timer = setTimeout(() => {
+			void session.abort?.().catch(() => {});
+		}, 0);
+		timer.unref?.();
 	}
 
 	/** Watchdog hook: abort a hung turn. */

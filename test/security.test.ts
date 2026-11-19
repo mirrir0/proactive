@@ -93,9 +93,11 @@ test("channel auth: HMAC signature covers timestamp and body", () => {
 });
 
 test("capabilities: JSON, grant-list and default forms", () => {
+	// The environment is a hand's job: a Worker process gets no filesystem and no
+	// egress unless someone says so.
 	assert.deepEqual(parseCapabilities(undefined), {
-		net: true,
-		fs: "rw",
+		net: false,
+		fs: "none",
 		mcp: true,
 		codemode: true,
 	});
@@ -111,6 +113,8 @@ test("capabilities: JSON, grant-list and default forms", () => {
 		mcp: true,
 		codemode: false,
 	});
+	// "all" is every grant a Worker may be given, not the defaults: a Worker that
+	// needs a filesystem or the network asks for them by name.
 	assert.deepEqual(parseCapabilities("all"), {
 		net: true,
 		fs: "rw",

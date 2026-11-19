@@ -107,7 +107,12 @@ async function main(): Promise<void> {
 	}
 
 	// Local codemode keeps pure computation; the environment is the hand's job.
-	const codemodeCapabilities = handsClient ? { ...capabilities, fs: "none" as const } : capabilities;
+	//
+	// Not "unless the hub is unreachable": the fallback used to hand codemode the
+	// worker process's own `readFile`/`writeFile`, rooted at the brain's state
+	// directory — a disk the Worker was never given, reachable exactly when the hands
+	// were down. With no hand there is no filesystem, and the tool says so.
+	const codemodeCapabilities = { ...capabilities, fs: "none" as const };
 
 	// --- MCP + codemode setup (both gated by capabilities) ---
 	const mcp = new McpManager();

@@ -203,9 +203,17 @@ export interface WorkerCapabilities {
 	codemode: boolean;
 }
 
+/**
+ * What a Worker may do in its own process, when nothing says otherwise.
+ *
+ * `fs: "none"` and `net: false` because the Worker's environment is a hand: a hand
+ * has roots, a policy and a sandbox, and the Worker process has none of those. The
+ * two that stay on are the ones that are not disk or egress — connected services and
+ * codemode's pure computation.
+ */
 export const DEFAULT_WORKER_CAPABILITIES: WorkerCapabilities = {
-	net: true,
-	fs: "rw",
+	net: false,
+	fs: "none",
 	mcp: true,
 	codemode: true,
 };
@@ -231,7 +239,9 @@ export function parseCapabilities(raw: string | undefined | null): WorkerCapabil
 		else if (grant === "fs") caps.fs = "rw";
 		else if (grant === "fs:ro") caps.fs = "ro";
 		else if (grant === "fs:rw") caps.fs = "rw";
-		else if (grant === "all") return { ...DEFAULT_WORKER_CAPABILITIES };
+		// "all" means every grant, not the defaults: an operator who writes it is
+		// asking for the filesystem and the network by name.
+		else if (grant === "all") return { net: true, fs: "rw", mcp: true, codemode: true };
 	}
 	return caps;
 }

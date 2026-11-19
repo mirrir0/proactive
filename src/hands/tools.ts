@@ -107,7 +107,9 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				background: Type.Optional(
 					Type.Boolean({
 						description:
-							"Start it and return at once, with a job id. Use for a server or a watcher — anything that does not exit on its own. Its output is kept in a ring buffer; read it with job_output.",
+							"Start it and return at once, with a job id. ONLY for a server or a watcher — something that does not exit on its own. " +
+							"Nothing notifies you when a job finishes: there is no wake-up, no callback, no new turn. To get its output you call job_output yourself, as many times as it takes. " +
+							"A command that finishes on its own (a search, a build, a test run) is NOT a background job — run it normally and it returns when it is done.",
 					}),
 				),
 			}),
@@ -190,7 +192,8 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 			name: "job_output",
 			label: "Read a background job's output",
 			description:
-				"What a job started with `background: true` has written so far. The buffer is capped, so it holds the most recent output.",
+				"What a job started with `background: true` has written so far. The buffer is capped, so it holds the most recent output. " +
+				"Polling this is the only way to see a job's output — nothing will tell you it finished, so if you are waiting for one, you are waiting for a call you have to make.",
 			parameters: Type.Object({
 				job_id: Type.String({ description: "The job id `exec` returned." }),
 				stream: Type.Optional(

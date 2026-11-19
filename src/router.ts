@@ -794,9 +794,11 @@ export class RouterLayer {
 							"The brief the Worker is told: paths, constraints, what a good answer looks like. Write it for an agent doing the work, not for the person reading the card. Omit when the description already says everything.",
 					}),
 				),
+				// No `thread`, no `reply_to`: the turn already has both, and a model that is
+				// offered an address will fill it in — with an id it read in its own prompt.
+				// One live dispatch was filed under `trigger:api-…` because of exactly that,
+				// and the task's thread was a context object's id.
 				channel: Type.Optional(Type.String({ description: "Channel id the task originated from." })),
-				thread: Type.Optional(Type.String({ description: "Thread id the task belongs to." })),
-				reply_to: Type.Optional(Type.String({ description: "Event id to reply to when done." })),
 				endpoint: Type.Optional(
 					Type.String({
 						description:
@@ -847,9 +849,11 @@ export class RouterLayer {
 						// model names another. Without this default a task has no thread,
 						// so its work is written nowhere a person can open and its card
 						// has nothing to link to.
-						threadId: params.thread ?? router.turn.originThreadId,
+						// Always the turn's: the dispatch belongs to the conversation it was
+						// made in, and that is the only thread the Router can be sure of.
+						threadId: router.turn.originThreadId,
 						channelId: params.channel ?? router.turn.originChannelId,
-						replyTo: params.reply_to ?? router.turn.originEventId,
+						replyTo: router.turn.originEventId,
 						fast: isTrivial(params.description),
 						// Where the client said this work belongs wins over the hub's
 						// least-loaded guess: a space is a hand, and only the client knows

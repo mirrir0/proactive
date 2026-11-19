@@ -1523,3 +1523,25 @@ test("a hand may be named the way list_hands prints it", async () => {
 		await h.cleanup();
 	}
 });
+
+test("a dispatch is filed in the turn's thread, and the model is not offered another", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "dispatch_task", args: { title: "List files", description: "list them" } }],
+	});
+	try {
+		const chat = h.threadLog!.chatThread("chat-filed", "A chat");
+		h.router.submitTrigger({ ...makeTrigger({ text: "list the files" }), threadId: chat });
+		await waitFor(() => h.router.listTasks().length === 1, 2000, "the dispatch landed");
+		// The tool offers no `thread`: a model given an address fills it in, and one live
+		// dispatch was filed under `trigger:api-…` — a context object's id, read in the
+		// Router's own prompt.
+		const tool = (h.sessions[0]?.tools ?? []).find((candidate) => (candidate as { name: string }).name === "dispatch_task");
+		const properties = Object.keys((tool as { parameters?: { properties?: object } } | undefined)?.parameters?.properties ?? {});
+		assert.equal(properties.includes("thread"), false, "no thread parameter");
+		assert.equal(properties.includes("reply_to"), false, "no reply_to parameter");
+		assert.equal(h.router.listTasks()[0]!.threadId, chat, "filed in the conversation it was made in");
+	} finally {
+		await h.cleanup();
+	}
+});

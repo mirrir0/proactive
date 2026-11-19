@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MirStore } from "../src/store.ts";
 import { ThreadManager } from "../src/thread.ts";
 import { rmDir, tmpDir } from "./helpers/fakes.ts";
@@ -212,4 +215,24 @@ test("search escapes LIKE wildcards", () => {
 	assert.equal(store.searchObjects("%").length, 1);
 	store.close();
 	rmDir(dir);
+});
+
+test("a log search narrows in SQL: kinds and text, newest last, with a total", () => {
+	const dir = mkdtempSync(join(tmpdir(), "mir-search-"));
+	const store = MirStore.open(dir);
+	const thread = "thread-search";
+	store.appendThreadEntry(thread, 1, "text", JSON.stringify({ role: "user", text: "the code word is otter" }));
+	store.appendThreadEntry(thread, 2, "tool_call", JSON.stringify({ toolName: "exec", args: { argv: ["ls"] } }));
+	store.appendThreadEntry(thread, 3, "text", JSON.stringify({ role: "assistant", text: "otter, twice" }));
+
+	const texts = store.searchThreadEntries(thread, { kinds: ["text"], limit: 10 });
+	assert.deepEqual(texts.rows.map((row) => row.seq), [1, 3]);
+	assert.equal(texts.total, 2, "the total is what matched, not what was returned");
+
+	const otter = store.searchThreadEntries(thread, { like: "otter", limit: 1 });
+	assert.deepEqual(otter.rows.map((row) => row.seq), [3], "newest last, one row");
+	assert.equal(otter.total, 2);
+
+	store.close();
+	rmSync(dir, { recursive: true, force: true });
 });

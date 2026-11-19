@@ -604,6 +604,42 @@ export class MirStore {
 		}
 	}
 
+	/**
+	 * Entries matching a filter, newest last, plus how many matched in total.
+	 *
+	 * The filter runs in SQL so a search is not "read the last 800 entries and hope":
+	 * `kind` narrows on an indexed column, and `like` narrows the payload before a
+	 * single row leaves the database. A `like` that is too coarse for a caller's
+	 * meaning is the caller's business — it only ever returns a superset.
+	 */
+	searchThreadEntries(
+		threadId: string,
+		options: { kinds?: readonly string[]; like?: string; limit: number },
+	): { rows: EntryRow[]; total: number } {
+		const where: string[] = ["thread_id = ?"];
+		const args: Array<string | number> = [threadId];
+		if (options.kinds !== undefined && options.kinds.length > 0) {
+			where.push(`kind IN (${options.kinds.map(() => "?").join(", ")})`);
+			args.push(...options.kinds);
+		}
+		if (options.like !== undefined && options.like !== "") {
+			where.push("payload LIKE ?");
+			// The payload is JSON text; a substring match on it is the cheap superset,
+			// and the caller's own text extraction decides what actually matches.
+			args.push(`%${options.like.replace(/[%_]/g, (m) => `\${m}`)}%`);
+		}
+		const clause = where.join(" AND ");
+		const total = Number(
+			(this.db.prepare(`SELECT COUNT(*) AS n FROM thread_entries WHERE ${clause}`).get(...args) as { n: number }).n,
+		);
+		const rows = this.db
+			.prepare(
+				`SELECT * FROM thread_entries WHERE ${clause} ORDER BY seq DESC LIMIT ?`,
+			)
+			.all(...args, Math.max(1, options.limit)) as unknown as EntryRow[];
+		return { rows: rows.reverse(), total };
+	}
+
 	listThreadEntries(threadId: string, since: number, limit: number): EntryRow[] {
 		return this.db
 			.prepare(

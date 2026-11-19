@@ -308,7 +308,6 @@ const CONVERSATION_MIN_LINES = 20;
 const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["stop_task"]);
 
 /** How many log entries `read_log` will look through. */
-const READ_LOG_SCAN = 800;
 
 /** How many lines of each list a turn reads; the rest is one `scratchpad` call away. */
 const SCRATCHPAD_BLOCK_ITEMS = 8;
@@ -1181,13 +1180,18 @@ export class RouterLayer {
 				const limit = Math.max(1, Math.min(400, Math.round(params.limit ?? 60)));
 				const kinds = params.kinds === undefined ? undefined : new Set(params.kinds.split(",").map((kind) => kind.trim()));
 				const query = params.query?.toLowerCase();
-				const entries = threadLog.entries(threadId, 0, READ_LOG_SCAN);
-				const matching = entries.filter((entry) => {
-					if (kinds !== undefined && !kinds.has(entry.kind)) return false;
-					if (query === undefined) return true;
-					return entryText(entry).toLowerCase().includes(query);
+				// The filter runs in SQL, so asking about the end of a long log does not read
+				// the whole of it: `kind` narrows on an indexed column and `query` narrows
+				// the payload before any row is parsed.
+				const found = threadLog.search(threadId, {
+					...(kinds === undefined ? {} : { kinds: [...kinds] }),
+					...(query === undefined ? {} : { like: query }),
+					limit,
+					...(query === undefined
+						? {}
+						: { match: (entry: ThreadEntry) => entryText(entry).toLowerCase().includes(query) }),
 				});
-				const kept = matching.slice(-limit);
+				const kept = found.entries;
 				if (kept.length === 0) {
 					return { content: [{ type: "text" as const, text: "no entries matched" }], details: { ok: true, entries: 0 } };
 				}
@@ -1201,7 +1205,7 @@ export class RouterLayer {
 						{
 							type: "text" as const,
 							text: [
-								`=== ${threadId} (${kept.length} of ${matching.length} matching, ${entries.length} scanned) ===`,
+								`=== ${threadId} (${kept.length} of ${found.total} matching) ===`,
 								...lines,
 							].join("\n"),
 						},

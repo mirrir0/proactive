@@ -224,6 +224,36 @@ export class ThreadLog {
 		});
 	}
 
+	/**
+	 * Entries matching a filter, newest last, and how many matched.
+	 *
+	 * `match` runs on the parsed entry, so a caller's meaning of "contains" is exact;
+	 * the SQL pass only narrows. Nothing here reads the whole log to answer a question
+	 * about the end of it.
+	 */
+	search(
+		threadId: string,
+		options: {
+			kinds?: readonly string[];
+			like?: string;
+			limit: number;
+			match?: (entry: ThreadEntry) => boolean;
+		},
+	): { entries: ThreadEntry[]; total: number } {
+		const scan = Math.max(options.limit * 4, 200);
+		const { rows, total } = this.store.searchThreadEntries(threadId, {
+			...(options.kinds === undefined ? {} : { kinds: options.kinds }),
+			...(options.like === undefined ? {} : { like: options.like }),
+			limit: scan,
+		});
+		const parsed = rows.flatMap((row) => {
+			const entry = parseEntry(row);
+			if (entry === null) return [];
+			return options.match === undefined || options.match(entry) ? [entry] : [];
+		});
+		return { entries: parsed.slice(-options.limit), total: options.match === undefined ? total : parsed.length };
+	}
+
 	/** Set a thread's status, and record the change in the log so a client sees it in order. */
 	setStatus(threadId: string, status: ThreadStatus, note?: string): ThreadEntry {
 		this.store.setThreadStatus(threadId, status);

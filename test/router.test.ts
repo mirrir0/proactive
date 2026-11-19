@@ -43,6 +43,8 @@ async function makeRouter(
 		journal?: boolean;
 		/** How long a spawned worker may take to say hello, for the timeout test. */
 		helloTimeoutMs?: number;
+		/** What the spawner says the worker died of, for the diagnostics test. */
+		workerError?: string;
 	} = {},
 ): Promise<Harness> {
 	const dir = tmpDir();
@@ -56,6 +58,7 @@ async function makeRouter(
 		? new ThreadLog({ store, log: createLogger({ level: "error", format: "json", write: () => {} }) })
 		: undefined;
 	const spawner = new FakeSpawner();
+	if (options.workerError !== undefined) spawner.workerError = options.workerError;
 	const config: SuperAgentConfig = {
 		...DEFAULT_CONFIG,
 		sessionDir: "",
@@ -1048,6 +1051,28 @@ test("a worker that says hello keeps its task", async () => {
 		h.router.handleWorkerHello(task.workerId!);
 		await tick(120);
 		assert.equal(h.store.listTasks().find((t) => t.id === task.id)?.status, "running", "a connected worker is not failed");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a worker that died before connecting is reported with the child's own words", async () => {
+	// "never started" is the symptom; the child's stderr is the cause — and when the
+	// failure is the process manager's own (pm2's fork entry not resolving in a pnpm
+	// layout), that line is the only place the reason exists.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [],
+		helloTimeoutMs: 40,
+		workerError: "Error: Cannot find module '.../pm2/lib/ProcessContainerFork.js'",
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-died", "Notes");
+		const task = await h.router.dispatchTask({ title: "Find your notes", description: "find them", threadId });
+		await waitFor(() => h.store.listTasks().find((t) => t.id === task.id)?.status === "failed", 2000, "the task failed");
+		const failed = h.store.listTasks().find((t) => t.id === task.id)!;
+		assert.match(failed.error ?? "", /never started/);
+		assert.match(failed.error ?? "", /Cannot find module/, "the cause is in the words a person reads");
 	} finally {
 		await h.cleanup();
 	}

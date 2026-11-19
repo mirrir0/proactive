@@ -32,6 +32,8 @@ export class FakeSpawner implements WorkerSpawner {
 	readonly killed: string[] = [];
 	/** When set, the next spawn rejects with this message. */
 	failNextWith: string | null = null;
+	/** What the process manager says a dead worker died of, for the diagnostics path. */
+	workerError: string | undefined;
 	disconnected = false;
 
 	async spawnWorker(spec: WorkerSpec): Promise<string> {
@@ -46,6 +48,10 @@ export class FakeSpawner implements WorkerSpawner {
 
 	async killWorker(taskId: string): Promise<void> {
 		this.killed.push(taskId);
+	}
+
+	lastWorkerError(_taskId: string): string | undefined {
+		return this.workerError;
 	}
 
 	async listWorkers(): Promise<WorkerProcessInfo[]> {

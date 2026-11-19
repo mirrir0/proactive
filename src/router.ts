@@ -1830,7 +1830,12 @@ export class RouterLayer {
 			// Started is not connected. The deadline is what tells the two apart.
 			const timer = setTimeout(() => {
 				this.helloTimers.delete(workerId);
-				const reason = `the worker never started (no hello within ${Math.round(this.config.workerHelloTimeoutMs / 1000)}s)`;
+				// The child's own words, when the process manager kept them: "never
+				// started" is the symptom, "Cannot find module …" is the cause.
+				const died = this.deps.processManager.lastWorkerError?.(task.id);
+				const reason =
+					`the worker never started (no hello within ${Math.round(this.config.workerHelloTimeoutMs / 1000)}s)` +
+					(died === undefined ? "" : `: ${died}`);
 				log.warn("worker never said hello", { worker: workerId, task: task.id, reason });
 				this.failWorker(workerId, reason);
 			}, this.config.workerHelloTimeoutMs);

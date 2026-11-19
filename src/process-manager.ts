@@ -12,7 +12,8 @@
 
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import fs from "node:fs";
+import fs, { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerCapabilities } from "./security.ts";
@@ -59,6 +60,15 @@ export interface WorkerSpec {
 export interface WorkerSpawner {
 	spawnWorker(spec: WorkerSpec): Promise<string>;
 	killWorker(taskId: string): Promise<void>;
+	/**
+	 * Why a worker that never connected died, when the process manager wrote it
+	 * down.
+	 *
+	 * A process manager that accepts a start and loses the child reports success,
+	 * so the only witness is the child's own stderr. Optional: a spawner that keeps
+	 * no logs simply has nothing to say.
+	 */
+	lastWorkerError?(taskId: string): string | undefined;
 	listWorkers(): Promise<WorkerProcessInfo[]>;
 	disconnect(): Promise<void>;
 }
@@ -195,6 +205,27 @@ export class ProcessManager implements WorkerSpawner {
 			log.info("worker process exited", { worker: spec.workerId, code, signal });
 		});
 		this.direct.set(name, child);
+	}
+
+	/**
+	 * The last thing the child said before it died.
+	 *
+	 * pm2 writes a worker's stderr to `~/.pm2/logs/<app>-error.log`, and when the
+	 * failure is pm2's own (`ProcessContainerFork.js` not resolving in a pnpm
+	 * layout) that file is the only place the reason exists. Reading it turns "the
+	 * worker never started" into "the worker never started: Cannot find module …".
+	 */
+	lastWorkerError(taskId: string): string | undefined {
+		const name = `mir-worker-${taskId}`;
+		const file = path.join(homedir(), ".pm2", "logs", `${name}-error.log`);
+		try {
+			const tail = readFileSync(file, "utf8").trim().split("\n").filter((line) => line.trim() !== "");
+			// The last few lines are a stack; the message is the line that names it.
+			const message = tail.reverse().find((line) => /^\w*Error:|Cannot find module|EADDRINUSE|SyntaxError/.test(line.trim()));
+			return message?.trim();
+		} catch {
+			return undefined;
+		}
 	}
 
 	async killWorker(taskId: string): Promise<void> {

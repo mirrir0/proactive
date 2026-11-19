@@ -87,7 +87,7 @@ export interface Channel {
 	respond(text: string, ctx: ReplyContext): Promise<void>;
 
 	/** Build the per-channel response tool the Router calls. */
-	responseTool(recorder?: ReplyRecorder): ToolDefinition;
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition;
 
 	/**
 	 * Optional transport-level admission check. Returns `{ok:false}` for events

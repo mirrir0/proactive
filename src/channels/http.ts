@@ -208,8 +208,8 @@ export class HttpChannel implements Channel {
 		log.info("http reply", { channel: "http", thread: entry.threadId, chars: safeText.length });
 	}
 
-	responseTool(recorder?: ReplyRecorder): ToolDefinition {
-		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (!tool) {
 			tool = makeResponseTool(this, recorder);

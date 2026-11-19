@@ -985,6 +985,11 @@ export class SuperAgent {
 			 */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
+				// Where the hand's files start. A remote hand's own policy is a placeholder on
+				// this side — it enforces its own — so the roots the client names here are the
+				// only ones the brain can tell a Worker about. Without them a Worker is told
+				// "you are on: the hand" and no folder, and it looks for one in its own cwd.
+				if (request.roots.length > 0) this.handRoots.set(request.handId, [...request.roots]);
 				this.store.createEndpoint({
 					id: request.handId,
 					name: request.name ?? request.handId,

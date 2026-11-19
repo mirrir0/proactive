@@ -184,8 +184,8 @@ export class QueueChannel implements Channel {
 		log.info("queue reply", { channel: "queue", file: name, chars: safeText.length });
 	}
 
-	responseTool(recorder?: ReplyRecorder): ToolDefinition {
-		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (!tool) {
 			tool = makeResponseTool(this, recorder);

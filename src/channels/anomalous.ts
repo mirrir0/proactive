@@ -133,8 +133,8 @@ export class AnomalousChannel implements Channel {
 		await this.options.deliver({ threadId }, text);
 	}
 
-	responseTool(recorder?: ReplyRecorder): ToolDefinition {
-		if (recorder === undefined) return (this.defaultTool ??= makeResponseTool(this));
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		if (recorder === undefined) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (tool === undefined) {
 			tool = makeResponseTool(this, recorder);

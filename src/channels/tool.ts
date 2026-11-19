@@ -23,7 +23,19 @@ export interface ReplyLimit {
 	truncate: boolean;
 }
 
-export function makeResponseTool(channel: Channel, recorder: ReplyRecorder = NOOP_RECORDER) {
+export function makeResponseTool(
+	channel: Channel,
+	recorder: ReplyRecorder = NOOP_RECORDER,
+	/**
+	 * Where this turn's replies go, when the model names nothing.
+	 *
+	 * The turn already knows the thread and the event it is answering; without this the
+	 * tool fell back to "the most recent inbound event on this channel", which is empty
+	 * for a trigger that arrived over the API — and the reply was refused for "no chat to
+	 * answer" after being counted as delivered.
+	 */
+	context?: () => ReplyContext,
+) {
 	return defineTool({
 		name: `respond_${channel.id}`,
 		label: `Respond on ${channel.id}`,
@@ -47,7 +59,11 @@ export function makeResponseTool(channel: Channel, recorder: ReplyRecorder = NOO
 			),
 		}),
 		async execute(_toolCallId, params) {
-			const ctx: ReplyContext = { eventId: params.reply_to, threadId: params.thread };
+			const ctx: ReplyContext = {
+				...(context?.() ?? {}),
+				...(params.reply_to === undefined ? {} : { eventId: params.reply_to }),
+				...(params.thread === undefined ? {} : { threadId: params.thread }),
+			};
 			// Counted before it is delivered: a refused reply must not reach a person
 			// and then be apologised for.
 			const verdict = recorder.record(channel.id, params.text, ctx);

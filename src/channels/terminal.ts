@@ -68,8 +68,8 @@ export class TerminalChannel implements Channel {
 		process.stdout.write(`\nmir: ${redactSecrets(text)}\n> `);
 	}
 
-	responseTool(recorder?: ReplyRecorder): ToolDefinition {
-		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (!tool) {
 			tool = makeResponseTool(this, recorder);

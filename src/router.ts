@@ -761,7 +761,14 @@ export class RouterLayer {
 			this.buildJournalTool(),
 			this.buildScratchpadTool(),
 			this.buildReadLogTool(),
-			...this.deps.channels.map((c) => c.responseTool(this.recorder)),
+			// The turn's own context is the default address: a reply belongs to the
+			// conversation it answers, and only the turn knows which one that is.
+			...this.deps.channels.map((c) =>
+				c.responseTool(this.recorder, () => ({
+					...(this.turn.originThreadId === undefined ? {} : { threadId: this.turn.originThreadId }),
+					...(this.turn.originEventId === undefined ? {} : { eventId: this.turn.originEventId }),
+				})),
+			),
 			this.buildDispatchTool(),
 			this.buildStopTaskTool(),
 			this.buildListWorkersTool(),

@@ -125,3 +125,18 @@ test("a conclusion is delivered to its thread without resolving a chat", async (
 	await channel.deliverTo("thread-1", "the answer");
 	assert.deepEqual(delivered, [{ threadId: "thread-1", text: "the answer" }]);
 });
+
+test("a reply with no address goes to the turn's own thread, not the last chat heard", async () => {
+	const delivered: Array<{ threadId?: string; chatId?: string; text: string }> = [];
+	const channel = new AnomalousChannel({
+		deliver: (target, text) => {
+			delivered.push({ ...target, text });
+		},
+	});
+	await channel.start(() => {});
+	// No event ever went through `submit`, so the reply book is empty — which is exactly
+	// the case a turn from the API is in.
+	const tool = channel.responseTool(undefined, () => ({ threadId: "thread-from-turn" }));
+	await tool.execute("call-1", { text: "the answer" }, undefined, undefined, {});
+	assert.deepEqual(delivered, [{ threadId: "thread-from-turn", text: "the answer" }]);
+});

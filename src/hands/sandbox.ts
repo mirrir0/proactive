@@ -261,7 +261,19 @@ const SYSTEM_READ = [
 	"/Library/Apple",
 	"/private/var/db/dyld",
 	"/dev",
+	// Configuration a tool needs to run at all. Not secrets — `~/.ssh`, `~/.aws` and the
+	// brain's own state stay denied — but `git` refuses to start without its config, and
+	// a Worker that cannot run `git status` reports the sandbox as a broken machine.
+	"/etc/gitconfig",
 ] as const;
+
+/** Single files a tool needs, read as literals: `subpath` does not match a file. */
+const SYSTEM_READ_FILES = ["~/.gitconfig", "~/.gitignore_global", "~/.config/git/config"] as const;
+
+/** A `~` path as an absolute one. */
+function homeOf(entry: string): string {
+	return entry.startsWith("~/") ? path.join(process.env["HOME"] ?? "", entry.slice(2)) : entry;
+}
 
 function seatbeltString(value: string): string {
 	// Seatbelt profiles are s-expressions; a quote or backslash in a path would end
@@ -311,12 +323,17 @@ export function buildSeatbeltProfile(policy: HandPolicy, capabilities: HandCapab
 		read.add(real);
 		if (capabilities.fs === "rw") write.add(real);
 	}
+	const readFiles = new Set<string>(SYSTEM_READ_FILES.map(homeOf));
 	const denied = policy.denyReadPaths.map(realOrSelf);
+	for (const file of readFiles) {
+		// An operator who denies it wins: the deny rules are rendered after the allows.
+		if (denied.some((entry) => file === entry || file.startsWith(`${entry}/`))) readFiles.delete(file);
+	}
 	for (const entry of denied) read.delete(entry);
 
 	const readLeaves = [...read].filter((entry) => !denied.some((d) => entry === d || entry.startsWith(`${d}/`)));
 	const ancestors = new Set<string>(["/"]);
-	for (const entry of [...readLeaves, ...write]) {
+	for (const entry of [...readLeaves, ...readFiles, ...write]) {
 		for (const parent of ancestorsOf(entry).slice(1)) ancestors.add(parent);
 	}
 
@@ -335,6 +352,7 @@ export function buildSeatbeltProfile(policy: HandPolicy, capabilities: HandCapab
 		"(allow file-read-metadata)",
 		section("allow file-read*", [...ancestors], literal),
 		section("allow file-read*", readLeaves, subpath),
+		section("allow file-read*", [...readFiles], literal),
 		section("allow file-write*", [...ancestors], literal),
 		section("allow file-write*", [...write], subpath),
 		section("deny file-read*", denied, subpath),

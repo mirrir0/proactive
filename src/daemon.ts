@@ -120,7 +120,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),
 		maxTokens: numEnv("MIR_MAX_TOKENS", 8192),
 		workerSessionDir: expandHome(env.MIR_WORKER_STATE_DIR ?? join(paths.state, "worker-state")),
-		stateDir: expandHome(env.MIR_STATE_DIR ?? join(paths.state, "state")),
+		// The durable store (SQLite, the journal, spilled objects) is the data
+		// directory; `paths.state` holds what describes a *running* install.
+		stateDir: expandHome(env.MIR_STATE_DIR ?? paths.data),
 		mcpConfigPath: env.MIR_MCP_CONFIG_PATH ?? "mcp.config.json",
 		// The stack says what this member may reach; without one, the file does.
 		...(stackUrl === "" ? {} : { mcpServers: new McpServers({ stackUrl, token: env.MIR_API_TOKEN ?? "", log }) }),

@@ -40,12 +40,48 @@ unowned event deserves the Router's attention. Its policies are natural language
 and can be enabled/disabled without code. It is skipped for Threads that already
 have a subscriber: those are known-interesting.
 
+## Memory: journal, scratchpad, log
+
+Three tiers, because a model's context is not a record and the log is not readable
+in bulk.
+
+**The journal** — `journal` tool, one file per conversation, in a git repository at
+`<data>/journal/threads/<threadId>.md`. The Router's note to itself: what this
+conversation is, what was decided, what is open, and the pointers (paths, ids) that
+make the rest findable. It is **rewritten, not appended to** — a journal that only
+grows is a log. Over `JOURNAL_MAX_CHARS` (2400) the write is *refused* with an
+instruction to compact, so the ceiling is the harness's and the summary stays the
+model's. Every write is a commit, which is the point: a post-mortem can read what
+the Router believed at 14:02 and what changed after the deploy failed, a question no
+message log can answer. Git is best effort — a container without it still gets the
+files, and the log says history is off.
+
+**The scratchpad** — `scratchpad` tool, in SQLite, shared across every conversation.
+Two lists: `outstanding` (work in flight — a task, a question asked of a person, a
+deploy being watched) and `planned` (what the Router means to do and has not
+started). They are the Router's own, not derived from `tasks`, because it waits on
+things that are not tasks. A dispatch writes its own `outstanding` line and a
+conclusion closes it, so the list cannot drift from reality by being forgotten; the
+model writes everything else. The rendered copy is committed to the journal repo as
+`scratchpad.md`, on every change.
+
+**The log** — `read_log` tool, the thread log itself. The turn's window is short by
+design (a hundred-odd lines, ~6000 characters, never fewer than twenty); `read_log`
+is how a turn goes back further, reads a Worker's thread, or searches entry text.
+The log is authoritative: if the journal and the log disagree, the log is right.
+
+A turn reads them in that order — journal, then the conversation tail, then the
+scratchpad, then the machine's state — because the summary should be read before the
+detail. When the tail drops lines it says so, and says what to do about it: *they
+belong in your journal, and `read_log` will fetch them*. That sentence is what keeps
+the journal current without a timer.
+
 ## The turn prompt
 
-A turn's message is the inbound events, then **this conversation** — the last 40
-lines of the chat's thread, oldest first, ending where the batch begins so the
-person's own message is not said twice — then the state block, then the
-instructions. The conversation is there because the model's session is not this
+A turn's message is the inbound events, then **the journal**, then **this
+conversation** — the tail of the chat's thread, oldest first, ending where the batch
+begins so the person's own message is not said twice — then **the scratchpad**, then
+the state block, then the instructions. The conversation is there because the model's session is not this
 chat's: the log is what makes a turn answer *this* conversation. What goes in it
 is conversation only: what the person said, what the assistant said, a dispatch, a
 stop, a rename. Tool calls, tool results, hand calls and statuses are machinery

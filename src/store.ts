@@ -41,6 +41,28 @@ export interface StoredEvent {
 	error?: string;
 }
 
+/**
+ * One line of the Router's scratchpad.
+ *
+ * `outstanding` is work in flight — a task, a question asked of a person, a
+ * deploy being watched. `planned` is what the Router means to do and has not
+ * started. The split matters because they are read differently: outstanding work
+ * is what a new message has to be reconciled with, planned work is what the Router
+ * was in the middle of thinking.
+ */
+export interface ScratchpadRow {
+	id: string;
+	kind: "outstanding" | "planned";
+	text: string;
+	/** The conversation it came from, when it came from one. */
+	threadId?: string;
+	/** The task it tracks, when it tracks one. */
+	taskId?: string;
+	status: "open" | "done" | "dropped";
+	createdAt: number;
+	updatedAt: number;
+}
+
 export interface EndpointRecord {
 	id: string;
 	name: string;
@@ -292,6 +314,21 @@ export class MirStore {
 				truncated   INTEGER NOT NULL DEFAULT 0
 			);
 			CREATE INDEX IF NOT EXISTS work_items_endpoint_idx ON work_items (endpoint_id, started_at);
+
+			-- The Router's own lists: what is in flight, and what it means to do.
+			-- Not derived from tasks: a Router waits on a person's answer, on a
+			-- deploy, on another conversation — none of which is a task row.
+			CREATE TABLE IF NOT EXISTS scratchpad (
+				id         TEXT PRIMARY KEY,
+				kind       TEXT NOT NULL,
+				text       TEXT NOT NULL,
+				thread_id  TEXT,
+				task_id    TEXT,
+				status     TEXT NOT NULL,
+				created_at REAL NOT NULL,
+				updated_at REAL NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS scratchpad_kind_idx ON scratchpad (kind, status);
 		`);
 		// `CREATE TABLE IF NOT EXISTS` leaves a database made by an earlier build
 		// alone, so a column added to `threads` is added here. One statement per
@@ -675,6 +712,53 @@ export class MirStore {
 			.prepare(`SELECT thread_id FROM subscriptions WHERE worker_id = ? ORDER BY thread_id`)
 			.all(workerId) as { thread_id: string }[];
 		return rows.map((r) => r.thread_id);
+	}
+
+	// ----- the Router's scratchpad -----
+
+	putScratchpadItem(item: ScratchpadRow): void {
+		this.db
+			.prepare(
+				`INSERT INTO scratchpad (id, kind, text, thread_id, task_id, status, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET
+					kind = excluded.kind,
+					text = excluded.text,
+					thread_id = excluded.thread_id,
+					task_id = excluded.task_id,
+					status = excluded.status,
+					updated_at = excluded.updated_at`,
+			)
+			.run(
+				item.id,
+				item.kind,
+				item.text,
+				item.threadId ?? null,
+				item.taskId ?? null,
+				item.status,
+				item.createdAt,
+				item.updatedAt,
+			);
+	}
+
+	listScratchpad(): ScratchpadRow[] {
+		const rows = this.db
+			.prepare(`SELECT * FROM scratchpad ORDER BY created_at ASC`)
+			.all() as unknown as Array<Record<string, unknown>>;
+		return rows.map((row) => ({
+			id: String(row.id),
+			kind: row.kind === "planned" ? "planned" : "outstanding",
+			text: String(row.text),
+			...(row.thread_id === null ? {} : { threadId: String(row.thread_id) }),
+			...(row.task_id === null ? {} : { taskId: String(row.task_id) }),
+			status: row.status === "done" || row.status === "dropped" ? (row.status as "done" | "dropped") : "open",
+			createdAt: Number(row.created_at),
+			updatedAt: Number(row.updated_at),
+		}));
+	}
+
+	getScratchpadItem(id: string): ScratchpadRow | undefined {
+		return this.listScratchpad().find((item) => item.id === id);
 	}
 
 	// ----- hands (endpoints) -----

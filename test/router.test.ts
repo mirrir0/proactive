@@ -5,6 +5,7 @@ import { MirStore } from "../src/store.ts";
 import { ThreadManager } from "../src/thread.ts";
 import { ContextManager } from "../src/context.ts";
 import { DEFAULT_CONFIG, type SuperAgentConfig } from "../src/types.ts";
+import { Journal } from "../src/journal.ts";
 import { RecordingChannel, FakeSpawner, makeTrigger, rmDir, tmpDir, waitFor, tick } from "./helpers/fakes.ts";
 import { scriptedFactory, type Script } from "./helpers/scripted-session.ts";
 import { ThreadLog } from "../src/threadlog.ts";
@@ -22,6 +23,7 @@ interface Harness {
 	sessions: ReturnType<typeof scriptedFactory>["sessions"];
 	published: Array<{ threadId: string; entry: ThreadEntry }>;
 	threadLog: ThreadLog | undefined;
+	journal: Journal | undefined;
 	dir: string;
 	cleanup: () => Promise<void>;
 }
@@ -37,6 +39,8 @@ async function makeRouter(
 		hands?: { socketPath: string; listHands: () => any[] };
 		/** Give the router a thread log, and collect what it publishes. */
 		threadLog?: boolean;
+		/** Give the router a journal (a git-less one, so a test writes no repository). */
+		journal?: boolean;
 	} = {},
 ): Promise<Harness> {
 	const dir = tmpDir();
@@ -63,6 +67,7 @@ async function makeRouter(
 		routerRetryBackoffMs: 1,
 		objectRetention: 1000,
 	};
+	const journal = options.journal === true ? new Journal({ dir: `${dir}/journal`, log: createLogger({ level: "error", format: "json", write: () => {} }), git: false }) : undefined;
 	const { factory, sessions } = scriptedFactory({
 		script: options.script ?? (() => []),
 		detached: options.detached,
@@ -80,6 +85,7 @@ async function makeRouter(
 		sessionFactory: factory,
 		hands: options.hands,
 		threadLog,
+		journal,
 		publishEntry: (threadId, entry) => published.push({ threadId, entry }),
 	});
 	return {
@@ -93,6 +99,7 @@ async function makeRouter(
 		sessions,
 		published,
 		threadLog,
+		journal,
 		dir,
 		cleanup: async () => {
 			await router.dispose();
@@ -871,6 +878,115 @@ test("a turn reads the conversation it is in, ending where its own message begin
 		assert.doesNotMatch(conversation, /turn finished/, "statuses are not conversation either");
 		// The new message appears once: in the Inbound block, not again as history.
 		assert.equal(prompt.split("main").length - 1, 1, "the person's message is said once");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a dispatch writes an outstanding line, and its conclusion closes it", async () => {
+	// The list cannot drift from reality by the Router forgetting to write it: the
+	// dispatch writes it, and the conclusion closes it.
+	const h = await makeRouter({ threadLog: true, script: () => [] });
+	try {
+		assert.equal(h.store.listScratchpad().length, 0, "an idle brain has nothing in flight");
+		const task = await h.router.dispatchTask({ title: "check the lockfile", description: "check it", threadId: "work-1" });
+
+		const open = h.store.listScratchpad().filter((item) => item.status === "open");
+		assert.equal(open.length, 1);
+		assert.equal(open[0]!.kind, "outstanding");
+		assert.equal(open[0]!.taskId, task.id);
+		assert.match(open[0]!.text, /check the lockfile/);
+
+		h.router.handleWorkerConclusion(task.workerId!, "the lockfile is missing");
+		const after = h.store.listScratchpad();
+		assert.equal(after.length, 1);
+		assert.equal(after[0]!.status, "done", "the conclusion closed the line");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("the scratchpad is the Router's own: it can plan, and a turn reads both lists", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "ok" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-pad", "Plans");
+		h.router.addScratchpadItem({ kind: "planned", text: "ask about the lockfile", threadId });
+		h.router.addScratchpadItem({ kind: "outstanding", text: "waiting on the deploy", threadId });
+
+		h.router.submitTrigger(makeTrigger({ threadId, text: "what is next?" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const prompt = h.sessions[0]!.prompts[0] ?? "";
+
+		assert.match(prompt, /=== Your scratchpad \(every conversation\) ===/);
+		assert.match(prompt, /outstanding:/);
+		assert.match(prompt, /waiting on the deploy/);
+		assert.match(prompt, /planned:/);
+		assert.match(prompt, /ask about the lockfile/);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a turn reads the journal before the conversation, and an empty one says so", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		journal: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "ok" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-j", "Journal");
+		// Some history, so both blocks exist and their order can be read.
+		h.threadLog!.append(threadId, { kind: "text", role: "user", text: "the deploy failed" });
+		h.threadLog!.append(threadId, { kind: "text", role: "assistant", text: "which branch?" });
+		// Empty: the turn is told what the journal is for.
+		h.router.submitTrigger(makeTrigger({ threadId, text: "hello" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const first = h.sessions[0]!.prompts[0] ?? "";
+		assert.match(first, /=== Your journal for this conversation ===/);
+		assert.match(first, /Empty\./);
+		assert.ok(
+			first.indexOf("=== Your journal") < first.indexOf("=== This conversation"),
+			"the summary is read before the detail",
+		);
+
+		// Written, it is read back on the next turn — from the file, not from memory.
+		await h.journal!.write({ threadId, text: "Decided: keep the bash entrypoint." });
+		h.router.submitTrigger(makeTrigger({ threadId, text: "and then?" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 1, 3000, "a second turn");
+		assert.match(h.sessions[0]!.prompts[1] ?? "", /Decided: keep the bash entrypoint\./);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("the tail is a budget: it keeps far more than forty lines, and says what it dropped", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "ok" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-long", "A long one");
+		// 150 lines at ~50 characters: ~7.5k, over the six-thousand budget and well
+		// over the forty lines the old window held.
+		for (let index = 0; index < 150; index += 1) {
+			h.threadLog!.append(threadId, {
+				kind: "text",
+				role: index % 2 === 0 ? "user" : "assistant",
+				text: `line ${index} — ${"detail ".repeat(6)}`,
+			});
+		}
+		h.router.submitTrigger(makeTrigger({ threadId, text: "where were we?" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const prompt = h.sessions[0]!.prompts[0] ?? "";
+
+		assert.match(prompt, /line 149/, "the newest line is in the window");
+		const them = prompt.match(/them: line \d+/g) ?? [];
+		assert.ok(them.length >= 40, `far more than the old forty-line window, saw ${them.length} of them`);
+		assert.match(prompt, /earlier line\(s\) not shown/, "a window that drops lines says so");
+		assert.match(prompt, /they belong in your journal/, "and what to do about it");
 	} finally {
 		await h.cleanup();
 	}

@@ -46,6 +46,8 @@ import { metrics, log } from "./telemetry.ts";
 import { redactSecrets } from "./security.ts";
 import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
 import { brainResourceLoader, useSkillTool } from "./skills.ts";
+import { JOURNAL_MAX_CHARS, type Journal } from "./journal.ts";
+import type { ScratchpadRow } from "./store.ts";
 import type { NewThreadEntry, ThreadEntry, ThreadLog } from "./threadlog.ts";
 
 /**
@@ -95,6 +97,11 @@ export interface RouterDependencies {
 	threadLog?: ThreadLog;
 	/** Called with each entry after it is stored, so a watching client sees it live. */
 	publishEntry?: (threadId: string, entry: ThreadEntry) => void;
+	/**
+	 * The Router's journal: what it remembers about a conversation, in a git repo so
+	 * a post-mortem can read what it believed at the time.
+	 */
+	journal?: Journal;
 }
 
 export interface TaskInput {
@@ -247,14 +254,37 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
 
-/** How many entries to read when rebuilding a chat's conversation for a turn. */
-const CONVERSATION_SCAN = 400;
-
-/** How many of those lines to show: the tail is the part a turn answers from. */
-const CONVERSATION_LINES = 40;
+/**
+ * How many log entries to read when rebuilding a chat's conversation for a turn.
+ *
+ * Larger than the tail, because most entries are not conversation: a turn of tool
+ * calls and results can be ten rows, and reading too few would leave the tail
+ * half-empty while the log had plenty to show.
+ */
+const CONVERSATION_SCAN = 1200;
 
 /** How much of one line to keep, so a pasted wall of text cannot fill the turn. */
 const CONVERSATION_LINE_CHARS = 600;
+
+/**
+ * The tail, as a budget rather than a line count.
+ *
+ * Forty lines was the whole of a turn's memory and it is about ten exchanges: a
+ * decision from the morning is simply gone. The tail now holds a real working
+ * set — a hundred-odd lines, or six thousand characters, whichever comes first —
+ * and everything older than that belongs in the journal, which is what the turn
+ * reads first.
+ */
+const CONVERSATION_TAIL_CHARS = 6000;
+const CONVERSATION_TAIL_LINES = 120;
+/** However tight the budget, a turn always sees this much of the conversation. */
+const CONVERSATION_MIN_LINES = 20;
+
+/** How many log entries `read_log` will look through. */
+const READ_LOG_SCAN = 800;
+
+/** How many lines of each list a turn reads; the rest is one `scratchpad` call away. */
+const SCRATCHPAD_BLOCK_ITEMS = 8;
 
 /**
  * One line of a conversation, as a turn reads it.
@@ -265,6 +295,28 @@ const CONVERSATION_LINE_CHARS = 600;
  * A turn does not need to know that a tool ran; it needs to know what was said,
  * because the model's context is not this chat's (one session serves them all).
  */
+/** The words of an entry, whatever kind it is — what `read_log` searches. */
+function entryText(entry: ThreadEntry): string {
+	switch (entry.kind) {
+		case "text":
+			return entry.text;
+		case "thinking":
+			return entry.text;
+		case "tool_call":
+			return `${entry.toolName} ${entry.args === undefined ? "" : JSON.stringify(entry.args)}`;
+		case "tool_result":
+			return entry.result === undefined ? "" : JSON.stringify(entry.result);
+		case "hand":
+			return `${entry.op} on ${entry.endpointId} — ${entry.ok ? "ok" : "failed"}`;
+		case "status":
+			return entry.note ?? "";
+		case "stop":
+			return entry.note ?? "";
+		case "title":
+			return entry.title;
+	}
+}
+
 function conversationLine(entry: ThreadEntry): string | undefined {
 	switch (entry.kind) {
 		case "text": {
@@ -320,6 +372,8 @@ export class RouterLayer {
 	private readonly dispatchQueue: Array<{ taskId: string; input: TaskInput }> = [];
 	/** Per-worker output waiting to be written into its thread. */
 	private readonly deltaBuffers = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+	/** Each conversation's journal, as last read or written: the turn reads it synchronously. */
+	private readonly journalCache = new Map<string, string>();
 	private readonly inbox: InboxItem[] = [];
 	private turn: TurnState = emptyTurn();
 	private drainTimer: NodeJS.Timeout | null = null;
@@ -440,6 +494,9 @@ export class RouterLayer {
 	private buildTools(): ToolDefinition[] {
 		return [
 			useSkillTool(),
+			this.buildJournalTool(),
+			this.buildScratchpadTool(),
+			this.buildReadLogTool(),
 			...this.deps.channels.map((c) => c.responseTool(this.recorder)),
 			this.buildDispatchTool(),
 			this.buildStopTaskTool(),
@@ -532,6 +589,378 @@ export class RouterLayer {
 						isError: true,
 					};
 				}
+			},
+		});
+	}
+
+	/**
+	 * Add a line to the scratchpad.
+	 *
+	 * The Router's own lists are not derived from `tasks`: it waits on a person's
+	 * answer, on a deploy, on another conversation, and none of those is a task
+	 * row. What a dispatch *does* get is an `outstanding` line written for it, so
+	 * the list cannot drift from reality by the Router forgetting to write it.
+	 */
+	addScratchpadItem(input: {
+		kind: "outstanding" | "planned";
+		text: string;
+		threadId?: string;
+		taskId?: string;
+	}): ScratchpadRow {
+		const now = Date.now();
+		const item: ScratchpadRow = {
+			id: `pad-${crypto.randomUUID().slice(0, 8)}`,
+			kind: input.kind,
+			text: input.text,
+			...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+			...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+			status: "open",
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.deps.store.putScratchpadItem(item);
+		this.writeScratchpadCopy();
+		return item;
+	}
+
+	/** Close a line: done, or dropped when it stopped being worth doing. */
+	closeScratchpadItem(id: string, status: "done" | "dropped"): void {
+		const existing = this.deps.store.getScratchpadItem(id);
+		if (existing === undefined) return;
+		this.deps.store.putScratchpadItem({ ...existing, status, updatedAt: Date.now() });
+		this.writeScratchpadCopy();
+	}
+
+	/** Close whatever line a task was tracking, when the task ends. */
+	private closeScratchpadForTask(taskId: string, status: "done" | "dropped"): void {
+		const line = this.deps.store.listScratchpad().find((item) => item.taskId === taskId && item.status === "open");
+		if (line !== undefined) this.closeScratchpadItem(line.id, status);
+	}
+
+	/**
+	 * Keep the rendered copy in the journal repository.
+	 *
+	 * The list is the store's; the file is the record. Writing it on every change
+	 * is what makes "what did it think it was doing at 14:02" answerable later, and
+	 * it costs one file write and one commit on a change that happens a few times a
+	 * turn at most.
+	 */
+	writeScratchpadCopy(): void {
+		const journal = this.deps.journal;
+		if (journal === undefined) return;
+		const items = this.deps.store.listScratchpad();
+		const open = items.filter((item) => item.status === "open");
+		const outstanding = open.filter((item) => item.kind === "outstanding");
+		const planned = open.filter((item) => item.kind === "planned");
+		const closed = items.filter((item) => item.status !== "open").slice(-10);
+		const lines = [
+			"# The Router's scratchpad",
+			"",
+			"## Outstanding",
+			...(outstanding.length === 0 ? ["_nothing in flight_"] : outstanding.map((item) => `- [${item.id}] ${item.text}`)),
+			"",
+			"## Planned",
+			...(planned.length === 0 ? ["_nothing planned_"] : planned.map((item) => `- [${item.id}] ${item.text}`)),
+			...(closed.length === 0
+				? []
+				: ["", "## Recently closed", ...closed.map((item) => `- [${item.status}] ${item.text}`)]),
+		];
+		void journal
+			.writeScratchpad(lines.join("\n"), `${outstanding.length} outstanding, ${planned.length} planned`)
+			.catch((err: unknown) => log.warn("scratchpad: could not write the copy", { error: (err as Error).message }));
+	}
+
+	/** The scratchpad, as a turn reads it. */
+	private scratchpadBlock(): string {
+		const open = this.deps.store.listScratchpad().filter((item) => item.status === "open");
+		if (open.length === 0) return "";
+		const outstanding = open.filter((item) => item.kind === "outstanding");
+		const planned = open.filter((item) => item.kind === "planned");
+		const shown = (items: ScratchpadRow[], cap: number): string[] => {
+			const kept = items.slice(0, cap);
+			const lines = kept.map((item) => `- [${item.id}] ${item.text}`);
+			if (items.length > kept.length) lines.push(`- (… and ${items.length - kept.length} more)`);
+			return lines;
+		};
+		return [
+			"=== Your scratchpad (every conversation) ===",
+			"Work already in flight, and what you meant to do. A new request may belong to one of these.",
+			...(outstanding.length === 0 ? [] : ["outstanding:", ...shown(outstanding, SCRATCHPAD_BLOCK_ITEMS)]),
+			...(planned.length === 0 ? [] : ["planned:", ...shown(planned, SCRATCHPAD_BLOCK_ITEMS)]),
+			"",
+		].join("\n");
+	}
+
+	/**
+	 * Read this conversation's journal before the turn is built.
+	 *
+	 * A file read per turn, not per message: the journal is a few hundred words, and
+	 * a turn already reads the thread log. A failure leaves the cached copy in
+	 * place — a journal that cannot be read is a journal you still have, and losing
+	 * it mid-conversation would be worse than being a turn stale.
+	 */
+	private async loadJournal(): Promise<void> {
+		const journal = this.deps.journal;
+		const threadId = this.turn.originThreadId;
+		if (journal === undefined || threadId === undefined) return;
+		try {
+			this.journalCache.set(threadId, await journal.read(threadId));
+		} catch (err) {
+			log.warn("journal: could not be read", { thread: threadId, error: (err as Error).message });
+		}
+	}
+
+	/** The journal, as a turn reads it — first, because it is the summary. */
+	private journalBlock(): string {
+		const journal = this.deps.journal;
+		const threadId = this.turn.originThreadId;
+		if (journal === undefined || threadId === undefined) return "";
+		const text = this.journalCache.get(threadId) ?? "";
+		if (text === "") {
+			return [
+				"=== Your journal for this conversation ===",
+				"Empty. When something would be expensive to lose — a decision, a path, an id, an answer — write it with `journal`. It is what this conversation remembers when the lines below fall out of view.",
+				"",
+			].join("\n");
+		}
+		return ["=== Your journal for this conversation ===", text, ""].join("\n");
+	}
+
+	/**
+	 * `journal` — what the Router remembers about this conversation.
+	 *
+	 * Read with no argument, replaced with a note. Replaced, not appended: a
+	 * journal that only grows is a log, and the log is already there. Over the cap
+	 * the write is refused with the instruction to compact, so the summary stays a
+	 * summary and the model — the only thing that knows what mattered — does the
+	 * compacting.
+	 */
+	private buildJournalTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "journal",
+			label: "Read or rewrite this conversation's journal",
+			description: [
+				"Your note to yourself about this conversation: what it is, what was decided, what is still open, and the pointers that make the rest findable.",
+				"Call it with no argument to read it. Call it with `note` to replace it — a rewrite, not an append, and the whole note each time.",
+				"Write it when something would be expensive to lose: a decision, a path, an id, an answer to a question you asked. Not narration — the log has that.",
+			].join("\n"),
+			parameters: Type.Object({
+				note: Type.Optional(
+					Type.String({
+						description: "The whole journal, rewritten. Omit to read it.",
+					}),
+				),
+			}),
+			exposure: "direct",
+			async execute(_id: string, params: { note?: string }) {
+				const threadId = router.turn.originThreadId ?? "";
+				const journal = router.deps.journal;
+				if (journal === undefined || threadId === "") {
+					return {
+						content: [{ type: "text" as const, text: "this conversation has no journal" }],
+						details: { ok: false, chars: 0 },
+					};
+				}
+				if (params.note === undefined) {
+					const current = await journal.read(threadId);
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: current === "" ? "empty — nothing written for this conversation yet" : current,
+							},
+						],
+						details: { ok: true, chars: current.length },
+					};
+				}
+				const written = await journal.write({
+					threadId,
+					text: params.note,
+					...(router.deps.threadLog?.name(threadId) === undefined
+						? {}
+						: { label: router.deps.threadLog.name(threadId) }),
+				});
+				if (!written.ok) {
+					return {
+						content: [{ type: "text" as const, text: written.reason }],
+						details: { ok: false, chars: params.note.length },
+						isError: true,
+					};
+				}
+				metrics.counter("mir_journal_writes_total");
+				router.journalCache.set(threadId, params.note.trim());
+				router.record(threadId, {
+					kind: "status",
+					status: "running",
+					note: `journal written (${written.chars} chars)`,
+				});
+				return {
+					content: [{ type: "text" as const, text: `journal written (${written.chars}/${JOURNAL_MAX_CHARS} chars)` }],
+					details: { ok: true, chars: written.chars },
+				};
+			},
+		});
+	}
+
+	/**
+	 * `scratchpad` — the Router's lists, across every conversation.
+	 *
+	 * Two kinds, because they are read differently. `outstanding` is work in
+	 * flight — a task, a question asked of a person, a deploy being watched — and a
+	 * new message has to be reconciled with it. `planned` is what the Router means
+	 * to do and has not started. A dispatch adds an outstanding line by itself, so
+	 * the list cannot drift from reality by forgetting; a conclusion closes it.
+	 */
+	private buildScratchpadTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "scratchpad",
+			label: "The Router's outstanding and planned work",
+			description: [
+				"Your lists, shared across every conversation: what is in flight (`outstanding`) and what you mean to do (`planned`).",
+				"Use it to tie a new request back to work already running — the answer to \"did we already look at that\" is here, not in this chat's history.",
+				"`list` shows both. `add` takes kind and text. `done`/`drop` close one by id. `update` rewrites one.",
+			].join("\n"),
+			parameters: Type.Object({
+				op: Type.Union([
+					Type.Literal("list"),
+					Type.Literal("add"),
+					Type.Literal("update"),
+					Type.Literal("done"),
+					Type.Literal("drop"),
+				]),
+				kind: Type.Optional(Type.Union([Type.Literal("outstanding"), Type.Literal("planned")])),
+				text: Type.Optional(Type.String({ description: "The line, in a few words." })),
+				id: Type.Optional(Type.String({ description: "The item id, from `list`." })),
+			}),
+			exposure: "direct",
+			async execute(_id: string, params: { op: string; kind?: "outstanding" | "planned"; text?: string; id?: string }) {
+				const store = router.deps.store;
+				const threadId = router.turn.originThreadId;
+				switch (params.op) {
+					case "add": {
+						if (params.text === undefined || params.text.trim() === "") {
+							return { content: [{ type: "text" as const, text: "add needs text" }], details: { ok: false, id: "" } };
+						}
+						const item = router.addScratchpadItem({
+							kind: params.kind ?? "planned",
+							text: params.text.trim(),
+							...(threadId === undefined ? {} : { threadId }),
+						});
+						return {
+							content: [{ type: "text" as const, text: `added ${item.id} (${item.kind}): ${item.text}` }],
+							details: { ok: true, id: item.id },
+						};
+					}
+					case "update": {
+						const existing = params.id === undefined ? undefined : store.getScratchpadItem(params.id);
+						if (existing === undefined) {
+							return { content: [{ type: "text" as const, text: "no item with that id" }], details: { ok: false, id: params.id ?? "" } };
+						}
+						const next: ScratchpadRow = {
+							...existing,
+							...(params.kind === undefined ? {} : { kind: params.kind }),
+							...(params.text === undefined ? {} : { text: params.text.trim() }),
+							updatedAt: Date.now(),
+						};
+						store.putScratchpadItem(next);
+						router.writeScratchpadCopy();
+						return {
+							content: [{ type: "text" as const, text: `updated ${next.id}: ${next.text}` }],
+							details: { ok: true, id: next.id },
+						};
+					}
+					case "done":
+					case "drop": {
+						const existing = params.id === undefined ? undefined : store.getScratchpadItem(params.id);
+						if (existing === undefined) {
+							return { content: [{ type: "text" as const, text: "no item with that id" }], details: { ok: false, id: params.id ?? "" } };
+						}
+						router.closeScratchpadItem(existing.id, params.op === "done" ? "done" : "dropped");
+						return {
+							content: [{ type: "text" as const, text: `${params.op === "done" ? "done" : "dropped"} ${existing.id}` }],
+							details: { ok: true, id: existing.id },
+						};
+					}
+					default: {
+						const items = store.listScratchpad().filter((item) => item.status === "open");
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: items.length === 0 ? "nothing on the scratchpad" : items.map((item) => `${item.id} [${item.kind}] ${item.text}`).join("\n"),
+								},
+							],
+							details: { ok: true, id: "" },
+						};
+					}
+				}
+			},
+		});
+	}
+
+	/**
+	 * `read_log` — peek at the log itself.
+	 *
+	 * The turn's window is short by design; this is how a turn goes back further
+	 * than the window, or reads what a Worker actually did, without asking the
+	 * person to repeat themselves. The log is the record: if the journal and the
+	 * log disagree, the log is right.
+	 */
+	private buildReadLogTool(): ToolDefinition {
+		const router = this;
+		return defineTool({
+			name: "read_log",
+			label: "Read a thread's log",
+			description: [
+				"Read entries from a thread's log — this conversation, or a task's thread — newest last.",
+				"Use it when the answer is further back than this turn's window, or when you need what a Worker actually saw rather than its conclusion.",
+				"`query` searches entry text; `kinds` narrows to text / tool_call / tool_result / status / stop.",
+			].join("\n"),
+			parameters: Type.Object({
+				thread: Type.Optional(Type.String({ description: "Thread id; defaults to this conversation." })),
+				query: Type.Optional(Type.String({ description: "Only entries whose text contains this." })),
+				kinds: Type.Optional(Type.String({ description: "Comma-separated kinds to include." })),
+				limit: Type.Optional(Type.Number({ description: "How many entries to return (default 60, max 400)." })),
+			}),
+			exposure: "direct",
+			async execute(_id: string, params: { thread?: string; query?: string; kinds?: string; limit?: number }) {
+				const threadLog = router.deps.threadLog;
+				const threadId = params.thread ?? router.turn.originThreadId;
+				if (threadLog === undefined || threadId === undefined) {
+					return { content: [{ type: "text" as const, text: "there is no log for that" }], details: { ok: false, entries: 0 } };
+				}
+				const limit = Math.max(1, Math.min(400, Math.round(params.limit ?? 60)));
+				const kinds = params.kinds === undefined ? undefined : new Set(params.kinds.split(",").map((kind) => kind.trim()));
+				const query = params.query?.toLowerCase();
+				const entries = threadLog.entries(threadId, 0, READ_LOG_SCAN);
+				const matching = entries.filter((entry) => {
+					if (kinds !== undefined && !kinds.has(entry.kind)) return false;
+					if (query === undefined) return true;
+					return entryText(entry).toLowerCase().includes(query);
+				});
+				const kept = matching.slice(-limit);
+				if (kept.length === 0) {
+					return { content: [{ type: "text" as const, text: "no entries matched" }], details: { ok: true, entries: 0 } };
+				}
+				const lines = kept.map((entry) => {
+					const said = entryText(entry);
+					const clipped = said.length > CONVERSATION_LINE_CHARS ? `${said.slice(0, CONVERSATION_LINE_CHARS)}…` : said;
+					return `[${entry.seq}] ${entry.kind === "text" ? `${entry.role}: ` : ""}${clipped}`;
+				});
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: [
+								`=== ${threadId} (${kept.length} of ${matching.length} matching, ${entries.length} scanned) ===`,
+								...lines,
+							].join("\n"),
+						},
+					],
+					details: { ok: true, entries: kept.length },
+				};
 			},
 		});
 	}
@@ -754,6 +1183,7 @@ export class RouterLayer {
 		this.turn = emptyTurn(this.originOf(batch)?.threadId);
 		this.turnInFlightSince = Date.now();
 		metrics.gauge("mir_router_turn_in_flight", 1);
+		await this.loadJournal();
 		const prompt = this.buildPrompt(batch);
 		const triggerCount = batch.filter((i) => i.kind === "trigger").length;
 		log.info("router turn start", {
@@ -1043,7 +1473,9 @@ export class RouterLayer {
 			}
 		}
 
+		lines.push(this.journalBlock());
 		lines.push(this.conversationBlock(batch));
+		lines.push(this.scratchpadBlock());
 		lines.push(this.stateBlock());
 		lines.push(this.instructionsBlock());
 		return lines.join("\n");
@@ -1080,11 +1512,29 @@ export class RouterLayer {
 			if (line !== undefined) lines.push(line);
 		}
 		if (lines.length === 0) return "";
-		const kept = lines.slice(-CONVERSATION_LINES);
+		// A budget, not a count: a hundred-odd lines or six thousand characters,
+		// whichever comes first, but never fewer than a turn needs to follow the
+		// thread. The tail is the working set; the journal is the memory.
+		const kept: string[] = [];
+		let chars = 0;
+		for (let index = lines.length - 1; index >= 0; index -= 1) {
+			const line = lines[index]!;
+			const atFloor = kept.length < CONVERSATION_MIN_LINES;
+			if (!atFloor && (chars + line.length > CONVERSATION_TAIL_CHARS || kept.length >= CONVERSATION_TAIL_LINES)) break;
+			kept.unshift(line);
+			chars += line.length + 1;
+		}
+		const dropped = lines.length - kept.length;
 		return [
 			"=== This conversation, oldest first ===",
 			"Everything below already happened in this chat. It is the record, not a summary: answer from it before dispatching anything.",
-			...(lines.length > kept.length ? [`(… ${lines.length - kept.length} earlier line(s) not shown)`] : []),
+			// The moment the window starts forgetting, say so — and say what to do
+			// about it. This is what keeps the journal current without a timer.
+			...(dropped > 0
+				? [
+						`(… ${dropped} earlier line(s) not shown. If any of them still matter, they belong in your journal — and \`read_log\` will fetch them.)`,
+					]
+				: []),
 			...kept,
 			"",
 		].join("\n");
@@ -1193,6 +1643,15 @@ export class RouterLayer {
 		};
 		this.tasks.set(id, full);
 		this.deps.store.upsertTask(full);
+		// The list of what is in flight is written by the dispatch, not by the
+		// Router remembering to write it. That is the difference between a list that
+		// can drift and one that cannot.
+		this.addScratchpadItem({
+			kind: "outstanding",
+			text: `${input.title}${input.endpointId === undefined ? "" : ` — on ${input.endpointId}`}`,
+			...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+			taskId: id,
+		});
 		this.record(input.threadId, {
 			kind: "status",
 			status: atCapacity ? "waiting" : "running",
@@ -1408,6 +1867,7 @@ export class RouterLayer {
 			task.updatedAt = Date.now();
 			this.deps.store.upsertTask(task);
 			metrics.counter("mir_tasks_completed_total", 1, { status: "done", fast: String(Boolean(task.fast)) });
+			this.closeScratchpadForTask(task.id, "done");
 			metrics.observe("mir_task_duration_ms", Date.now() - task.createdAt, { fast: String(Boolean(task.fast)) });
 			this.deps.context.spill({
 				id: `task:${task.id}`,

@@ -47,6 +47,7 @@ import { BrainServer } from "./api/server.ts";
 import { AnomalousChannel } from "./channels/anomalous.ts";
 import type { BrainHost } from "./api/protocol.ts";
 import { ThreadLog, newThreadId } from "./threadlog.ts";
+import { Journal } from "./journal.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 
 export interface SuperAgentDeps {
@@ -88,6 +89,8 @@ export class SuperAgent {
 	 */
 	private anomalousChannel: AnomalousChannel | null = null;
 	private readonly threadLog: ThreadLog;
+	/** What the Router remembers about each conversation, in git. */
+	private readonly journal: Journal;
 	private housekeepingTimer: NodeJS.Timeout | null = null;
 	/** Daemon-side MCP tool catalog (merged from worker `mcp_catalog` reports). */
 	private readonly mcpCatalog = new Map<string, McpCatalogEntry>();
@@ -109,6 +112,9 @@ export class SuperAgent {
 		};
 		this.store = MirStore.open(this.config.stateDir);
 		this.threadLog = new ThreadLog({ store: this.store, log });
+		// The journal is a git working tree beside the store, so a conversation's
+		// memory has a history a post-mortem can read.
+		this.journal = new Journal({ dir: join(this.config.stateDir, "journal"), log });
 		this.threads = new ThreadManager(this.store);
 		this.context = new ContextManager({
 			store: this.store,
@@ -366,6 +372,7 @@ export class SuperAgent {
 					}
 				: undefined,
 			threadLog: this.threadLog,
+			journal: this.journal,
 			publishEntry: (threadId, entry) => this.apiServer?.publish(threadId, entry),
 			onOrphanedWorker: (workerId, taskId) => {
 				log.warn("orphaned worker from previous daemon generation", { worker: workerId, task: taskId });

@@ -15,6 +15,90 @@
 /** The palette, in the order shadcn's `--chart-1..5` uses. */
 export const CHART_COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"] as const;
 
+/** The six forms, as things a page can link to. */
+export type ChartId = "work" | "turns" | "counters" | "parts" | "shape" | "full";
+
+export interface ChartCopy {
+	id: ChartId;
+	title: string;
+	/** What it is, in one line, for the card. */
+	note: string;
+	/** What it measures, in a sentence. */
+	what: string;
+	/** How to read it, and what "wrong" looks like. */
+	how: string[];
+}
+
+/** The six charts, with the words that explain them in the modal. */
+export const CHART_COPY: Record<ChartId, ChartCopy> = {
+	work: {
+		id: "work",
+		title: "Work over time",
+		note: "in flight, and conversations seen — sampled while this page is open",
+		what: "Two lines sampled every couple of seconds: how many tasks are in flight, and how many conversations exist.",
+		how: [
+			"A flat line at zero means the brain is idle — nothing is running and nothing is queued.",
+			"A line that steps up and stays up means work is accumulating: tasks are dispatched faster than they finish.",
+			"The dashed line is conversations, not work: it only ever grows, so a step in it is a new chat, not a new problem.",
+		],
+	},
+	turns: {
+		id: "turns",
+		title: "Router turns",
+		note: "cumulative, since this brain started",
+		what: "Every turn the Router has taken — one message, or a batch of them, answered by the model.",
+		how: [
+			"A steep slope means many turns: each one costs a model call, so this is the shape of the bill.",
+			"A flat stretch means nothing has arrived, or the brain is stuck mid-turn — the state block says which.",
+			"Turns are cheap when they dispatch and expensive when they think; compare with the dispatch counter.",
+		],
+	},
+	counters: {
+		id: "counters",
+		title: "What happens most",
+		note: "the counters with the largest totals",
+		what: "The eight biggest counters in the registry, by total since start.",
+		how: [
+			"These are events, not rates: a big total is something that happened a lot, not something happening now.",
+			"A counter with an unexpected name is the first clue in a bug hunt — `mir_*_total` names are the vocabulary.",
+			"If pushes dominate, the dashboard itself is the busiest thing in the brain.",
+		],
+	},
+	parts: {
+		id: "parts",
+		title: "By part of the brain",
+		note: "router, worker, hands, mcp, dashboard",
+		what: "Counters grouped by their prefix: which part of the brain is doing the most.",
+		how: [
+			"A dominant slice says where the work is: router turns, worker tasks, hand calls, MCP calls, or the dashboard.",
+			"Hands dominating with little work means a Worker is retrying a failing call.",
+			"A thin slice is not a problem; a slice that disappears is a part that stopped being used.",
+		],
+	},
+	shape: {
+		id: "shape",
+		title: "Shape of the work",
+		note: "the same groups, relative to each other",
+		what: "The same five groups as a radar: the shape of the system's activity.",
+		how: [
+			"A balanced shape is a healthy system: router, workers and hands all in play.",
+			"A spike in one axis with the others flat means everything is going through one part.",
+			"The polygon is normalised to the biggest group, so read the shape, not the size.",
+		],
+	},
+	full: {
+		id: "full",
+		title: "How full",
+		note: "work, hands, threads and hand load, as a share",
+		what: "Four gauges as rings: in-flight work, connected hands, busy threads, and hand load.",
+		how: [
+			"A ring at 100% is at capacity — the next dispatch queues rather than runs.",
+			"Hands at 100% with work at 100% means the queue is the hands, not the model.",
+			"A ring that never moves is a gauge that is not wired; that is worth knowing too.",
+		],
+	},
+};
+
 export interface Point {
 	label: string;
 	value: number;

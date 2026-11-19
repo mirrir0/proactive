@@ -331,3 +331,26 @@ test("the chat is the conversation with the person, not the worker's log", () =>
 	assert.doesNotMatch(html, /dispatched: List two entries/);
 	assert.doesNotMatch(html, /worker w1 finished/);
 });
+
+test("each metric chart opens in a modal, and the modal is a URL", () => {
+	const metrics = renderPage({ agent: "mir", view: "metrics", state: state() });
+	// The card is a link to its own explanation.
+	assert.match(metrics, /<a class="chartlink" href="\/metrics\/work\?token=/, "a chart is a link");
+	for (const id of ["work", "turns", "counters", "parts", "shape", "full"]) {
+		assert.match(metrics, new RegExp(`/metrics/${id}\\?token=`), `${id} has no link`);
+	}
+
+	const modal = renderPage({ agent: "mir", view: "metrics", state: state(), chart: "turns" });
+	assert.match(modal, /role="dialog"/);
+	assert.match(modal, /aria-modal="true"/);
+	assert.match(modal, /Router turns/);
+	assert.match(modal, /Every turn the Router has taken/, "the modal explains what it measures");
+	assert.match(modal, /A steep slope means many turns/, "and how to read it");
+	assert.match(modal, /<a class="close" href="\/metrics\?token=/, "closing is a link, not a script");
+});
+
+test("the page is full width, not a column", () => {
+	const html = renderPage({ agent: "mir", view: "work", state: state() });
+	assert.match(html, /max-width: none/);
+	assert.doesNotMatch(html, /max-width: 1320px/);
+});

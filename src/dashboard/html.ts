@@ -19,7 +19,17 @@
  */
 
 import type { DashboardState } from "./server.ts";
-import { areaChart, barChart, lineChart, pieChart, radarChart, radialChart, type Point } from "./charts.ts";
+import {
+	areaChart,
+	barChart,
+	CHART_COPY,
+	lineChart,
+	pieChart,
+	radarChart,
+	radialChart,
+	type ChartId,
+	type Point,
+} from "./charts.ts";
 
 export type DashboardView = "work" | "threads" | "thread" | "hands" | "scratchpad" | "metrics";
 
@@ -32,6 +42,8 @@ export interface PageOptions {
 	readonly selectedTask?: string;
 	/** Whether the workers panel is showing. In the URL, so a reload keeps it. */
 	readonly workersOpen?: boolean;
+	/** The metric chart opened in a modal, when one is. */
+	readonly chart?: ChartId;
 	readonly state: DashboardState;
 	/** Entries for a thread page, oldest first. */
 	readonly entries?: ReadonlyArray<DashboardEntry>;
@@ -100,6 +112,7 @@ export function renderPage(options: PageOptions): string {
 		<div id="content" data-view="${view}">${view === "thread" ? renderChat(options) : renderSection(options)}</div>
 	</main>
 	${view === "thread" && options.workersOpen !== false ? renderWorkers(options) : ""}
+	${options.chart === undefined ? "" : renderChartModal(options, options.chart)}
 </div>
 <script>
 (function () {
@@ -316,6 +329,7 @@ function metricsCharts(state: DashboardState): string {
 		{ label: "load", value: Math.min(1, (gauges["mir_hands_running"] ?? 0) / Math.max(1, state.hands.length * 4)) },
 	];
 
+	const links: Array<{ id: ChartId; html: string }> = [];
 	const charts = [
 		lineChart(
 			[
@@ -331,6 +345,12 @@ function metricsCharts(state: DashboardState): string {
 		radarChart(groupPoints, "Shape of the work", "the same groups, relative to each other"),
 		radialChart(gaugesShown, "How full", "work, hands, threads and hand load, as a share"),
 	];
+	const ids: ChartId[] = ["work", "turns", "counters", "parts", "shape", "full"];
+	const linked = charts.map((chart, index) => {
+		const id = ids[index] ?? "work";
+		links.push({ id, html: chart });
+		return `<a class="chartlink" href="${withToken(`/metrics/${id}`)}" aria-label="${escapeHtml(CHART_COPY[id].title)} — open">${chart}</a>`;
+	});
 
 	const rows = Object.entries(counters)
 		.sort((a, b) => b[1] - a[1])
@@ -339,7 +359,7 @@ function metricsCharts(state: DashboardState): string {
 		.join("");
 
 	return [
-		`<section class="section"><div class="charts">${charts.join("")}</div></section>`,
+		`<section class="section"><div class="charts">${linked.join("")}</div></section>`,
 		section("Counters", [rows === "" ? '<div class="empty">No counters yet.</div>' : `<div class="grid">${rows}</div>`]),
 	].join("");
 }
@@ -395,6 +415,32 @@ function renderWorkers(options: PageOptions): string {
 		<div class="workerlist">${workers.length === 0 ? '<div class="railnote">Nothing started here yet.</div>' : rows}</div>
 		${detail}
 	</aside>`;
+}
+
+/**
+ * A metric chart, opened in a modal.
+ *
+ * A modal, not a page: the numbers behind it are the ones the card showed, and
+ * leaving the page to read an explanation loses the place. It is still a URL —
+ * `/metrics/<id>` — so it can be linked, reloaded and closed with the browser's
+ * back button, and the close control is a link home rather than a script.
+ */
+function renderChartModal(options: PageOptions, id: ChartId): string {
+	const copy = CHART_COPY[id];
+	const chart = (renderSection({ ...options, view: "metrics" }).match(
+		new RegExp(`<a class="chartlink" href="[^"]*/metrics/${id}[^"]*"[^>]*>(.*?)</a>`, "s"),
+	) ?? [])[1];
+	return `<div class="scrim">
+		<div class="modal" role="dialog" aria-modal="true" aria-labelledby="chart-title">
+			<header class="modalhead">
+				<h2 id="chart-title">${escapeHtml(copy.title)}</h2>
+				<a class="close" href="${withToken("/metrics")}" aria-label="Close">Close</a>
+			</header>
+			<p class="what">${escapeHtml(copy.what)}</p>
+			${chart === undefined ? "" : `<div class="modalbart">${chart}</div>`}
+			<ul class="how">${copy.how.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+		</div>
+	</div>`;
 }
 
 /** The channel a thread came from, and the words that opened it. */
@@ -685,6 +731,7 @@ const STYLE = `
 		--good: oklch(0.53 0.13 150); --good-soft: oklch(0.95 0.04 150);
 		--warning: oklch(0.58 0.13 70); --warning-soft: oklch(0.96 0.05 85);
 		--critical: oklch(0.55 0.19 27); --critical-soft: oklch(0.96 0.03 27);
+		--scrim: oklch(0.15 0.0025 var(--surface-hue) / 0.5);
 	}
 	@media (prefers-color-scheme: dark) {
 		:root {
@@ -707,12 +754,12 @@ const STYLE = `
 	body {
 		margin: 0; background: var(--ground); color: var(--ink);
 		font: var(--size-ui)/1.45 var(--face-ui); -webkit-font-smoothing: antialiased;
-		padding: 10px; height: 100vh;
+		padding: 8px; height: 100vh;
 	}
 	.frame {
 		display: grid; grid-template-columns: 216px minmax(0, 1fr);
 		grid-template-rows: minmax(0, 1fr);
-		height: calc(100vh - 20px); max-width: 1320px; margin: 0 auto;
+		height: calc(100vh - 16px); width: 100%; max-width: none; margin: 0;
 		background: var(--document); border-radius: 12px; overflow: hidden;
 	}
 	.frame.open { grid-template-columns: 216px minmax(0, 1fr) minmax(320px, 440px); }
@@ -844,7 +891,26 @@ const STYLE = `
 			--chart-5: oklch(0.645 0.246 16.439);
 		}
 	}
-	.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--gap); align-items: start; }
+	.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: var(--gap); align-items: start; }
+	.chartlink { text-decoration: none; color: inherit; display: block; border-radius: var(--box-radius); }
+	.chartlink:hover .chart { background: var(--active); }
+	.chartlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	/* The modal: a scrim and one sheet, no shadow — the same language as the app. */
+	.scrim { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 40; }
+	.modal {
+		width: min(720px, 100%); max-height: min(640px, calc(100vh - 48px)); overflow-y: auto;
+		background: var(--document); border-radius: 14px; padding: 22px 24px 24px;
+		display: flex; flex-direction: column; gap: 12px;
+	}
+	.modalhead { display: flex; align-items: baseline; gap: 10px; }
+	.modalhead h2 { margin: 0; font-size: var(--size-heading); font-weight: 600; }
+	.modalhead .close { margin-left: auto; text-decoration: none; color: var(--ink-secondary); font-size: var(--size-label); padding: 4px 10px; border-radius: var(--chip-radius); background: var(--hover); }
+	.modalhead .close:hover { background: var(--active); color: var(--ink); }
+	.modal .what { margin: 0; color: var(--ink-secondary); font-size: var(--size-small); }
+	.modal .how { margin: 0; padding-left: 18px; color: var(--ink-secondary); font-size: var(--size-small); display: flex; flex-direction: column; gap: 6px; }
+	.modalbart .chart { background: var(--hover); }
+	.modalbart .chart svg { max-height: 260px; }
 	.chart { margin: 0; background: var(--hover); border-radius: var(--box-radius); padding: 12px 14px 6px; display: flex; flex-direction: column; gap: 6px; }
 	.chart figcaption { display: flex; align-items: baseline; gap: 8px; }
 	.chart .charttitle { font-weight: 500; font-size: var(--size-small); }

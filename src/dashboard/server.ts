@@ -19,6 +19,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Logger } from "../telemetry.ts";
 import { metrics } from "../telemetry.ts";
 import { renderPage, renderSection, setLinkToken, type DashboardEntry, type DashboardView } from "./html.ts";
+import type { ChartId } from "./charts.ts";
 
 /** Everything the page draws. Assembled per request, so it is never stale. */
 export interface DashboardState {
@@ -163,6 +164,7 @@ export class DashboardServer {
 				...(threadId === undefined ? {} : { threadId }),
 				...(selectedTask === null || selectedTask === undefined ? {} : { selectedTask }),
 				workersOpen,
+				...(route.chart === undefined ? {} : { chart: route.chart as ChartId }),
 				state,
 				entries,
 			});
@@ -328,7 +330,7 @@ export class DashboardServer {
 }
 
 /** `/`, `/threads`, `/threads/<id>`, `/hands`, `/scratchpad`, `/metrics`. */
-function routeOf(pathname: string): { view: DashboardView; threadId?: string } | null {
+function routeOf(pathname: string): { view: DashboardView; threadId?: string; chart?: string } | null {
 	const clean = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
 	if (clean === "/" || clean === "/index.html" || clean === "/work") return { view: "work" };
 	if (clean === "/threads") return { view: "threads" };
@@ -337,5 +339,7 @@ function routeOf(pathname: string): { view: DashboardView; threadId?: string } |
 	if (clean === "/hands") return { view: "hands" };
 	if (clean === "/scratchpad") return { view: "scratchpad" };
 	if (clean === "/metrics") return { view: "metrics" };
+	const chart = /^\/metrics\/([a-z]+)$/.exec(clean);
+	if (chart !== null) return { view: "metrics", chart: chart[1] };
 	return null;
 }

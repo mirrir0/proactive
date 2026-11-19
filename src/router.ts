@@ -49,7 +49,7 @@ import { brainResourceLoader, useSkillTool } from "./skills.ts";
 import { JOURNAL_MAX_CHARS, type Journal } from "./journal.ts";
 import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
-import type { NewThreadEntry, ThreadEntry, ThreadLog } from "./threadlog.ts";
+import { newThreadId, type NewThreadEntry, type ThreadEntry, type ThreadLog } from "./threadlog.ts";
 
 /**
  * How long a worker's output is buffered before it becomes a log entry.
@@ -451,6 +451,33 @@ export class RouterLayer {
 	}
 
 	/** Append to a thread's log and tell whoever is watching. Absent log = no-op. */
+	/**
+	 * The thread a task's own work is written to.
+	 *
+	 * Created on first use and remembered on the task, so a retry or a re-adopt writes
+	 * to the same one. A task with no chat (a queue trigger, a schedule) still gets a
+	 * thread: its work is a thing somebody may want to read, and the alternative is
+	 * that it exists only in the process's memory.
+	 */
+	private workThreadFor(task: Task): string | undefined {
+		if (task.workThreadId !== undefined) return task.workThreadId;
+		const threadLog = this.deps.threadLog;
+		if (threadLog === undefined) return task.threadId;
+		// A thread that is not a chat's is already the work's own: nothing to separate.
+		// Only a chat has a person reading it, and only a chat needs the split.
+		if (task.threadId === undefined || threadLog.chatOf(task.threadId) === undefined) return task.threadId;
+		const id = newThreadId();
+		try {
+			threadLog.ensureThread(id, `work: ${task.title}`, "work");
+		} catch (err) {
+			log.warn("could not create a work thread", { task: task.id, error: (err as Error).message });
+			return undefined;
+		}
+		task.workThreadId = id;
+		this.deps.store.upsertTask(task);
+		return id;
+	}
+
 	private record(threadId: string | undefined, entry: NewThreadEntry): void {
 		const threadLog = this.deps.threadLog;
 		if (threadLog === undefined || threadId === undefined || threadId === "") return;
@@ -1777,11 +1804,20 @@ export class RouterLayer {
 		task.status = "running";
 		task.updatedAt = now;
 		this.pendingSpawns++;
+		// The Worker's own thread. Its narration — "I'll check the subdirectories",
+		// every tool call, every hand call — is how the work was done, not what the
+		// person asked for. It belongs somewhere a person can look *if they want to*,
+		// which is a thread of its own; the chat gets the card and the answer.
+		//
+		// Before this, a task dispatched from a chat wrote the Worker's monologue into
+		// the chat itself, so a person read "I'll stop here and wait for the search"
+		// eleven times in their conversation.
+		const workThread = this.workThreadFor(task);
 		this.workers.set(workerId, {
 			workerId,
 			taskId: task.id,
 			status: "busy",
-			threadIds: task.threadId ? [task.threadId] : [],
+			threadIds: workThread === undefined ? [] : [workThread],
 			channelId: task.channelId,
 			replyTo: task.replyTo,
 			lastHeartbeat: now,

@@ -97,6 +97,9 @@ export class SuperAgent {
 	private readonly threadLog: ThreadLog;
 	/** What the Router remembers about each conversation, in git. */
 	private readonly journal: Journal;
+	/** Where each hand's folder is, as the host that started it told us. */
+	private readonly handRoots = new Map<string, string[]>();
+
 	/** This brain's views, for a client that renders MCP Apps. Off unless configured. */
 	private appServer: AppServer | null = null;
 	/** The dashboard, for a person looking at what this brain is doing. */
@@ -894,7 +897,15 @@ export class SuperAgent {
 					?.stopThread(threadId, "stopped by a client")
 					.catch((err: unknown) => log.warn("could not stop a thread", { thread: threadId, error: (err as Error).message }));
 			},
-			hands: () => this.handsHub?.listHands() ?? [],
+			hands: () =>
+				(this.handsHub?.listHands() ?? []).map((hand) => {
+					const roots = this.handRoots.get(hand.endpointId);
+					// The hand's own roots when it reported them; the host's word when it
+					// did not (a remote hand's policy is a placeholder on this side).
+					return roots === undefined || hand.policy.roots.length > 0
+						? hand
+						: { ...hand, policy: { ...hand.policy, roots } };
+				}),
 			/**
 			 * A hand the client brought.
 			 *
@@ -906,6 +917,13 @@ export class SuperAgent {
 			 */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
+				// The hub's policy for a remote hand is a placeholder — the hand enforces
+				// its own, and what it says it enforces is display only. But the *host*
+				// knows where the folder is (it is starting the hand there), so the roots
+				// it names are kept here: without them `list_hands` says "(none)" and a
+				// Worker is never told where "here" is, so it searches the local hand and
+				// reports the brain's own directory as the repository.
+				if (request.roots.length > 0) this.handRoots.set(request.handId, [...request.roots]);
 				this.store.createEndpoint({
 					id: request.handId,
 					name: request.name ?? request.handId,

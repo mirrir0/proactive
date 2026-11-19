@@ -111,6 +111,7 @@ interface TaskRow {
 	description: string;
 	instructions: string | null;
 	thread_id: string | null;
+	work_thread_id?: string | null;
 	channel_id: string | null;
 	reply_to: string | null;
 	status: string;
@@ -334,6 +335,9 @@ export class MirStore {
 		// alone, so a column added to `threads` is added here. One statement per
 		// column, skipped when it is already there.
 		this.ensureColumn("threads", "chat_id", "TEXT");
+		// A task's own work thread: where the Worker's narration and tool calls go,
+		// which is not the chat it was dispatched from.
+		this.ensureColumn("tasks", "work_thread_id", "TEXT");
 		this.ensureColumn("threads", "status", "TEXT NOT NULL DEFAULT 'idle'");
 		this.ensureColumn("threads", "seq", "INTEGER NOT NULL DEFAULT 0");
 	}
@@ -410,13 +414,14 @@ export class MirStore {
 		this.db
 			.prepare(
 				`INSERT INTO tasks
-				 (id, title, description, instructions, thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 (id, title, description, instructions, thread_id, work_thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET
 					title = excluded.title,
 					description = excluded.description,
 					instructions = excluded.instructions,
 					thread_id = excluded.thread_id,
+					work_thread_id = excluded.work_thread_id,
 					channel_id = excluded.channel_id,
 					reply_to = excluded.reply_to,
 					status = excluded.status,
@@ -432,6 +437,7 @@ export class MirStore {
 				task.description,
 				task.instructions ?? null,
 				task.threadId ?? null,
+				task.workThreadId ?? null,
 				task.channelId ?? null,
 				task.replyTo ?? null,
 				task.status,
@@ -990,6 +996,7 @@ function rowToTask(row: TaskRow): Task {
 		description: row.description,
 		instructions: row.instructions ?? undefined,
 		threadId: row.thread_id ?? undefined,
+		workThreadId: row.work_thread_id ?? undefined,
 		channelId: row.channel_id ?? undefined,
 		replyTo: row.reply_to ?? undefined,
 		status: row.status as TaskStatus,

@@ -1077,3 +1077,50 @@ test("a worker that died before connecting is reported with the child's own word
 		await h.cleanup();
 	}
 });
+
+test("a Worker's narration goes to its own thread, not the person's chat", async () => {
+	// The failure this is for: a task dispatched from a chat wrote the Worker's
+	// monologue — "I'll stop here and wait for the search" — into the chat itself, so
+	// a person read the same sentence eleven times in their conversation. The chat
+	// gets the card and the answer; the work gets its own thread.
+	const h = await makeRouter({ threadLog: true, script: () => [] });
+	try {
+		const chat = h.threadLog!.chatThread("chat-work", "Notes");
+		const task = await h.router.dispatchTask({ title: "Find notes", description: "find them", threadId: chat });
+
+		// The spawn is asynchronous: the work thread exists once the Worker is running.
+		await waitFor(
+			() => h.store.listTasks().find((t) => t.id === task.id)?.workThreadId !== undefined,
+			2000,
+			"a work thread",
+		);
+		// What the Worker says while working.
+		h.router.handleWorkerDelta(task.workerId!, "I'll check the subdirectories.");
+		h.router.handleWorkerToolCall(task.workerId!, "c1", "exec", { argv: ["rg", "notes"] });
+		await tick(900); // the delta buffer flushes on a timer (750ms)
+
+		const work = h.store.listTasks().find((t) => t.id === task.id)!.workThreadId;
+		assert.ok(work !== undefined, "the task has a work thread of its own");
+		assert.notEqual(work, chat, "and it is not the chat");
+
+		const chatEntries = h.threadLog!.entries(chat);
+		assert.ok(
+			!chatEntries.some((entry) => entry.kind === "text" && entry.role === "assistant"),
+			"nothing the Worker said reached the chat",
+		);
+		assert.ok(
+			!chatEntries.some((entry) => entry.kind === "tool_call"),
+			"and neither did its tool calls",
+		);
+		assert.ok(chatEntries.some((entry) => entry.kind === "app"), "the chat has the card");
+
+		const workEntries = h.threadLog!.entries(work);
+		assert.ok(
+			workEntries.some((entry) => entry.kind === "text" && entry.text.includes("subdirectories")),
+			"the work thread has what the Worker said",
+		);
+		assert.ok(workEntries.some((entry) => entry.kind === "tool_call"), "and what it ran");
+	} finally {
+		await h.cleanup();
+	}
+});

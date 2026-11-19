@@ -58,6 +58,11 @@ export interface Task {
 	 */
 	instructions?: string;
 	threadId?: string;
+	/**
+	 * Where this task's own work is written: the Worker's narration, tool calls and
+	 * hand calls. Not the chat — that gets the card and the answer.
+	 */
+	workThreadId?: string;
 	channelId?: string;
 	replyTo?: string;
 	status: TaskStatus;

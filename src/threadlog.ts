@@ -241,6 +241,18 @@ export class ThreadLog {
 	 * Idempotent and safe to race: two turns of the same chat arriving at once
 	 * get the same id, because the store decides it under one statement.
 	 */
+	/**
+	 * Make a thread that is not a chat's.
+	 *
+	 * A Worker's own work goes somewhere a person can look but is not spoken to: a
+	 * thread with a name and no chat. Idempotent, so a caller can ensure rather than
+	 * check first.
+	 */
+	ensureThread(threadId: string, name: string, channelId: string): void {
+		if (this.store.getThread(threadId) !== undefined) return;
+		this.store.upsertThread({ id: threadId, name, channelId, subscriberWorkerIds: [], lastEventAt: Date.now() });
+	}
+
 	chatThread(chatId: string, title?: string): string {
 		return this.store.threadForChat(chatId, () => newThreadId(), title);
 	}

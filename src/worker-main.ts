@@ -165,6 +165,10 @@ async function main(): Promise<void> {
 			status: (status, progress) => client.status(status, progress),
 			heartbeat: (status, progress) => client.heartbeat(status, progress),
 			delta: (text) => client.delta(text),
+			// What the Worker did, not only what it said: a tool call is the work, and
+			// a thread that shows only the words is a thread that cannot be audited.
+			toolCall: (call) => client.toolCall(call.id, call.name, call.args),
+			toolResult: (result) => client.toolResult(result.id, result.isError, result.result),
 			release: (eventId, reason) => client.release(eventId, reason),
 			unsubscribe: (threadId, reason) => client.unsubscribe(threadId, reason),
 		},

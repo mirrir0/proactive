@@ -11,6 +11,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenRouterRouting } from "./types.ts";
@@ -121,11 +122,31 @@ export class ProcessManager implements WorkerSpawner {
 
 	/** Spawn a Worker as a pm2 app for this Task. */
 	async spawnWorker(spec: WorkerSpec): Promise<string> {
-		await this.connect();
 		const name = `mir-worker-${spec.taskId}`;
 		const dev = isTsRuntime();
 		const workerEntry = path.join(here(), dev ? "worker-main.ts" : "worker-main.js");
 		const specPath = this.writeSpec(spec);
+
+		/**
+		 * A worker can be started without pm2.
+		 *
+		 * pm2 is how a worker outlives its daemon (ADR 0001), and it is the default.
+		 * It is also a process manager whose own fork entry has to resolve, and in a
+		 * container — or a pnpm layout with two copies of pm2 — it may not: the worker
+		 * dies at boot with `ERR_MODULE_NOT_FOUND` inside pm2's container, which reads
+		 * as "the task is running and nothing is happening".
+		 *
+		 * So there is a second way, chosen when the operator asks for it: a plain
+		 * child process, tied to this daemon. It is worse at surviving the daemon and
+		 * better at existing at all.
+		 */
+		if ((process.env.MIR_WORKER_SPAWN ?? "pm2") === "process") {
+			this.spawnDirect(name, workerEntry, dev, spec);
+			log.info("worker spawned without pm2", { worker: spec.workerId, task: spec.taskId });
+			return name;
+		}
+
+		await this.connect();
 		const opts: Record<string, unknown> = {
 			name,
 			script: workerEntry,
@@ -153,7 +174,35 @@ export class ProcessManager implements WorkerSpawner {
 	}
 
 	/** Delete a Worker's pm2 app (after it finishes or is reaped). */
+	/** Worker processes started without pm2, by name, so a kill can find them. */
+	private readonly direct = new Map<string, import("node:child_process").ChildProcess>();
+
+	private spawnDirect(name: string, entry: string, dev: boolean, spec: WorkerSpec): void {
+		const args = dev ? ["--import", "tsx", entry] : [entry];
+		const child = spawn(process.execPath, args, {
+			cwd: process.cwd(),
+			env: { ...process.env, MIR_WORKER_SPEC_PATH: this.writeSpec(spec), MIR_WORKER_ID: spec.workerId },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		child.stdout?.on("data", (chunk: Buffer) => log.debug("worker stdout", { worker: spec.workerId, line: String(chunk).trim() }));
+		child.stderr?.on("data", (chunk: Buffer) => log.warn("worker stderr", { worker: spec.workerId, line: String(chunk).trim() }));
+		child.on("exit", (code, signal) => {
+			this.direct.delete(name);
+			log.info("worker process exited", { worker: spec.workerId, code, signal });
+		});
+		this.direct.set(name, child);
+	}
+
 	async killWorker(taskId: string): Promise<void> {
+		const directName = `mir-worker-${taskId}`;
+		const child = this.direct.get(directName);
+		if (child !== undefined) {
+			child.kill("SIGTERM");
+			this.direct.delete(directName);
+			this.removeSpec(taskId);
+			return;
+		}
+
 		await this.connect();
 		const name = `mir-worker-${taskId}`;
 		await new Promise<void>((resolve) => {

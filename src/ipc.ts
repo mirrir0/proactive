@@ -35,6 +35,9 @@ export type WorkerToDaemon =
 	| { type: "heartbeat"; status: string; progress?: string }
 	| { type: "conclusion"; text: string; taskId?: string }
 	| { type: "delta"; text: string }
+	/** What the Worker did, not only what it said: a tool call and its result. */
+	| { type: "tool_call"; toolCallId: string; toolName: string; args?: unknown }
+	| { type: "tool_result"; toolCallId: string; isError: boolean; result?: unknown }
 	| { type: "mcp_catalog"; servers: McpServerReport[]; tools: McpCatalogEntry[] }
 	| { type: "release"; eventId: string; reason?: string }
 	/** A Worker stopping a check it dispatched. */
@@ -312,6 +315,16 @@ export class ControlClient {
 
 	delta(text: string): void {
 		this.send({ type: "delta", text });
+	}
+
+	/** One tool call, as it happens, so a thread shows what the work did. */
+	toolCall(toolCallId: string, toolName: string, args?: unknown): void {
+		this.send({ type: "tool_call", toolCallId, toolName, ...(args === undefined ? {} : { args }) });
+	}
+
+	/** Its result, when it came back. */
+	toolResult(toolCallId: string, isError: boolean, result?: unknown): void {
+		this.send({ type: "tool_result", toolCallId, isError, ...(result === undefined ? {} : { result }) });
 	}
 
 	/** "This follow-up is not mine" — hand the event back to the Router. */

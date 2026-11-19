@@ -18,7 +18,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { Logger } from "../telemetry.ts";
 import { metrics } from "../telemetry.ts";
-import { renderDashboard } from "./html.ts";
+import { renderPage, renderSection, setLinkToken, type DashboardEntry, type DashboardView } from "./html.ts";
 
 /** Everything the page draws. Assembled per request, so it is never stale. */
 export interface DashboardState {
@@ -29,6 +29,8 @@ export interface DashboardState {
 		id: string;
 		name: string;
 		status: string;
+		/** The channel this conversation came from: http, terminal, queue, anomalous. */
+		channelId?: string;
 		seq: number;
 		lastEventAt: number;
 	}>;
@@ -37,6 +39,7 @@ export interface DashboardState {
 		title: string;
 		description: string;
 		status: string;
+		threadId?: string;
 		workerId?: string;
 		endpointId?: string;
 		result?: string;
@@ -60,6 +63,8 @@ export interface DashboardState {
 		policy: { maxConcurrent: number; roots: string[] };
 	}>;
 	readonly metrics: { counters: Record<string, number>; gauges: Record<string, number> };
+	/** Samples this server took, oldest first — what the line and area charts read. */
+	readonly history: ReadonlyArray<{ at: number; inFlight: number; threads: number; turns: number }>;
 }
 
 export interface DashboardOptions {
@@ -72,6 +77,10 @@ export interface DashboardOptions {
 	state: () => DashboardState;
 	/** Stop one task, for the card's own button. */
 	stopTask: (taskId: string) => Promise<void>;
+	/** A thread's entries from `since`, for the pane that follows one. */
+	entries: (threadId: string, since: number, limit: number) => ReadonlyArray<unknown>;
+	/** A thread's status, for the pane's header. */
+	threadStatus: (threadId: string) => string | undefined;
 	/** How often to push state while a client is listening. */
 	pushMs?: number;
 }
@@ -79,7 +88,8 @@ export interface DashboardOptions {
 export class DashboardServer {
 	private server: Server | null = null;
 	private readonly options: DashboardOptions;
-	private readonly clients = new Set<ServerResponse>();
+	/** One listener: the response, and the thread it is following (if any). */
+	private readonly clients = new Map<ServerResponse, { threadId?: string; since: number }>();
 	private timer: NodeJS.Timeout | null = null;
 
 	constructor(options: DashboardOptions) {
@@ -120,7 +130,7 @@ export class DashboardServer {
 			clearInterval(this.timer);
 			this.timer = null;
 		}
-		for (const client of this.clients) client.end();
+		for (const client of this.clients.keys()) client.end();
 		this.clients.clear();
 		const server = this.server;
 		if (server === null) return;
@@ -137,15 +147,47 @@ export class DashboardServer {
 			return;
 		}
 
-		if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-			const html = renderDashboard({ agent: this.options.agent, basePath: "" });
+		const route = routeOf(url.pathname);
+		if (req.method === "GET" && route !== null) {
+			const state = this.sample();
+			const threadId = route.threadId;
+			const selectedTask = url.searchParams.get("task") ?? undefined;
+			// A panel a person closed stays closed across a reload, because it is in
+			// the URL rather than in a variable.
+			const workersOpen = url.searchParams.get("workers") !== "0";
+			const entries = threadId === undefined ? [] : (this.options.entries(threadId, 0, 300) as DashboardEntry[]);
+			setLinkToken(this.options.token);
+			const html = renderPage({
+				agent: this.options.agent,
+				view: route.view,
+				...(threadId === undefined ? {} : { threadId }),
+				...(selectedTask === null || selectedTask === undefined ? {} : { selectedTask }),
+				workersOpen,
+				state,
+				entries,
+			});
+			res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+			res.end(html);
+			return;
+		}
+
+		// The section on its own, for the live swap: the same renderer, so a swapped
+		// section and a reloaded one are identical.
+		const partial = /^\/partial\/(work|threads|hands|scratchpad|metrics)$/.exec(url.pathname);
+		if (req.method === "GET" && partial !== null) {
+			setLinkToken(this.options.token);
+			const html = renderSection({
+				agent: this.options.agent,
+				view: partial[1] as DashboardView,
+				state: this.sample(),
+			});
 			res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
 			res.end(html);
 			return;
 		}
 
 		if (req.method === "GET" && url.pathname === "/api/state") {
-			this.json(res, 200, this.options.state());
+			this.json(res, 200, this.sample());
 			return;
 		}
 
@@ -157,10 +199,29 @@ export class DashboardServer {
 				// A proxy that buffers an event stream turns it into a poll.
 				"x-accel-buffering": "no",
 			});
+			const threadId = url.searchParams.get("thread") ?? undefined;
+			const since = Number(url.searchParams.get("since") ?? "0");
 			res.write(": connected\n\n");
-			this.clients.add(res);
+			this.clients.set(res, {
+				...(threadId === undefined || threadId === "" ? {} : { threadId }),
+				since: Number.isFinite(since) ? since : 0,
+			});
 			this.send(res, this.options.state());
+			if (threadId !== undefined && threadId !== "") this.sendThread(res, threadId);
 			req.on("close", () => this.clients.delete(res));
+			return;
+		}
+
+		const thread = /^\/api\/threads\/([^/]+)\/entries$/.exec(url.pathname);
+		if (req.method === "GET" && thread !== null) {
+			const threadId = decodeURIComponent(thread[1]!);
+			const since = Number(url.searchParams.get("since") ?? "0");
+			const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") ?? "200")));
+			this.json(res, 200, {
+				threadId,
+				status: this.options.threadStatus(threadId) ?? "unknown",
+				entries: this.options.entries(threadId, Number.isFinite(since) ? since : 0, limit),
+			});
 			return;
 		}
 
@@ -189,6 +250,27 @@ export class DashboardServer {
 		return a.length === b.length && timingSafeEqual(a, b);
 	}
 
+	/**
+	 * The state, with the samples this server has taken.
+	 *
+	 * The registry is counters and gauges — no history, because a metric with a
+	 * timestamp per point is a time-series database. A line chart needs a window, so
+	 * this keeps the last 60 samples (two minutes at the push interval).
+	 */
+	private readonly samples: Array<{ at: number; inFlight: number; threads: number; turns: number }> = [];
+
+	private sample(): DashboardState {
+		const state = this.options.state();
+		const inFlight = state.tasks.filter((task) => task.status === "running" || task.status === "queued").length;
+		const turns = state.metrics.counters["mir_router_turns_total"] ?? 0;
+		const last = this.samples.at(-1);
+		if (last === undefined || Date.now() - last.at >= 1500) {
+			this.samples.push({ at: Date.now(), inFlight, threads: state.threads.length, turns });
+			if (this.samples.length > 60) this.samples.shift();
+		}
+		return { ...state, history: this.samples };
+	}
+
 	private json(res: ServerResponse, status: number, body: unknown): void {
 		res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
 		res.end(JSON.stringify(body));
@@ -202,12 +284,58 @@ export class DashboardServer {
 		if (this.clients.size === 0) return;
 		let state: DashboardState;
 		try {
-			state = this.options.state();
+			state = this.sample();
 		} catch (err) {
 			this.options.log.warn("dashboard: could not assemble state", { error: (err as Error).message });
 			return;
 		}
 		metrics.counter("mir_dashboard_pushes_total");
-		for (const client of this.clients) this.send(client, state);
+		for (const client of this.clients.keys()) this.send(client, state);
 	}
+
+	/**
+	 * Tell the panes following a thread about the entry that just happened.
+	 *
+	 * Called from the brain's own publish path, so a thread pane is as live as the
+	 * thread log: no polling interval, no "refresh to see more". A client that
+	 * reconnects sends the `since` it has and gets exactly what it missed.
+	 */
+	publish(threadId: string, entry: { seq: number }): void {
+		metrics.counter("mir_dashboard_entry_pushes_total");
+		for (const [res, client] of this.clients) {
+			if (client.threadId !== threadId) continue;
+			if (entry.seq <= client.since) continue;
+			client.since = entry.seq;
+			res.write(`event: entry\ndata: ${JSON.stringify({ threadId, entry })}\n\n`);
+		}
+	}
+
+	/** The pane's first frame: everything after its cursor. */
+	private sendThread(res: ServerResponse, threadId: string): void {
+		const client = this.clients.get(res);
+		if (client === undefined) return;
+		const entries = this.options.entries(threadId, client.since, 200);
+		const last = entries.at(-1) as { seq?: number } | undefined;
+		if (typeof last?.seq === "number") client.since = last.seq;
+		res.write(
+			`event: thread\ndata: ${JSON.stringify({
+				threadId,
+				status: this.options.threadStatus(threadId) ?? "unknown",
+				entries,
+			})}\n\n`,
+		);
+	}
+}
+
+/** `/`, `/threads`, `/threads/<id>`, `/hands`, `/scratchpad`, `/metrics`. */
+function routeOf(pathname: string): { view: DashboardView; threadId?: string } | null {
+	const clean = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+	if (clean === "/" || clean === "/index.html" || clean === "/work") return { view: "work" };
+	if (clean === "/threads") return { view: "threads" };
+	const thread = /^\/threads\/([^/]+)$/.exec(clean);
+	if (thread !== null) return { view: "thread", threadId: decodeURIComponent(thread[1]!) };
+	if (clean === "/hands") return { view: "hands" };
+	if (clean === "/scratchpad") return { view: "scratchpad" };
+	if (clean === "/metrics") return { view: "metrics" };
+	return null;
 }

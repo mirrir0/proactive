@@ -185,9 +185,12 @@ interface TurnState {
 	 * on the thread it answered rather than nowhere.
 	 */
 	originThreadId?: string;
+	/** The channel and event the turn is answering, so a dispatch can answer there too. */
+	originChannelId?: string;
+	originEventId?: string;
 }
 
-function emptyTurn(originThreadId?: string): TurnState {
+function emptyTurn(originThreadId?: string, originChannelId?: string, originEventId?: string): TurnState {
 	return {
 		startedAt: Date.now(),
 		replies: [],
@@ -196,6 +199,8 @@ function emptyTurn(originThreadId?: string): TurnState {
 		stoppedThreads: new Set<string>(),
 		captured: "",
 		originThreadId,
+		...(originChannelId === undefined ? {} : { originChannelId }),
+		...(originEventId === undefined ? {} : { originEventId }),
 	};
 }
 
@@ -573,9 +578,13 @@ export class RouterLayer {
 					const task = await router.dispatchTask({
 						title: params.title,
 						description: params.description,
-						threadId: params.thread,
-						channelId: params.channel,
-						replyTo: params.reply_to,
+						// A dispatch belongs to the conversation it was made in, unless the
+						// model names another. Without this default a task has no thread,
+						// so its work is written nowhere a person can open and its card
+						// has nothing to link to.
+						threadId: params.thread ?? router.turn.originThreadId,
+						channelId: params.channel ?? router.turn.originChannelId,
+						replyTo: params.reply_to ?? router.turn.originEventId,
 						fast: isTrivial(params.description),
 						endpointId: params.endpoint,
 					});
@@ -1221,7 +1230,10 @@ export class RouterLayer {
 
 	private async runTurn(batch: InboxItem[]): Promise<void> {
 		if (batch.length === 0) return;
-		this.turn = emptyTurn(this.originOf(batch)?.threadId);
+		const origin = this.originOf(batch);
+		// The turn knows the channel and event it is answering, so a dispatch it
+		// makes can inherit them: a task with no channel answers nobody.
+		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id);
 		this.turnInFlightSince = Date.now();
 		metrics.gauge("mir_router_turn_in_flight", 1);
 		await this.loadJournal();
@@ -1838,6 +1850,40 @@ export class RouterLayer {
 		this.persistWorker(workerId);
 	}
 
+	/**
+	 * What a Worker did, recorded where the work is.
+	 *
+	 * The thread is the audit trail: a tool call and its result are two entries, so
+	 * a reader can tell "still running" from "we lost it", and a `use_skill` call is
+	 * how a skill's load shows up. `workerId` is on the entry because a thread can
+	 * have more than one worker in it, and the panel filters by it.
+	 */
+	handleWorkerToolCall(workerId: string, toolCallId: string, toolName: string, args?: unknown): void {
+		const rec = this.workers.get(workerId);
+		for (const threadId of rec?.threadIds ?? []) {
+			this.record(threadId, {
+				kind: "tool_call",
+				toolCallId,
+				toolName,
+				...(args === undefined ? {} : { args }),
+				workerId,
+			});
+		}
+	}
+
+	handleWorkerToolResult(workerId: string, toolCallId: string, isError: boolean, result?: unknown): void {
+		const rec = this.workers.get(workerId);
+		for (const threadId of rec?.threadIds ?? []) {
+			this.record(threadId, {
+				kind: "tool_result",
+				toolCallId,
+				isError,
+				...(result === undefined ? {} : { result }),
+				workerId,
+			});
+		}
+	}
+
 	/** A Worker reported a conclusion. Queue it for the Router to relay. */
 	/**
 	 * A worker's streaming output, coalesced into the work thread's log.
@@ -1861,6 +1907,15 @@ export class RouterLayer {
 		this.deltaBuffers.set(workerId, { text, timer });
 	}
 
+	/** Take a worker's buffered output, and stop its timer. */
+	private takeWorkerDelta(workerId: string): string {
+		const buffered = this.deltaBuffers.get(workerId);
+		if (buffered === undefined) return "";
+		this.deltaBuffers.delete(workerId);
+		clearTimeout(buffered.timer);
+		return buffered.text;
+	}
+
 	/** Write a worker's buffered output into its threads, if there is any. */
 	private flushWorkerDelta(workerId: string): void {
 		const buffered = this.deltaBuffers.get(workerId);
@@ -1871,13 +1926,22 @@ export class RouterLayer {
 		const rec = this.workers.get(workerId);
 		if (rec === undefined) return;
 		for (const threadId of rec.threadIds) {
-			this.record(threadId, { kind: "text", role: "assistant", text: buffered.text });
+			this.record(threadId, { kind: "text", role: "assistant", text: buffered.text, workerId });
 		}
 	}
 
 	handleWorkerConclusion(workerId: string, text: string): void {
-		// Whatever the worker was mid-sentence on belongs before its conclusion.
-		this.flushWorkerDelta(workerId);
+		// Whatever the worker was mid-sentence on: if the conclusion contains it, it
+		// is the same words arriving twice — the streamed prefix and the finished
+		// sentence — so the buffer is dropped rather than flushed. Anything earlier
+		// was already written by the delta timer.
+		const pending = this.takeWorkerDelta(workerId);
+		if (pending !== "" && !text.includes(pending.trim())) {
+			const rec = this.workers.get(workerId);
+			for (const threadId of rec?.threadIds ?? []) {
+				this.record(threadId, { kind: "text", role: "assistant", text: pending, workerId });
+			}
+		}
 		const rec = this.workers.get(workerId);
 		if (!rec) {
 			log.warn("conclusion from unknown worker", { worker: workerId });
@@ -1901,7 +1965,7 @@ export class RouterLayer {
 		// Router to pass it on to a channel.
 		for (const threadId of rec.threadIds) {
 			if (reportIsChat && threadId === reportThread) continue;
-			this.record(threadId, { kind: "text", role: "assistant", text });
+			this.record(threadId, { kind: "text", role: "assistant", text, workerId });
 			this.record(threadId, { kind: "status", status: "done", note: `worker ${workerId} finished` });
 		}
 
@@ -1930,7 +1994,7 @@ export class RouterLayer {
 		// a model asked to relay an answer it was handed says it twice: once in the
 		// worker's words and once in its own.
 		if (reportIsChat && reportThread !== undefined) {
-			this.record(reportThread, { kind: "text", role: "assistant", text });
+			this.record(reportThread, { kind: "text", role: "assistant", text, workerId });
 			// And the turn that the dispatch opened is over: without this the chat
 			// keeps its thinking loader up, because nothing else closes a turn no
 			// model run opened.

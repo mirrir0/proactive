@@ -228,6 +228,12 @@ export class SuperAgent {
 					case "mcp_catalog":
 						this.mergeMcpCatalog(msg);
 						break;
+					case "tool_call":
+						this.router?.handleWorkerToolCall(workerId, msg.toolCallId, msg.toolName, msg.args);
+						break;
+					case "tool_result":
+						this.router?.handleWorkerToolResult(workerId, msg.toolCallId, msg.isError, msg.result);
+						break;
 					case "delta":
 						// A worker never talks to a user directly — but its thread does, so
 						// its output is the thread's log, coalesced (handleWorkerDelta).
@@ -412,7 +418,13 @@ export class SuperAgent {
 				: undefined,
 			threadLog: this.threadLog,
 			journal: this.journal,
-			publishEntry: (threadId, entry) => this.apiServer?.publish(threadId, entry),
+			publishEntry: (threadId, entry) => {
+				this.apiServer?.publish(threadId, entry);
+				// A dashboard following this thread gets the entry now, not at the
+				// next tick: it is a log pane, and a log pane that lags is a log pane
+				// somebody refreshes.
+				this.dashboard?.publish(threadId, entry);
+			},
 			onOrphanedWorker: (workerId, taskId) => {
 				log.warn("orphaned worker from previous daemon generation", { worker: workerId, task: taskId });
 				void this.processManager.killWorker(taskId).catch(() => {});
@@ -452,6 +464,8 @@ export class SuperAgent {
 					stopTask: async (taskId) => {
 						await this.router?.stopTask(taskId, "stopped from the dashboard");
 					},
+					entries: (threadId, since, limit) => this.threadLog.entries(threadId, since, limit),
+					threadStatus: (threadId) => this.threadLog.status(threadId),
 				});
 				await this.dashboard.start().catch((err: unknown) => {
 					this.dashboard = null;
@@ -739,6 +753,7 @@ export class SuperAgent {
 				id: thread.id,
 				name: thread.name,
 				status: thread.status,
+				...(thread.channelId === undefined ? {} : { channelId: thread.channelId }),
 				seq: thread.seq,
 				lastEventAt: thread.lastEventAt,
 			})),
@@ -749,6 +764,7 @@ export class SuperAgent {
 					title: task.title,
 					description: task.description,
 					status: task.status,
+					...(task.threadId === undefined ? {} : { threadId: task.threadId }),
 					...(task.workerId === undefined ? {} : { workerId: task.workerId }),
 					...(task.endpointId === undefined ? {} : { endpointId: task.endpointId }),
 					...(task.result === undefined ? {} : { result: task.result }),
@@ -775,6 +791,9 @@ export class SuperAgent {
 				policy: { maxConcurrent: hand.policy.maxConcurrent, roots: hand.policy.roots },
 			})),
 			metrics: { counters: snapshot.counters ?? {}, gauges: snapshot.gauges ?? {} },
+			// The dashboard adds its own samples: the brain's registry is counters and
+			// gauges, not a time series.
+			history: [],
 		};
 	}
 

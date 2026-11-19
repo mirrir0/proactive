@@ -94,11 +94,11 @@ export class AppServer {
 	// ----- transport ------------------------------------------------------
 
 	private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-		if (!this.authorized(req)) {
+		const url = new URL(req.url ?? "/", "http://localhost");
+		if (!this.authorized(req, url)) {
 			this.fail(res, 401, -32001, "unauthorized");
 			return;
 		}
-		const url = new URL(req.url ?? "/", "http://localhost");
 		// A browser (or a person debugging) can read the view directly; the card is
 		// not a secret, it is the same HTML the resource returns.
 		if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/card")) {
@@ -131,9 +131,13 @@ export class AppServer {
 		res.end(JSON.stringify({ jsonrpc: "2.0", ...(message.id === undefined ? {} : { id: message.id }), ...result }));
 	}
 
-	private authorized(req: IncomingMessage): boolean {
+	private authorized(req: IncomingMessage, url?: URL): boolean {
 		const header = req.headers.authorization ?? "";
-		const presented = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+		// A browser cannot send a header for a navigation, so the view accepts the
+		// token in the query too — the same rule the dashboard follows. The API calls
+		// a view makes still use the header.
+		const fromHeader = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+		const presented = fromHeader === "" ? (url?.searchParams.get("token") ?? "") : fromHeader;
 		if (presented === "") return false;
 		const a = createHash("sha256").update(presented).digest();
 		const b = createHash("sha256").update(this.options.token).digest();

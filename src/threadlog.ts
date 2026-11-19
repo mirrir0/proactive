@@ -39,7 +39,21 @@ export type ThreadStatus = "running" | "waiting" | "idle" | "done" | "failed" | 
  * share a millisecond and a clock can go backwards.
  */
 export type ThreadEntry =
-	| { seq: number; at: number; kind: "text"; role: "assistant" | "user"; text: string }
+	| {
+			seq: number;
+			at: number;
+			kind: "text";
+			role: "assistant" | "user";
+			text: string;
+			/**
+			 * The worker that said it, when a worker did.
+			 *
+			 * The difference a person cares about: the assistant answering them is the
+			 * conversation, and a worker's answer is the work. Without this the two are
+			 * the same entry kind and every chat reads as if the agent did everything.
+			 */
+			workerId?: string;
+	  }
 	| { seq: number; at: number; kind: "thinking"; text: string }
 	| {
 			seq: number;
@@ -48,6 +62,8 @@ export type ThreadEntry =
 			toolCallId: string;
 			toolName: string;
 			args?: unknown;
+			/** The worker that made the call, when it was a worker's and not the Router's. */
+			workerId?: string;
 	  }
 	| {
 			seq: number;
@@ -56,6 +72,7 @@ export type ThreadEntry =
 			toolCallId: string;
 			result?: unknown;
 			isError: boolean;
+			workerId?: string;
 	  }
 	| {
 			seq: number;
@@ -65,6 +82,7 @@ export type ThreadEntry =
 			op: string;
 			ok: boolean;
 			durationMs?: number;
+			workerId?: string;
 	  }
 	| { seq: number; at: number; kind: "status"; status: ThreadStatus; note?: string }
 	/**
@@ -171,8 +189,12 @@ export class ThreadLog {
 			// and nothing new is written.
 			if (said_ !== null && said_.text === said.text) return said_;
 		}
-		// A stop moves the thread's own state as well as the log: the column a list
-		// reads and the entry a panel reads are one event, written once.
+		// A status entry moves the thread's own state as well as the log: the column a
+		// list reads and the entry a panel reads are one event, written once. Without
+		// this the column only ever went up — a thread was "running" from its first
+		// dispatch until something stopped it, because nothing wrote the idle.
+		if (entry.kind === "status") this.store.setThreadStatus(threadId, entry.status);
+		// And a stop is its own kind, with its own word for it.
 		if (entry.kind === "stop") this.store.setThreadStatus(threadId, "stopped");
 		const at = entry.at ?? Date.now();
 		const seq = this.store.appendThreadEntry(threadId, at, entry.kind, payloadOf(entry));

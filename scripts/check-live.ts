@@ -194,16 +194,12 @@ async function main(): Promise<number> {
 		return 2;
 	}
 
-	let polls = 0;
 	const readTask = (): Record<string, unknown> | undefined => {
-		polls += 1;
 		const db = new DatabaseSync(dbPath, { readOnly: true });
 		try {
-			const row = db
+			return db
 				.prepare("SELECT id, title, status, endpoint_id, work_thread_id FROM tasks WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1")
 				.get(threadId) as Record<string, unknown> | undefined;
-			if (polls <= 3) console.error(`  poll ${String(polls)} thread=${threadId} → ${row === undefined ? "nothing" : String(row["status"])}`);
-			return row;
 		} finally {
 			db.close();
 		}

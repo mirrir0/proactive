@@ -137,6 +137,8 @@ test("a reply with no address goes to the turn's own thread, not the last chat h
 	// No event ever went through `submit`, so the reply book is empty — which is exactly
 	// the case a turn from the API is in.
 	const tool = channel.responseTool(undefined, () => ({ threadId: "thread-from-turn" }));
-	await tool.execute("call-1", { text: "the answer" }, undefined, undefined, {});
+	await (tool as unknown as { execute: (id: string, args: unknown) => Promise<unknown> }).execute("call-1", {
+		text: "the answer",
+	});
 	assert.deepEqual(delivered, [{ threadId: "thread-from-turn", text: "the answer" }]);
 });

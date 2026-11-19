@@ -59,6 +59,15 @@ export interface CreateSessionOptions {
 	 */
 	resourceLoader?: any;
 	customTools?: ToolDefinition[];
+	/**
+	 * The working directory pi tells the model about.
+	 *
+	 * Left to `process.cwd()` it is whatever started the brain — for a brain spawned by
+	 * a host, the host's source tree — and a model that is told a directory will answer
+	 * questions about it. A Router has no filesystem, so it gets an empty directory of
+	 * its own; a Worker gets the hand's root, which is a place it can actually read.
+	 */
+	cwd?: string;
 }
 
 export type SessionFactory = (options: CreateSessionOptions) => Promise<AgentSessionLike>;
@@ -67,6 +76,7 @@ export type SessionFactory = (options: CreateSessionOptions) => Promise<AgentSes
 export const createPiSession: SessionFactory = async (options) => {
 	const result = await createAgentSession({
 		model: options.model,
+		...(options.cwd === undefined ? {} : { cwd: options.cwd }),
 		modelRuntime: options.modelRuntime,
 		sessionManager: options.sessionManager,
 		thinkingLevel: options.thinkingLevel as any,

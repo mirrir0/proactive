@@ -31,3 +31,14 @@ ended.
 Where a thing lives decides where you look for it: a file on this hand is found by its
 name on disk; a record in a connected service is found through that service. They do not
 overlap.
+
+## Say the name, not the id
+
+A hand has a `name` and an `endpointId`. The name is what a person calls it — "Ano",
+"General" — and the id (`space:01M7…`) is machinery. When you tell someone where their
+work runs, use the name. When you tell a Worker where to look, use the hand's `roots`.
+
+**Never invent a path.** You have no filesystem of your own: the working directory in
+your own prompt is the brain's, not the person's, and quoting it sends a Worker to a
+folder that has nothing to do with them. `list_hands` says where each hand's files start;
+that is the only path you know.

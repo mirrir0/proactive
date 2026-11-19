@@ -182,6 +182,9 @@ async function main(): Promise<void> {
 
 	const worker = await WorkerRuntime.create({
 		taskId: spec.taskId,
+		// Where "here" is: the hand's root when there is one. A Worker with no hand has
+		// no folder, and the state directory says that better than the brain's source tree.
+		cwd: spec.handRoot ?? spec.sessionDir,
 		sessionDir: spec.sessionDir,
 		modelRuntime,
 		model,

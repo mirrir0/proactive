@@ -31,6 +31,7 @@ import {
 	type AgentToolResult,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { RouterStatus, SuperAgentConfig, Task, TaskStatus, Trigger, WorkerInfo } from "./types.ts";
@@ -81,6 +82,8 @@ export interface RouterDependencies {
 	sendEventToWorker?: (workerId: string, event: ChannelEvent) => boolean;
 	/** One agent's words to another, at its next turn boundary. */
 	sendToWorker?: (workerId: string, from: string, text: string) => boolean;
+	/** Where a hand keeps its files, when the client told us and the hand did not. */
+	handRoots?: (endpointId: string) => string | undefined;
 	/** Called when a persisted worker is found dead at boot, so pm2 can clean it up. */
 	onOrphanedWorker?: (workerId: string, taskId: string) => void;
 	/** Injectable session factory (tests use a scripted session). */
@@ -206,6 +209,17 @@ interface TurnState {
 const SESSION_COLD = "";
 /** How many conversations stay warm at once. */
 const SESSION_LIMIT = 8;
+
+/** The hand a tool result came from, when it came from one. */
+function handOfResult(result: unknown): { endpointId: string; op: string } | undefined {
+	if (result === null || typeof result !== "object") return undefined;
+	const details = (result as { details?: unknown }).details;
+	if (details === null || typeof details !== "object") return undefined;
+	const endpointId = (details as { endpointId?: unknown }).endpointId;
+	if (typeof endpointId !== "string" || endpointId === "") return undefined;
+	const op = (details as { op?: unknown }).op;
+	return { endpointId, op: typeof op === "string" ? op : "call" };
+}
 
 function emptyTurn(
 	originThreadId?: string,
@@ -412,6 +426,7 @@ export const ROUTER_INVARIANTS: readonly string[] = [
 	"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and never describe a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
 	"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
 	"Never promise to come back: no \"I'll report back\", \"I'll let you know\", \"I'll update you\". The answer simply arrives — saying you will send it is a line about the conversation instead of a line about the work.",
+	"Never name a path you were not given. You have no filesystem: the working directory you can see is the brain's own, and it is not the person's folder. Call `list_hands` for where the work will run, and put its `roots` in the brief when the Worker needs a place — a path you invent sends the Worker to the wrong folder and its answer will say so, confidently.",
 ];
 
 export class RouterLayer {
@@ -620,16 +635,21 @@ export class RouterLayer {
 				return SessionManager.inMemory();
 			}
 		})();
+		// A directory that holds nothing and means nothing: the Router has no filesystem,
+		// and the one pi names in its prompt should not be the host's source tree.
+		const routerCwd = join(deps.config.stateDir, "router");
+		mkdirSync(routerCwd, { recursive: true, mode: 0o700 });
 		// The Router's instructions are skills, not a template literal: the loader
 		// advertises the brain's own set and refuses everything the host machine
 		// happens to have installed.
 		const agentDir = join(deps.config.stateDir, "router-agent");
 		const resourceLoader = await brainResourceLoader({
-			cwd: deps.config.stateDir,
+			cwd: routerCwd,
 			agentDir,
 			invariants: ROUTER_INVARIANTS,
 		});
 		router.sessionOptions = {
+			cwd: routerCwd,
 			model: deps.model,
 			modelRuntime: deps.modelRuntime,
 			sessionManager,
@@ -1256,9 +1276,22 @@ export class RouterLayer {
 	 * directory is the host's word, not the brain's. A brain that recognised
 	 * `space:` prefixes would need a new convention for every place a host invents.
 	 */
+	/** A hand as the brain describes it: the hub's status plus the roots the client named. */
+	private handFor(endpointId: string) {
+		const hand = this.deps.hands?.listHands().find((candidate) => candidate.endpointId === endpointId);
+		if (hand === undefined) return undefined;
+		const roots = hand.policy.roots.length > 0 ? hand.policy.roots : this.deps.handRoots?.(endpointId) === undefined
+			? []
+			: [this.deps.handRoots(endpointId)!];
+		return { ...hand, policy: { ...hand.policy, roots } };
+	}
+
 	private handRootFor(endpointId: string | undefined): string | undefined {
 		if (endpointId === undefined) return undefined;
-		return this.deps.hands?.listHands().find((hand) => hand.endpointId === endpointId)?.policy.roots[0];
+		// The hub's own view of a remote hand has no roots (a hand's policy is its own
+		// and is display only here); the host told us where the folder is, and that is
+		// the answer the brief needs.
+		return this.handFor(endpointId)?.policy.roots[0];
 	}
 
 	/** What the person calls that hand, when the hand says. */
@@ -1760,6 +1793,19 @@ export class RouterLayer {
 	private buildPrompt(batch: InboxItem[]): string {
 		const lines: string[] = ["=== Inbound (Router turn) ===", ""];
 
+		// Where this conversation's work runs, when the client said. The Router has no
+		// filesystem of its own, so without this it invents a path from its own cwd —
+		// which is the brain's, and is nobody's folder.
+		const hand = this.turn.originHand === undefined ? undefined : this.handFor(this.turn.originHand);
+		if (hand !== undefined) {
+			const where = hand.policy.roots.length > 0 ? ` Its files are at ${hand.policy.roots.join(", ")}.` : "";
+			lines.push(
+				`This conversation runs on “${hand.name}”.${where}`,
+				"Name it by that name if you must refer to it at all; its id is machinery and the person never sees it.",
+				"",
+			);
+		}
+
 		for (const item of batch) {
 			switch (item.kind) {
 				case "trigger": {
@@ -1909,13 +1955,15 @@ export class RouterLayer {
 		const hands = this.deps.hands?.listHands() ?? [];
 		if (hands.length) {
 			parts.push(
+				// By name: the id is machinery, and a model shown an id repeats it to the
+				// person. The roots go with it, because that is the only path it knows.
 				`hands: ${hands.filter((h) => h.connected).length} connected — ` +
 					hands
-						.map(
-							(h) =>
-								`${h.endpointId}${h.connected ? "" : "(offline)"} fs=${h.capabilities.fs} exec=${h.capabilities.exec} running=${h.running}/${h.policy.maxConcurrent}`,
-						)
-						.join(", "),
+						.map((h) => {
+							const roots = h.policy.roots.length > 0 ? ` at ${h.policy.roots.join(", ")}` : "";
+							return `“${h.name}”${h.connected ? "" : " (offline)"}${roots} fs=${h.capabilities.fs} exec=${h.capabilities.exec}`;
+						})
+						.join("; "),
 			);
 		}
 		parts.push(
@@ -2331,7 +2379,20 @@ export class RouterLayer {
 
 	handleWorkerToolResult(workerId: string, toolCallId: string, isError: boolean, result?: unknown): void {
 		const rec = this.workers.get(workerId);
+		// Which machine did the work. A hand tool's result says which hand answered, and
+		// a thread that does not record it shows "Machines: none" for work that plainly
+		// ran somewhere — the panel's question is "where", and only this answers it.
+		const hand = handOfResult(result);
 		for (const threadId of rec?.threadIds ?? []) {
+			if (hand !== undefined) {
+				this.record(threadId, {
+					kind: "hand",
+					endpointId: hand.endpointId,
+					op: hand.op,
+					ok: !isError,
+					workerId,
+				});
+			}
 			this.record(threadId, {
 				kind: "tool_result",
 				toolCallId,

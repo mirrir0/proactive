@@ -450,9 +450,13 @@ export class SuperAgent {
 			hands: this.handsHub
 				? {
 						socketPath: this.handsSocketPath(),
-						listHands: () => this.handsHub?.listHands() ?? [],
+						// The merged view: the hub's status, with the roots the client told
+						// us about. A remote hand reports no roots of its own — it enforces
+						// its own policy — and without this the brief has no folder in it.
+						listHands: () => this.handsWithRoots(),
 					}
 				: undefined,
+			handRoots: (endpointId) => this.handRoots.get(endpointId)?.[0],
 			threadLog: this.threadLog,
 			journal: this.journal,
 			publishEntry: (threadId, entry) => {
@@ -887,6 +891,21 @@ export class SuperAgent {
 		return this.anomalousChannel === null ? this.deps.channels : [...this.deps.channels, this.anomalousChannel];
 	}
 
+	/**
+	 * The hands as this brain should describe them: the hub's status, and the roots the
+	 * client named when it brought the hand. A remote hand's own policy is display
+	 * only, and a hand that reports no roots leaves a Worker with no idea where "here"
+	 * is — which is how a Worker came to answer with the brain's directory.
+	 */
+	private handsWithRoots(): HandStatus[] {
+		return (this.handsHub?.listHands() ?? []).map((hand) => {
+			const roots = this.handRoots.get(hand.endpointId);
+			return roots === undefined || hand.policy.roots.length > 0
+				? hand
+				: { ...hand, policy: { ...hand.policy, roots } };
+		});
+	}
+
 	private brainHost(): BrainHost {
 		return {
 			listThreads: (filter) => {
@@ -954,15 +973,7 @@ export class SuperAgent {
 					?.stopThread(threadId, "stopped by a client")
 					.catch((err: unknown) => log.warn("could not stop a thread", { thread: threadId, error: (err as Error).message }));
 			},
-			hands: () =>
-				(this.handsHub?.listHands() ?? []).map((hand) => {
-					const roots = this.handRoots.get(hand.endpointId);
-					// The hand's own roots when it reported them; the host's word when it
-					// did not (a remote hand's policy is a placeholder on this side).
-					return roots === undefined || hand.policy.roots.length > 0
-						? hand
-						: { ...hand, policy: { ...hand.policy, roots } };
-				}),
+			hands: () => this.handsWithRoots(),
 			/**
 			 * A hand the client brought.
 			 *

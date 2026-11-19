@@ -70,6 +70,14 @@ export interface WorkerRuntimeOptions {
 	heartbeatMs?: number;
 	/** Injectable session factory (tests use a scripted session). */
 	sessionFactory?: SessionFactory;
+	/**
+	 * The folder this Worker's tools work in, and the one pi names in its prompt.
+	 *
+	 * The hand's root, when the task has a hand. Omitted, pi falls back to
+	 * `process.cwd()` — the brain's own — and a Worker asked about "this space" answers
+	 * with a directory nobody asked about.
+	 */
+	cwd?: string;
 }
 
 /**
@@ -226,8 +234,13 @@ export class WorkerRuntime {
 		// The same skills the Router has. A Worker's working directory is the
 		// member's space, and its loader is allow-listed to the brain's roots, so a
 		// `SKILL.md` in that folder is not instructions it follows.
-		const resourceLoader = await brainResourceLoader({ cwd: process.cwd(), agentDir });
+		// The folder this Worker may actually read. pi names a working directory in its
+		// prompt, and left to `process.cwd()` that is whatever started the brain — so a
+		// Worker asked about "this space" answered with the brain's own source tree.
+		const workerCwd = options.cwd ?? process.cwd();
+		const resourceLoader = await brainResourceLoader({ cwd: workerCwd, agentDir });
 		worker.session = await factory({
+			cwd: workerCwd,
 			model: options.model,
 			modelRuntime: options.modelRuntime,
 			sessionManager,

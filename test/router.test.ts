@@ -1393,3 +1393,55 @@ test("an unflushed stream does not swallow the conclusion", async () => {
 		await h.cleanup();
 	}
 });
+
+test("the Router is told which hand this conversation runs on, by name", async () => {
+	const h = await makeRouter({
+		hands: {
+			socketPath: "/tmp/none.sock",
+			listHands: () => [
+				{
+					endpointId: "space:one",
+					name: "Ano",
+					connected: true,
+					kind: "remote" as const,
+					capabilities: { exec: true, shell: false, fs: "rw" as const, git: true },
+					policy: { roots: ["/spaces/ano/files"], allow: [], maxConcurrent: 2 },
+					running: 0,
+				},
+			],
+		},
+	});
+	try {
+		h.router.submitTrigger({ ...makeTrigger({ text: "what is in this space?" }), hand: "space:one" });
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) === 1, 2000, "the turn ran");
+		const prompt = h.sessions[0]!.prompts[0]!;
+		assert.match(prompt, /runs on “Ano”/, "the hand by name");
+		assert.match(prompt, /\/spaces\/ano\/files/, "and where its files start");
+		assert.equal(prompt.includes("space:one"), false, "the id is machinery");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a thread records which machine did the work", async () => {
+	const h = await makeRouter({ threadLog: true });
+	try {
+		const chat = h.threadLog!.chatThread("chat-hand", "A chat");
+		const task = await h.router.dispatchTask({ title: "Read the folder", description: "list it", threadId: chat });
+		const workerId = task.workerId!;
+		await waitFor(() => h.router.getTask(task.id)?.workThreadId !== undefined, 2000, "the work thread exists");
+		const workThread = h.router.getTask(task.id)!.workThreadId!;
+
+		h.router.handleWorkerToolCall(workerId, "call-1", "list_dir", { path: "." });
+		h.router.handleWorkerToolResult(workerId, "call-1", false, {
+			content: [{ type: "text", text: "ok" }],
+			details: { ok: true, endpointId: "space:ano", op: "list_dir" },
+		});
+
+		const hand = (h.threadLog!.entries(workThread) ?? []).find((entry) => entry.kind === "hand");
+		assert.ok(hand !== undefined, "the thread says where the work ran");
+		assert.equal((hand as { endpointId: string }).endpointId, "space:ano");
+	} finally {
+		await h.cleanup();
+	}
+});

@@ -394,6 +394,9 @@ export class SuperAgent {
 			}
 		}
 
+		// Before a task can fail on it: whether this machine can start a worker at all.
+		if (this.processManager instanceof ProcessManager) this.processManager.preflight();
+
 		this.router = await RouterLayer.create({
 			modelRuntime: this.modelRuntime,
 			model: this.model,

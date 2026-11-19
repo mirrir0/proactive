@@ -13,6 +13,7 @@
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { OpenRouterRouting } from "./types.ts";
@@ -131,6 +132,27 @@ export class ProcessManager implements WorkerSpawner {
 			fs.unlinkSync(path.join(this.specDir, `${workerId}.json`));
 		} catch {
 			/* already gone */
+		}
+	}
+
+	/**
+	 * Say, at boot, that workers will not start.
+	 *
+	 * pm2 runs a child through its own fork entry, and in a pnpm layout with two
+	 * copies of pm2 that file may not resolve: every worker then dies at boot while
+	 * `pm2.start` reports success, which reads as "the task is running and nothing is
+	 * happening". Checking it once at boot — rather than once per task, twenty
+	 * seconds later — is the difference between a hint and an investigation.
+	 */
+	preflight(): void {
+		if ((process.env.MIR_WORKER_SPAWN ?? "pm2") === "process") return;
+		try {
+			createRequire(import.meta.url).resolve("pm2/lib/ProcessContainerFork.js");
+		} catch (err) {
+			log.warn("workers will fail to start: pm2's fork entry does not resolve here", {
+				error: (err as Error).message,
+				hint: "set MIR_WORKER_SPAWN=process to spawn workers as plain children",
+			});
 		}
 	}
 

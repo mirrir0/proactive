@@ -188,9 +188,16 @@ interface TurnState {
 	/** The channel and event the turn is answering, so a dispatch can answer there too. */
 	originChannelId?: string;
 	originEventId?: string;
+	/** The hand this turn's work belongs on, when the client said which. */
+	originHand?: string;
 }
 
-function emptyTurn(originThreadId?: string, originChannelId?: string, originEventId?: string): TurnState {
+function emptyTurn(
+	originThreadId?: string,
+	originChannelId?: string,
+	originEventId?: string,
+	originHand?: string,
+): TurnState {
 	return {
 		startedAt: Date.now(),
 		replies: [],
@@ -201,6 +208,7 @@ function emptyTurn(originThreadId?: string, originChannelId?: string, originEven
 		originThreadId,
 		...(originChannelId === undefined ? {} : { originChannelId }),
 		...(originEventId === undefined ? {} : { originEventId }),
+		...(originHand === undefined ? {} : { originHand }),
 	};
 }
 
@@ -684,7 +692,10 @@ export class RouterLayer {
 						channelId: params.channel ?? router.turn.originChannelId,
 						replyTo: params.reply_to ?? router.turn.originEventId,
 						fast: isTrivial(params.description),
-						endpointId: params.endpoint,
+						// Where the client said this work belongs wins over the hub's
+						// least-loaded guess: a space is a hand, and only the client knows
+						// which. A model that names one explicitly still wins.
+						endpointId: params.endpoint ?? router.turn.originHand,
 					});
 					router.turn.dispatches.push(task.id);
 					// The card reads `details.threadId`: the task's own thread, which is
@@ -1358,7 +1369,7 @@ export class RouterLayer {
 		const origin = this.originOf(batch);
 		// The turn knows the channel and event it is answering, so a dispatch it
 		// makes can inherit them: a task with no channel answers nobody.
-		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id);
+		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id, origin?.hand);
 		this.endRequested = false;
 		this.turnInFlightSince = Date.now();
 		metrics.gauge("mir_router_turn_in_flight", 1);
@@ -1584,11 +1595,18 @@ export class RouterLayer {
 		await this.say(origin.threadId, origin.channelId, redactSecrets(text), { eventId: origin.id });
 	}
 
-	private originOf(batch: InboxItem[]): { channelId: string; id?: string; threadId?: string } | undefined {
+	private originOf(
+		batch: InboxItem[],
+	): { channelId: string; id?: string; threadId?: string; hand?: string } | undefined {
 		for (let i = batch.length - 1; i >= 0; i--) {
 			const item = batch[i]!;
 			if (item.kind === "trigger") {
-				return { channelId: item.trigger.channelId, id: item.trigger.id, threadId: item.trigger.threadId };
+				return {
+					channelId: item.trigger.channelId,
+					id: item.trigger.id,
+					threadId: item.trigger.threadId,
+					...(item.trigger.hand === undefined ? {} : { hand: item.trigger.hand }),
+				};
 			}
 			if (item.kind === "conclusion" && item.channelId) {
 				return { channelId: item.channelId, id: item.replyTo, threadId: item.threadId };

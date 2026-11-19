@@ -353,6 +353,7 @@ export class SuperAgent {
 					threadId: event.threadId,
 					replyTo: event.replyTo,
 					...(event.from === undefined ? {} : { metadata: { user: event.from } }),
+					...(event.metadata?.["hand"] === undefined ? {} : { hand: event.metadata["hand"] }),
 				});
 			});
 		}
@@ -859,14 +860,20 @@ export class SuperAgent {
 			chatThread: (chatId, title) => this.threadLog.chatThread(chatId, title),
 			entries: (threadId, since) => this.threadLog.entries(threadId, since),
 			status: (threadId) => this.threadLog.status(threadId),
-			say: (threadId, content) => {
+			say: (threadId, content, hand) => {
 				const eventId = `api-${crypto.randomUUID()}`;
 				// A thread that shows a chat answers into that chat; the channel is
 				// what knows how. A thread with no chat is a work thread, and its
 				// message is a plain trigger.
 				const chatId = this.threadLog.chatOf(threadId);
 				if (this.anomalousChannel !== null && chatId !== undefined) {
-					this.anomalousChannel.submit({ chatId, threadId, text: content, eventId });
+					this.anomalousChannel.submit({
+						chatId,
+						threadId,
+						text: content,
+						eventId,
+						...(hand === undefined ? {} : { hand }),
+					});
 					return;
 				}
 				this.router?.submitTrigger({
@@ -876,6 +883,7 @@ export class SuperAgent {
 					text: content,
 					receivedAt: Date.now(),
 					threadId,
+					...(hand === undefined ? {} : { hand }),
 				});
 			},
 			stop: (threadId) => {

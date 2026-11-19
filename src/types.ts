@@ -31,6 +31,14 @@ export interface Trigger {
 	threadId?: string; // undefined => cold start, needs router dispatch
 	replyTo?: string; // opaque reply address within the channel
 	metadata?: Record<string, string>;
+	/**
+	 * The hand this work belongs on, when the client said.
+	 *
+	 * A space is a hand and the client is the only one who knows which; this is that
+	 * word, carried from the `say` frame to the dispatch so the hub cannot pick a
+	 * different folder.
+	 */
+	hand?: string;
 	/** How many Router turns have already tried to handle this trigger. */
 	attempts?: number;
 }

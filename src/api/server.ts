@@ -281,7 +281,11 @@ export class BrainServer {
 					return;
 				}
 				try {
-					host.say(message.threadId, message.content);
+					host.say(
+						message.threadId,
+						message.content,
+						typeof message.hand === "string" && message.hand !== "" ? message.hand : undefined,
+					);
 					send({ type: "reply", id: message.id, ok: true });
 				} catch (err) {
 					send({ type: "reply", id: message.id, ok: false, error: (err as Error).message });

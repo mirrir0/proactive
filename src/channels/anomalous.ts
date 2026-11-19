@@ -96,6 +96,8 @@ export class AnomalousChannel implements Channel {
 		eventId: string;
 		threadId?: string;
 		from?: string;
+		/** Where the client said this work belongs, carried to the dispatch. */
+		hand?: string;
 	}): ChannelEvent {
 		if (this.sink === null) throw new Error("anomalous channel: not started");
 		const event: ChannelEvent = {
@@ -106,6 +108,7 @@ export class AnomalousChannel implements Channel {
 			replyTo: input.chatId,
 			receivedAt: Date.now(),
 			...(input.from === undefined ? {} : { from: input.from }),
+			...(input.hand === undefined ? {} : { metadata: { hand: input.hand } }),
 		};
 		this.book.remember(event);
 		this.rememberChat(input.chatId);

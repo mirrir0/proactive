@@ -62,7 +62,15 @@ export type ClientToBrain =
 			since?: number;
 	  }
 	| { type: "close"; id: string; threadId: string }
-	| { type: "say"; id: string; threadId: string; content: string }
+	/**
+	 * A person said something.
+	 *
+	 * `hand` is the client's word on where this thread's work belongs — a space is a
+	 * hand, and the client is the only one who knows which. The brain does not read it
+	 * as a space: it is an endpoint id, and it only ever narrows what a dispatch may
+	 * choose.
+	 */
+	| { type: "say"; id: string; threadId: string; content: string; hand?: string }
 	| { type: "stop"; id: string; threadId: string }
 	| { type: "hands"; id: string }
 	/**
@@ -174,8 +182,13 @@ export interface BrainHost {
 	entries(threadId: string, since: number): ThreadEntry[];
 	/** A thread's status right now. */
 	status(threadId: string): ThreadStatus;
-	/** A person said something in a thread: the Router hears it. */
-	say(threadId: string, content: string): void;
+	/**
+	 * A person said something in a thread: the Router hears it.
+	 *
+	 * `hand` pins the work this message starts to one hand — the client's answer to
+	 * "where does this belong". Omitted, the hub picks.
+	 */
+	say(threadId: string, content: string, hand?: string): void;
 	/** Stop what is running in a thread. */
 	stop(threadId: string): void;
 	/** The hands this brain can reach. */

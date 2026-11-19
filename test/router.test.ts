@@ -1221,3 +1221,24 @@ test("a turn with no dispatch may reply once, and a second reply is refused", as
 		await h.cleanup();
 	}
 });
+
+test("a dispatch runs on the hand the client named, not the hub's pick", async () => {
+	const h = await makeRouter({
+		script: () => [
+			{ type: "tool", name: "dispatch_task", args: { title: "Find todos", description: "search the space for todos" } },
+		],
+	});
+	try {
+		// The client knows which folder this thread's work belongs in; the brain does
+		// not read it as a space, only as the endpoint a dispatch may not wander off.
+		h.router.submitTrigger({
+			...makeTrigger(),
+			text: "find the todos",
+			hand: "space:one",
+		});
+		await waitFor(() => h.router.listTasks().length === 1, 2000, "one task");
+		assert.equal(h.router.listTasks()[0]!.endpointId, "space:one");
+	} finally {
+		await h.cleanup();
+	}
+});

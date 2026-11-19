@@ -426,7 +426,8 @@ export const ROUTER_INVARIANTS: readonly string[] = [
 	"Never mention the machinery: no \"worker\", \"subagent\", \"agent\", \"hand\", \"tool\", \"task\" or \"thread\", and never describe a dispatch (\"spinning up\", \"sending this to\", \"the Worker will\"). They asked one assistant for something; say what you are doing about it, in the first person: \"Checking the repo now.\", not \"Spinning up a Worker to check the repo.\" If the answer is \"I'll figure it out\", that is the whole line.",
 	"Write like a person talking to a person: their language, no headings, no \"Done.\", no \"Task complete.\", no \"I will now…\", and never restate the question.",
 	"Never promise to come back: no \"I'll report back\", \"I'll let you know\", \"I'll update you\". The answer simply arrives — saying you will send it is a line about the conversation instead of a line about the work.",
-	"Never name a path you were not given. You have no filesystem: the working directory you can see is the brain's own, and it is not the person's folder. Call `list_hands` for where the work will run, and put its `roots` in the brief when the Worker needs a place — a path you invent sends the Worker to the wrong folder and its answer will say so, confidently.",
+	"Never name a path you were not given. You have no filesystem: the working directory you can see is the brain's own, and it is not the person's folder. `list_hands` says where the work will run; put its `roots` in the brief when the Worker needs a place — a path you invent sends the Worker to the wrong folder and its answer will say so, confidently.",
+	"When you name a hand to `dispatch_task`, use the name `list_hands` printed — or leave `endpoint` out and let the hub choose. An identifier you were not shown is not a hand, and a dispatch to one runs with no files at all.",
 ];
 
 export class RouterLayer {
@@ -798,6 +799,28 @@ export class RouterLayer {
 						...(params.endpoint === undefined ? {} : { endpoint: params.endpoint }),
 					},
 				});
+				// A hand named by the model, or the one the client pinned this conversation
+				// to. A name that is neither is refused here: a task pinned to a hand that
+				// does not exist starts a Worker with no hand, and that Worker answers
+				// "filesystem access is disabled" — a wrong answer shaped like a limitation.
+				const requested = params.endpoint === undefined ? undefined : router.resolveHand(params.endpoint);
+				if (params.endpoint !== undefined && requested === undefined) {
+					const choices = router.handChoices();
+					router.recordTurnToolResult(callId, { error: "no such hand" }, true, "dispatch_task");
+					return {
+						content: [
+							{
+								type: "text",
+								text: `there is no hand called “${params.endpoint}”. ${choices}. Omit \`endpoint\` to let the hub choose, or name one of those.`,
+							},
+						],
+						details: { error: "no such hand" },
+						isError: true,
+					};
+				}
+				const pinned = params.endpoint === undefined
+					? (router.turn.originHand === undefined ? undefined : router.resolveHand(router.turn.originHand))
+					: requested;
 				try {
 					const task = await router.dispatchTask({
 						title: params.title,
@@ -813,7 +836,7 @@ export class RouterLayer {
 						// Where the client said this work belongs wins over the hub's
 						// least-loaded guess: a space is a hand, and only the client knows
 						// which. A model that names one explicitly still wins.
-						endpointId: params.endpoint ?? router.turn.originHand,
+						endpointId: pinned,
 					});
 					router.turn.dispatches.push(task.id);
 					// The card reads `details.threadId`: the task's own thread, which is
@@ -1276,6 +1299,30 @@ export class RouterLayer {
 	 * directory is the host's word, not the brain's. A brain that recognised
 	 * `space:` prefixes would need a new convention for every place a host invents.
 	 */
+	/**
+	 * The hand a person or a model means, by name or by id.
+	 *
+	 * A name is what a person calls it, and it is what a model repeats. An id is what the
+	 * wire uses. Both are accepted; a word that is neither resolves to nothing, and the
+	 * dispatch refuses it — a task pinned to a hand that does not exist runs with no hand
+	 * at all, which is how a Worker came to answer "filesystem access is disabled".
+	 */
+	resolveHand(word: string): string | undefined {
+		const wanted = word.trim().toLowerCase();
+		if (wanted === "") return undefined;
+		const hands = this.deps.hands?.listHands() ?? [];
+		const exact = hands.find((hand) => hand.endpointId.toLowerCase() === wanted);
+		if (exact !== undefined) return exact.endpointId;
+		return hands.find((hand) => (hand.name ?? "").toLowerCase() === wanted)?.endpointId;
+	}
+
+	/** The hands a dispatch may name, for a refusal that tells the model what it can say. */
+	private handChoices(): string {
+		const hands = this.deps.hands?.listHands() ?? [];
+		if (hands.length === 0) return "no hands are connected";
+		return hands.map((hand) => `“${hand.name}”${hand.connected ? "" : " (offline)"}`).join(", ");
+	}
+
 	/** A hand as the brain describes it: the hub's status plus the roots the client named. */
 	private handFor(endpointId: string) {
 		const hand = this.deps.hands?.listHands().find((candidate) => candidate.endpointId === endpointId);
@@ -1813,7 +1860,7 @@ export class RouterLayer {
 			const where = hand.policy.roots.length > 0 ? ` Its files are at ${hand.policy.roots.join(", ")}.` : "";
 			lines.push(
 				`This conversation's work runs in “${hand.name}”.${where}`,
-				"That is where their files are. Do not call it a channel, a hand or a machine; its id is machinery and the person never sees it.",
+				"That is where their files are. Call it by that name if you must; never call it a channel or a machine, and never quote an identifier.",
 				"",
 			);
 		}
@@ -1973,7 +2020,7 @@ export class RouterLayer {
 					hands
 						.map((h) => {
 							const roots = h.policy.roots.length > 0 ? ` at ${h.policy.roots.join(", ")}` : "";
-							return `“${h.name}”${h.connected ? "" : " (offline)"}${roots} fs=${h.capabilities.fs} exec=${h.capabilities.exec}`;
+							return `“${h.name}”${h.connected ? "" : " (offline)"}${roots} can-exec=${h.capabilities.exec}`;
 						})
 						.join("; "),
 			);

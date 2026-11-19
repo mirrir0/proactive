@@ -1224,6 +1224,20 @@ test("a turn with no dispatch may reply once, and a second reply is refused", as
 
 test("a dispatch runs on the hand the client named, not the hub's pick", async () => {
 	const h = await makeRouter({
+		hands: {
+			socketPath: "/tmp/none.sock",
+			listHands: () => [
+				{
+					endpointId: "space:one",
+					name: "One",
+					connected: true,
+					kind: "remote" as const,
+					capabilities: { exec: true, shell: false, fs: "rw" as const, git: true },
+					policy: { roots: ["/spaces/one"], allow: [], maxConcurrent: 2 },
+					running: 0,
+				},
+			],
+		},
 		script: () => [
 			{ type: "tool", name: "dispatch_task", args: { title: "Find todos", description: "search the space for todos" } },
 		],
@@ -1441,6 +1455,70 @@ test("a thread records which machine did the work", async () => {
 		const hand = (h.threadLog!.entries(workThread) ?? []).find((entry) => entry.kind === "hand");
 		assert.ok(hand !== undefined, "the thread says where the work ran");
 		assert.equal((hand as { endpointId: string }).endpointId, "space:ano");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a dispatch to a hand that does not exist is refused, not started handless", async () => {
+	const h = await makeRouter({
+		hands: {
+			socketPath: "/tmp/none.sock",
+			listHands: () => [
+				{
+					endpointId: "space:ano",
+					name: "Ano",
+					connected: true,
+					kind: "remote" as const,
+					capabilities: { exec: true, shell: false, fs: "rw" as const, git: true },
+					policy: { roots: ["/spaces/ano"], allow: [], maxConcurrent: 2 },
+					running: 0,
+				},
+			],
+		},
+		script: () => [
+			{
+				type: "tool",
+				name: "dispatch_task",
+				args: { title: "List files", description: "list them", endpoint: "machinery" },
+			},
+		],
+	});
+	try {
+		h.router.submitTrigger(makeTrigger({ text: "what is in this space?" }));
+		await waitFor(() => (h.sessions[0]?.calls.length ?? 0) === 1, 2000, "the dispatch was attempted");
+		// No task at all: a Worker pinned to a hand that does not exist has no files, and
+		// answers "filesystem access is disabled" — a wrong answer shaped like a limit.
+		assert.equal(h.router.listTasks().length, 0, "no task was created");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a hand may be named the way list_hands prints it", async () => {
+	const h = await makeRouter({
+		hands: {
+			socketPath: "/tmp/none.sock",
+			listHands: () => [
+				{
+					endpointId: "space:ano",
+					name: "Ano",
+					connected: true,
+					kind: "remote" as const,
+					capabilities: { exec: true, shell: false, fs: "rw" as const, git: true },
+					policy: { roots: ["/spaces/ano"], allow: [], maxConcurrent: 2 },
+					running: 0,
+				},
+			],
+		},
+		script: () => [
+			{ type: "tool", name: "dispatch_task", args: { title: "List files", description: "list them", endpoint: "ano" } },
+		],
+	});
+	try {
+		h.router.submitTrigger(makeTrigger({ text: "list the files" }));
+		await waitFor(() => h.router.listTasks().length === 1, 2000, "one task");
+		assert.equal(h.router.listTasks()[0]!.endpointId, "space:ano", "resolved to the id the wire uses");
 	} finally {
 		await h.cleanup();
 	}

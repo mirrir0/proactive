@@ -460,6 +460,29 @@ export class MirStore {
 		return rows.map(rowToTask);
 	}
 
+	/**
+	 * Settle the rows a previous process left mid-flight.
+	 *
+	 * `failed` rather than `done`: nobody knows what that work did, and a task that
+	 * says it finished when it was killed is worse than one that says it did not.
+	 * Threads go `idle` so a chat is usable again — a chat stuck `running` shows a
+	 * loader forever and queues every later turn behind work that does not exist.
+	 *
+	 * Returns how many tasks were settled, so the caller can say so once.
+	 */
+	settleInterrupted(now = Date.now()): number {
+		const stranded = this.listTasksByStatus("running");
+		for (const task of stranded) {
+			this.upsertTask({ ...task, status: "failed", error: "the daemon stopped while this ran", updatedAt: now });
+			if (task.threadId !== undefined) this.setThreadStatus(task.threadId, "idle");
+			if (task.workThreadId !== undefined) this.setThreadStatus(task.workThreadId, "idle");
+		}
+		for (const thread of this.listThreads()) {
+			if (this.getThreadStatus(thread.id) === "running") this.setThreadStatus(thread.id, "idle");
+		}
+		return stranded.length;
+	}
+
 	listTasksByStatus(status: TaskStatus): Task[] {
 		const rows = this.db
 			.prepare(`SELECT * FROM tasks WHERE status = ? ORDER BY created_at ASC`)

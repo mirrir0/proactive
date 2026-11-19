@@ -203,6 +203,17 @@ export class SuperAgent {
 	}
 
 	async start(): Promise<void> {
+		// What the previous life left. A daemon that is killed — or crashes — leaves its
+		// task rows `running` and its chat threads `running`, and nothing else ever
+		// settles them: the chat shows a loader forever, and the next turn queues
+		// behind work that does not exist. Started is not running, and a row that says
+		// running when nothing runs is a lie the whole UI repeats.
+		const settled = this.store.settleInterrupted();
+		if (settled > 0) {
+			log.warn("tasks interrupted by a daemon restart were settled", { tasks: settled });
+			metrics.counter("mir_tasks_interrupted_total", settled);
+		}
+
 		if (this.started) return;
 		this.started = true;
 

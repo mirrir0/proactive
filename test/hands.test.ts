@@ -681,3 +681,27 @@ test("the daemon offers no hand of its own", () => {
 	const config = buildConfig();
 	assert.equal("local" in config.hands, false);
 });
+
+test("a daemon that starts settles what the last one left running", async () => {
+	const dir = await tmpDir("mir-settle-");
+	const store = MirStore.open(dir);
+	store.upsertTask({
+		id: "task-stranded",
+		title: "left running by a kill",
+		description: "",
+		threadId: "thread-stranded",
+		channelId: "api",
+		status: "running",
+		createdAt: Date.now() - 1000,
+		updatedAt: Date.now() - 1000,
+	} as never);
+	store.setThreadStatus("thread-stranded", "running");
+
+	assert.equal(store.settleInterrupted(), 1, "one task was stranded");
+	assert.equal(store.getTask("task-stranded")?.status, "failed", "not running, and not done");
+	assert.equal(store.getTask("task-stranded")?.error, "the daemon stopped while this ran");
+	assert.equal(store.getThreadStatus("thread-stranded"), "idle", "the chat is usable again");
+	assert.equal(store.settleInterrupted(), 0, "and settling twice settles nothing");
+	store.close();
+	await rmDir(dir);
+});

@@ -1364,7 +1364,7 @@ test("a task has one card in a thread, and its state is refreshed in place", asy
 		await h.router.handleWorkerConclusion(task.workerId!, "done: it is done");
 		const cards = (h.threadLog!.entries(chat) ?? []).filter((entry) => entry.kind === "app");
 		assert.equal(cards.length, 1, "one card, not one per state change");
-		const card = cards[0] as { data: { status: string } };
+		const card = cards[0] as unknown as { data: { status: string } };
 		assert.equal(card.data.status, "done", "and it carries the state now");
 	} finally {
 		await h.cleanup();

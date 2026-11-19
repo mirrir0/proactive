@@ -1415,7 +1415,7 @@ test("the Router is told which hand this conversation runs on, by name", async (
 		h.router.submitTrigger({ ...makeTrigger({ text: "what is in this space?" }), hand: "space:one" });
 		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) === 1, 2000, "the turn ran");
 		const prompt = h.sessions[0]!.prompts[0]!;
-		assert.match(prompt, /runs on “Ano”/, "the hand by name");
+		assert.match(prompt, /work runs in “Ano”/, "the hand by name");
 		assert.match(prompt, /\/spaces\/ano\/files/, "and where its files start");
 		assert.equal(prompt.includes("space:one"), false, "the id is machinery");
 	} finally {

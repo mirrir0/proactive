@@ -1800,8 +1800,8 @@ export class RouterLayer {
 		if (hand !== undefined) {
 			const where = hand.policy.roots.length > 0 ? ` Its files are at ${hand.policy.roots.join(", ")}.` : "";
 			lines.push(
-				`This conversation runs on “${hand.name}”.${where}`,
-				"Name it by that name if you must refer to it at all; its id is machinery and the person never sees it.",
+				`This conversation's work runs in “${hand.name}”.${where}`,
+				"That is where their files are. Do not call it a channel, a hand or a machine; its id is machinery and the person never sees it.",
 				"",
 			);
 		}
@@ -1829,13 +1829,13 @@ export class RouterLayer {
 						this.deps.context.inline({
 							id: objectId,
 							type: "trigger",
-							summary: `${t.channelId} thread=${t.threadId ?? "(new)"} from=${
-								t.metadata?.["user"] ?? "unknown"
-							} :: ${t.text}`,
+							// No thread id and no event id: the Router does not need them (a
+							// dispatch inherits both), and a model shown an identifier repeats
+							// it to the person — "thread 01M7TTQ…" is machinery in a chat.
+							summary: `${t.channelId} from=${t.metadata?.["user"] ?? "unknown"} :: ${t.text}`,
 							relatedIds: related,
 						}),
 					);
-					lines.push(`  reply_to=${t.id}`);
 					lines.push("");
 					break;
 				}

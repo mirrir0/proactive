@@ -45,6 +45,10 @@ export interface WorkerSpec {
 	mcpConfig?: McpConfig;
 	/** Hand this task is pinned to (omitted = the hub picks one). */
 	endpointId?: string;
+	/** Where that hand keeps its files, from its own policy. */
+	handRoot?: string;
+	/** What the hand is called, when it says. */
+	handName?: string;
 	/** Unix socket for the hands hub (omitted = no hands; worker uses local tools). */
 	handsSocketPath?: string;
 	capabilities: WorkerCapabilities;

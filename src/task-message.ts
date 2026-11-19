@@ -29,6 +29,10 @@ export interface TaskSpec {
 	capabilities: WorkerCapabilities;
 	/** The hand this task is pinned to, when it is pinned to one. */
 	endpointId?: string;
+	/** Where that hand keeps its files, when it keeps them anywhere. */
+	handRoot?: string;
+	/** What the hand is called, when it says. */
+	handName?: string;
 	/** Whether this Worker runs with a hand at all. */
 	hasHands: boolean;
 }
@@ -56,11 +60,15 @@ export function taskMessage(spec: TaskSpec): string {
 		// Where the work happens, and which machine — the `hands` skill says how to
 		// use it. A Worker told neither will run commands in its own process and
 		// report files that were never touched.
-		lines.push(
-			spec.endpointId === undefined
-				? "Execution happens on a hand (see the `hands` skill); the hub picks the least-loaded capable one."
-				: `Execution happens on a hand (see the \`hands\` skill). You are pinned to: ${spec.endpointId}.`,
-		);
+		const label =
+			spec.handName === undefined ? (spec.endpointId ?? "the hub's least-loaded capable hand") : `“${spec.handName}” (${spec.endpointId ?? "a hand"})`;
+		lines.push(`Execution happens on a hand (see the \`hands\` skill). You are on: ${label}.`);
+		// The folder the hand is rooted at is where "here" is. It is the hand's own
+		// policy, so this is true of any hand — a space, a repo, a build box — and a
+		// Worker that is not told will look for the file in a connected service.
+		if (spec.handRoot !== undefined) {
+			lines.push(`Its files start at: ${spec.handRoot}. Relative paths begin there.`);
+		}
 	} else {
 		lines.push("No hand is configured: use your local tools.");
 	}

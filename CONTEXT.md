@@ -143,6 +143,14 @@ Losing a hand is a failed tool call, not a lost task.
 **Brain** — everything that holds the model loop and the session: the Router and
 the Workers. A brain never touches files directly; it asks a hand.
 
+**A hand is a hand.** Nothing in the brain knows what a *space* is. A hand is a
+machine with roots, a policy and a name; whether those roots are a space folder, a
+repo or a home directory is the host's word. A client that wants a machine rooted
+somewhere brings one with `hand_add` — the brain mints the token, the client starts
+`mir endpoint` with it — and the Worker's brief names the hand and its root because
+the *hub* knows them, not because the brain recognised a prefix. That is what makes
+the space layer plug-and-play instead of a fork.
+
 **Endpoint** (`mir endpoint`) — the process that makes one machine a
 hand. It dials **out** to the hub, so no inbound port or static address is
 needed, and it enforces the machine owner's policy.

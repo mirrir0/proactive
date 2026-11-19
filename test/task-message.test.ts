@@ -44,7 +44,7 @@ test("a task with no brief still says what it is for", () => {
 test("the Worker is told what it may touch, and which hand", () => {
 	const text = taskMessage(base);
 	assert.match(text, /Capabilities granted to you: \{"net":false,"fs":"rw","mcp":false,"codemode":false\}\./);
-	assert.match(text, /You are pinned to: desk-1/);
+	assert.match(text, /You are on: "desk-1"|You are on: .*desk-1/);
 });
 
 test("a Worker with no hand is told so, rather than left to guess", () => {
@@ -55,7 +55,7 @@ test("a Worker with no hand is told so, rather than left to guess", () => {
 
 test("an unpinned Worker is told the hub picks the hand", () => {
 	const text = taskMessage({ ...base, endpointId: undefined });
-	assert.match(text, /the hub picks the least-loaded capable one/);
+	assert.match(text, /the hub's least-loaded capable hand/);
 });
 
 test("the procedure is not in the message: it is a skill", () => {

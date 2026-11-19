@@ -272,6 +272,20 @@ export class BrainServer {
 				return;
 			}
 
+			case "hand_add": {
+				const added = host.addHand({
+					handId: message.handId,
+					...(message.name === undefined ? {} : { name: message.name }),
+					roots: message.roots,
+					...(message.fs === undefined ? {} : { fs: message.fs }),
+					...(message.exec === undefined ? {} : { exec: message.exec }),
+					...(message.shell === undefined ? {} : { shell: message.shell }),
+					...(message.git === undefined ? {} : { git: message.git }),
+				});
+				send({ type: "reply", id: message.id, ok: true, result: added });
+				return;
+			}
+
 			default:
 				refuse("bad-frame", `unknown request ${String((message as { type?: unknown }).type)}`);
 		}

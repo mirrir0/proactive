@@ -44,6 +44,7 @@ function scriptedHost(entries: ThreadEntry[] = []) {
 			return filter?.status === undefined ? threads : threads.filter((t) => t.status === filter.status);
 		},
 		chatThread: (chatId) => `chat-thread-of-${chatId}`,
+		addHand: (request) => ({ handId: request.handId, token: `token-for-${request.handId}`, hubPort: 4700 }),
 		entries: (threadId, since) => entries.filter((e) => e.seq > since && threadId === "t1"),
 		status: (threadId) => (threadId === "t1" ? "running" : "idle"),
 		say: (threadId, content) => {
@@ -401,4 +402,25 @@ test("anomalous channel: a thread that shows a chat is what a client's say reach
 		store.close();
 		rmDir(dir);
 	}
+});
+
+test("a client brings a hand: the brain mints its token and says where the hub is", async () => {
+	// This is how a space becomes a hand. The client says "there is a machine rooted
+	// here, called this"; the brain answers with a token and the port to dial. No
+	// part of the brain needs to know what a space is.
+	await withServer(async ({ socketPath }) => {
+		const client = new BrainClient({ socketPath, token: TOKEN, agent: "test" });
+		await client.connect();
+		const added = await client.addHand({
+			handId: "space:01M7GXWC47X6VMBP6C50AW7A7V",
+			name: "Tinkering",
+			roots: ["/data/spaces/01M7GXWC47X6VMBP6C50AW7A7V/files"],
+			fs: "rw",
+			exec: true,
+		});
+		assert.equal(added.handId, "space:01M7GXWC47X6VMBP6C50AW7A7V");
+		assert.match(added.token, /^token-for-/);
+		assert.equal(added.hubPort, 4700);
+		client.disconnect();
+	});
 });

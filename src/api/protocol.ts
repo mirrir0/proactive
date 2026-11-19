@@ -64,7 +64,28 @@ export type ClientToBrain =
 	| { type: "close"; id: string; threadId: string }
 	| { type: "say"; id: string; threadId: string; content: string }
 	| { type: "stop"; id: string; threadId: string }
-	| { type: "hands"; id: string };
+	| { type: "hands"; id: string }
+	/**
+	 * Ask the brain to accept a hand the client is about to run.
+	 *
+	 * The brain owns its store, so it owns the token a hand must present — a client
+	 * cannot write that row itself, and should not. This is how a space becomes a
+	 * hand: the client says "there is a machine rooted here, called this", gets a
+	 * token back, and starts it. Nothing in the brain needs to know what a space is.
+	 */
+	| {
+			type: "hand_add";
+			id: string;
+			/** The endpoint id the hand will present. Re-adding an id rotates its token. */
+			handId: string;
+			name?: string;
+			/** What the hand will be allowed to do. Narrower than the hand's own policy, never wider. */
+			roots: readonly string[];
+			fs?: "none" | "ro" | "rw";
+			exec?: boolean;
+			shell?: boolean;
+			git?: boolean;
+	  };
 
 /**
  * What a brain can do, said rather than assumed.
@@ -130,6 +151,17 @@ export type BrainToClient =
 	| { type: "error"; code: "version" | "auth" | "bad-frame" | "internal"; message: string };
 
 /** What the server needs of the brain. Tests fake this; `serve` wires the daemon. */
+/** What a client asks for when it brings a hand. */
+export interface HandRegistration {
+	handId: string;
+	name?: string;
+	roots: readonly string[];
+	fs?: "none" | "ro" | "rw";
+	exec?: boolean;
+	shell?: boolean;
+	git?: boolean;
+}
+
 export interface BrainHost {
 	/** Every thread, newest activity first. */
 	listThreads(filter?: ThreadFilter): ThreadSummary[];
@@ -148,6 +180,12 @@ export interface BrainHost {
 	stop(threadId: string): void;
 	/** The hands this brain can reach. */
 	hands(): HandStatus[];
+	/**
+	 * Accept a hand a client is about to run, and answer with the token it must
+	 * present. The brain owns its store; a client cannot write that row, and should
+	 * not have to.
+	 */
+	addHand(request: HandRegistration): { handId: string; token: string; hubPort: number };
 	/**
 	 * Called when a client opens or closes a thread, so the brain knows which
 	 * threads are being watched. A brain that knows this can keep a Router warm

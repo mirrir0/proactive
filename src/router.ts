@@ -1015,6 +1015,27 @@ export class RouterLayer {
 		});
 	}
 
+	/**
+	 * Where the hand this task runs on keeps its files, when it keeps them anywhere.
+	 *
+	 * Read from the hand's own policy, not from a naming convention: a hand is a
+	 * machine with roots, and whether those roots are a space, a repo or a home
+	 * directory is the host's word, not the brain's. A brain that recognised
+	 * `space:` prefixes would need a new convention for every place a host invents.
+	 */
+	private handRootFor(endpointId: string | undefined): string | undefined {
+		if (endpointId === undefined) return undefined;
+		return this.deps.hands?.listHands().find((hand) => hand.endpointId === endpointId)?.policy.roots[0];
+	}
+
+	/** What the person calls that hand, when the hand says. */
+	private handNameFor(endpointId: string | undefined): string | undefined {
+		if (endpointId === undefined) return undefined;
+		const hand = this.deps.hands?.listHands().find((candidate) => candidate.endpointId === endpointId);
+		const name = hand?.name;
+		return name === undefined || name === "" ? undefined : name;
+	}
+
 	private buildStopTaskTool(): ToolDefinition {
 		const router = this;
 		return defineTool({
@@ -1783,6 +1804,14 @@ export class RouterLayer {
 				mcpConfigPath: this.config.mcpConfigPath,
 				...(this.deps.mcpServers === undefined ? {} : { mcpConfig: this.deps.mcpServers.current() }),
 				endpointId: task.endpointId,
+				...(this.handRootFor(task.endpointId) === undefined
+					? {}
+					: {
+							handRoot: this.handRootFor(task.endpointId),
+							...(this.handNameFor(task.endpointId) === undefined
+								? {}
+								: { handName: this.handNameFor(task.endpointId) }),
+						}),
 				handsSocketPath: this.deps.hands?.socketPath,
 				capabilities: this.config.workerCapabilities,
 				toolPolicy: this.config.workerToolPolicy,

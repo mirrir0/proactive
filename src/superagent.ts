@@ -49,6 +49,7 @@ import type { BrainHost } from "./api/protocol.ts";
 import { ThreadLog, newThreadId } from "./threadlog.ts";
 import { Journal } from "./journal.ts";
 import { AppServer } from "./mcp-app/server.ts";
+import { hashToken } from "./hands/protocol.ts";
 import { DashboardServer } from "./dashboard/server.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 
@@ -872,6 +873,31 @@ export class SuperAgent {
 					.catch((err: unknown) => log.warn("could not stop a thread", { thread: threadId, error: (err as Error).message }));
 			},
 			hands: () => this.handsHub?.listHands() ?? [],
+			/**
+			 * A hand the client brought.
+			 *
+			 * The brain mints the token because the brain owns the store — a client
+			 * cannot write that row and should not have to. What the hand may do is the
+			 * hand's own policy; what is recorded here is only its name and that it is
+			 * expected. Nothing about *why* the client wants a hand (a space, a repo, a
+			 * build box) reaches this method.
+			 */
+			addHand: (request) => {
+				const token = `hand-${crypto.randomUUID()}`;
+				this.store.createEndpoint({
+					id: request.handId,
+					name: request.name ?? request.handId,
+					tokenHash: hashToken(token),
+					kind: "remote",
+				});
+				log.info("hand registered for a client", {
+					hand: request.handId,
+					roots: request.roots,
+					fs: request.fs ?? "ro",
+				});
+				metrics.counter("mir_hands_registered_total");
+				return { handId: request.handId, token, hubPort: this.handsServer?.port ?? 0 };
+			},
 		};
 	}
 

@@ -18,7 +18,13 @@
  */
 
 import net from "node:net";
-import { BRAIN_API_VERSION, type BrainToClient, type ClientToBrain, type ThreadFilter } from "./protocol.ts";
+import {
+	BRAIN_API_VERSION,
+	type BrainToClient,
+	type ClientToBrain,
+	type HandRegistration,
+	type ThreadFilter,
+} from "./protocol.ts";
 import { FrameDecoder, encodeFrame } from "../hands/protocol.ts";
 import type { HandStatus } from "../hands/protocol.ts";
 import type { ThreadEntry, ThreadStatus, ThreadSummary } from "../threadlog.ts";
@@ -136,6 +142,20 @@ export class BrainClient {
 		await this.request({ type: "stop", id: this.nextId(), threadId });
 	}
 
+	/**
+	 * Bring a hand: the brain mints the token, the client starts the machine.
+	 *
+	 * A space is a hand like any other — the brain is told a folder, a name and what
+	 * it may do, and nothing about why.
+	 */
+	async addHand(request: HandRegistration): Promise<{ handId: string; token: string; hubPort: number }> {
+		return await this.request<{ handId: string; token: string; hubPort: number }>({
+			type: "hand_add",
+			id: `hand_add-${++this.seq}`,
+			...request,
+		});
+	}
+
 	async hands(): Promise<HandStatus[]> {
 		const answer = await this.request<{ hands: HandStatus[] }>({ type: "hands", id: this.nextId() });
 		return answer.hands;
@@ -204,7 +224,10 @@ export class BrainClient {
 				const pending = this.pending.get(frame.id);
 				if (pending === undefined) return;
 				this.pending.delete(frame.id);
-				if (frame.ok) pending.resolve(undefined);
+				// A reply's `result` is the answer, when there is one: `hand_add` returns
+				// the token a hand must present, and losing it would mean the client
+				// started a machine the brain refuses.
+				if (frame.ok) pending.resolve(frame.result);
 				else pending.reject(new Error(frame.error));
 				return;
 			}

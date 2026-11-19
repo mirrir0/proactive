@@ -189,16 +189,3 @@ export function ensurePaths(paths: MirPaths): string[] {
 	}
 	return created;
 }
-
-/**
- * Where an older install kept its files.
- *
- * Before this, everything lived in `~/.local/share/mir` on every platform. That
- * is still a valid XDG location on Linux, so a Linux install simply keeps
- * working. On macOS it is now a legacy path, and an install that has data there
- * must not be silently split from it: `mir init` reports it and tells the
- * operator to set `MIR_HOME` or move the folder.
- */
-export function legacyHome(home = homedir()): string {
-	return join(home, ".local", "share", "mir");
-}

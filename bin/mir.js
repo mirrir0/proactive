@@ -26,15 +26,15 @@ const source = path.join(root, "src", "index.ts");
 const args = process.argv.slice(2);
 
 if (existsSync(built)) {
-	process.argv = [process.argv[0], built, ...args];
-	await import(built);
+  process.argv = [process.argv[0], built, ...args];
+  await import(built);
 } else if (existsSync(source)) {
-	const child = spawn(process.execPath, ["--import", "tsx", source, ...args], { stdio: "inherit" });
-	child.on("exit", (code, signal) => {
-		if (signal) process.kill(process.pid, signal);
-		else process.exit(code ?? 0);
-	});
+  const child = spawn(process.execPath, ["--import", "tsx", source, ...args], { stdio: "inherit" });
+  child.on("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 0);
+  });
 } else {
-	console.error("mir: no build found. Run `npm run build`, or install the package instead of a checkout.");
-	process.exit(1);
+  console.error("mir: no build found. Run `npm run build`, or install the package instead of a checkout.");
+  process.exit(1);
 }

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ensurePaths, legacyHome, mirPaths, requiredDirs, socketFits, socketLimit } from "../src/paths.ts";
+import { ensurePaths, mirPaths, requiredDirs, socketFits, socketLimit } from "../src/paths.ts";
 
 const home = "/home/ana";
 
@@ -112,8 +112,4 @@ test("ensurePaths creates the layout, and only reports what was missing", () => 
 		assert.ok(readdirSync(dir.path), `${dir.name} was not created`);
 	}
 	assert.deepEqual(ensurePaths(paths), [], "a second init creates nothing");
-});
-
-test("the legacy location is named, so an old install is never silently split", () => {
-	assert.equal(legacyHome("/Users/ana"), "/Users/ana/.local/share/mir");
 });

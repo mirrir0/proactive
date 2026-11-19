@@ -157,9 +157,7 @@ everything, because they are what an existing deployment sets.
 are, never a secret); `mir paths` prints it without touching disk. A unix socket
 path is capped by the kernel — 103 bytes on macOS, 107 on Linux — so `init` checks
 the two sockets it will bind and names the limit and the variable that moves them
-rather than failing later at bind time. An install that predates this layout lives
-in `~/.local/share/mir`; `init` reports it and refuses to guess, since splitting a
-brain from its store is worse than telling someone to set `MIR_HOME`.
+rather than failing later at bind time.
 
 ## Processes
 

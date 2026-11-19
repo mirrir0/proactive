@@ -17,10 +17,10 @@ import { MirStore } from "./store.ts";
 import crypto from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hashToken } from "./hands/protocol.ts";
 import { runEndpoint } from "./endpoint/main.ts";
-import { ensurePaths, legacyHome, mirPaths, requiredDirs, socketFits, socketLimit } from "./paths.ts";
+import { ensurePaths, mirPaths, requiredDirs, socketFits, socketLimit } from "./paths.ts";
 
 function usage(): void {
 	console.log(
@@ -312,8 +312,7 @@ async function main(): Promise<void> {
 	/**
 	 * `mir init` — put the files where this platform says they go.
 	 *
-	 * Idempotent: it creates what is missing, keeps a config it finds, and refuses
-	 * to guess when an older install's data is sitting somewhere else.
+	 * Idempotent: it creates what is missing and keeps a config it finds.
 	 */
 	if (cmd === "init") {
 		if (rest.includes("--help") || rest.includes("-h")) {
@@ -329,21 +328,6 @@ async function main(): Promise<void> {
 		console.log(`mir home   ${paths.home}`);
 		for (const dir of requiredDirs(paths)) console.log(`  ${dir.name.padEnd(10)} ${dir.path}`);
 		console.log(`  config file ${paths.configFile} (${config})`);
-
-		const legacy = legacyHome();
-		// Only when the platform default was used: an operator who set MIR_HOME has
-		// already decided where their files go, and telling them about an old
-		// directory they chose to leave is noise.
-		if (process.env.MIR_HOME === undefined && paths.home !== legacy && dirHasFiles(legacy)) {
-			console.log(
-				[
-					"",
-					`Found an older install at ${legacy}.`,
-					"This init did not move it: set MIR_HOME to that directory to keep using it,",
-					"or move its contents into the paths above.",
-				].join("\n"),
-			);
-		}
 
 		if (sockets.length > 0) {
 			console.error(
@@ -439,14 +423,6 @@ function writeConfig(path: string, paths: ReturnType<typeof mirPaths>): string {
 	};
 	writeFileSync(path, `${JSON.stringify(body, null, "\t")}\n`, { mode: 0o600 });
 	return "written";
-}
-
-function dirHasFiles(path: string): boolean {
-	try {
-		return readdirSync(path).length > 0;
-	} catch {
-		return false;
-	}
 }
 
 main().catch((err) => {

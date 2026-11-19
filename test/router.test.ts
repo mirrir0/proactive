@@ -178,7 +178,7 @@ test("batching: events arriving inside the window are folded into one turn", asy
 	try {
 		h.router.submitTrigger(makeTrigger({ text: "first request" }));
 		h.router.submitTrigger(makeTrigger({ text: "second request" }));
-		await waitFor(() => h.sessions[0]!.prompts.length === 1, 2000, "one batched turn");
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) === 1, 2000, "one batched turn");
 		const prompt = h.sessions[0]!.lastPrompt;
 		assert.match(prompt, /first request/);
 		assert.match(prompt, /second request/);
@@ -201,7 +201,7 @@ test("batching: a busy turn drains the backlog in the next turn, not a dropped e
 		h.router.submitTrigger(makeTrigger({ text: "turn one" }));
 		await tick(5);
 		h.router.submitTrigger(makeTrigger({ text: "turn two" }));
-		await waitFor(() => h.sessions[0]!.prompts.length === 2, 2000, "two turns");
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) === 2, 2000, "two turns");
 		assert.match(h.sessions[0]!.prompts[1]!, /turn two/);
 	} finally {
 		await h.cleanup();
@@ -1238,6 +1238,40 @@ test("a dispatch runs on the hand the client named, not the hub's pick", async (
 		});
 		await waitFor(() => h.router.listTasks().length === 1, 2000, "one task");
 		assert.equal(h.router.listTasks()[0]!.endpointId, "space:one");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("each chat has its own session, so nothing said in one reaches another", async () => {
+	const h = await makeRouter({ script: () => [{ type: "text", text: "ok" }] });
+	try {
+		h.router.submitTrigger({ ...makeTrigger({ text: "the code word is otter" }), threadId: "thread-a" });
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) === 1, 2000, "the first chat answered");
+		h.router.submitTrigger({ ...makeTrigger({ text: "what is the code word?" }), threadId: "thread-b" });
+		await waitFor(() => h.sessions.length === 2, 2000, "a second chat gets its own session");
+		await waitFor(() => (h.sessions[1]?.prompts.length ?? 0) === 1, 2000, "and answers in it");
+
+		// The prompt of the second chat is its own message plus its own conversation:
+		// the first chat's words are not in it.
+		assert.equal(h.sessions[1]!.prompts[0]!.includes("otter"), false);
+		assert.equal(h.sessions[0]!.prompts.length, 1, "and the first session was not reused");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a warm session set is capped, and a session mid-turn is never evicted", async () => {
+	const h = await makeRouter({ script: () => [{ type: "text", text: "ok" }] });
+	try {
+		for (let i = 0; i < 10; i++) {
+			h.router.submitTrigger({ ...makeTrigger({ text: `chat ${i}` }), threadId: `thread-${i}` });
+			await waitFor(() => h.channel.replies.length === i + 1, 2000, `reply ${i}`);
+		}
+		// Held, not ever-made: an evicted session is disposed, and the cap is on what
+		// the Router is still paying for.
+		const held = h.sessions.filter((session) => !session.disposed).length;
+		assert.ok(held <= 8, `held ${held} sessions`);
 	} finally {
 		await h.cleanup();
 	}

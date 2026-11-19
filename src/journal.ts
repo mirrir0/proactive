@@ -233,7 +233,7 @@ export class Journal {
 }
 
 /** A thread id is a ULID, but a journal path must never be able to escape. */
-function safeName(threadId: string): string {
+export function safeName(threadId: string): string {
 	const cleaned = threadId.replace(/[^A-Za-z0-9._-]/g, "_");
 	return cleaned === "" ? "unknown" : cleaned.slice(0, 128);
 }

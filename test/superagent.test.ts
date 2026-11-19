@@ -97,7 +97,9 @@ test("admission: a programmatically ignored event never reaches the Router", asy
 	try {
 		await h.agent.submitEvent(makeEvent({ id: "evt-ignored" }));
 		await tick(40);
-		assert.equal(h.sessions[0]!.prompts.length, 0);
+		// No session at all is the stronger statement: a brain that is never spoken to
+		// holds no model context, so an ignored event does not even build one.
+		assert.equal(h.sessions.length, 0);
 		assert.equal(h.agent.getStore().getEvent("evt-ignored")?.status, "ignored");
 	} finally {
 		await h.cleanup();

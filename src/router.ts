@@ -46,7 +46,7 @@ import { metrics, log } from "./telemetry.ts";
 import { redactSecrets } from "./security.ts";
 import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
 import { brainResourceLoader, useSkillTool } from "./skills.ts";
-import { JOURNAL_MAX_CHARS, type Journal } from "./journal.ts";
+import { JOURNAL_MAX_CHARS, type Journal , safeName } from "./journal.ts";
 import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
 import { newThreadId, type NewThreadEntry, type ThreadEntry, type ThreadLog } from "./threadlog.ts";
@@ -191,6 +191,11 @@ interface TurnState {
 	/** The hand this turn's work belongs on, when the client said which. */
 	originHand?: string;
 }
+
+/** The key a trigger with no thread gets: the Router answering as itself. */
+const SESSION_COLD = "";
+/** How many conversations stay warm at once. */
+const SESSION_LIMIT = 8;
 
 function emptyTurn(
 	originThreadId?: string,
@@ -401,7 +406,24 @@ export const ROUTER_INVARIANTS: readonly string[] = [
 ];
 
 export class RouterLayer {
-	private session!: AgentSessionLike;
+	/**
+	 * One model session per conversation, made on first use and kept warm.
+	 *
+	 * A session carries one transcript. One session for the whole Router meant the
+	 * model's context was every chat interleaved — so what it was told in one chat
+	 * could surface in the answer to another, and the conversation block was doing
+	 * work the session should have done by existing.
+	 *
+	 * Warm, because a session costs a context to build and a chat's next turn usually
+	 * comes soon; capped, because a brain serves every chat its member has and a
+	 * session each, forever, is a leak with a transcript.
+	 */
+	private readonly sessions = new Map<string, AgentSessionLike>();
+	private readonly sessionUsedAt = new Map<string, number>();
+	private readonly sessionBusy = new Set<string>();
+	/** The session the turn in flight is using, so a capture lands in the right one. */
+	private activeSessionKey: string | null = null;
+	private sessionOptions!: Parameters<SessionFactory>[0];
 	private readonly deps: RouterDependencies;
 	private readonly config: SuperAgentConfig;
 	private readonly tasks = new Map<string, Task>();
@@ -594,7 +616,7 @@ export class RouterLayer {
 			agentDir,
 			invariants: ROUTER_INVARIANTS,
 		});
-		router.session = await factory({
+		router.sessionOptions = {
 			model: deps.model,
 			modelRuntime: deps.modelRuntime,
 			sessionManager,
@@ -603,17 +625,80 @@ export class RouterLayer {
 			agentDir,
 			resourceLoader,
 			customTools,
+		};
+		// No session is made here: a conversation's session is made by its first turn,
+		// so a brain that is started and never spoken to holds no model context at all.
+		router.restore();
+		return router;
+	}
+
+	/**
+	 * The session for one conversation, made on first use and kept warm.
+	 *
+	 * Each gets its own transcript, on disk when `sessionDir` is set so a restart can
+	 * resume it, in memory otherwise.
+	 */
+	private async sessionFor(key: string): Promise<AgentSessionLike> {
+		const held = this.sessions.get(key);
+		if (held !== undefined) {
+			this.sessionUsedAt.set(key, Date.now());
+			return held;
+		}
+		const manager = this.sessionManagerFor(key);
+		const made = await (this.deps.sessionFactory ?? createPiSession)({
+			...this.sessionOptions,
+			...(manager === undefined ? {} : { sessionManager: manager }),
 		});
-		router.session.subscribe((event: any) => {
+		made.subscribe((event: any) => {
 			if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-				router.turn.captured += event.assistantMessageEvent.delta ?? "";
+				// Only the turn that is running records what was said: a session that
+				// outlives its turn must not append to the next one's reply.
+				if (this.activeSessionKey === key) this.turn.captured += event.assistantMessageEvent.delta ?? "";
 			}
 			if (event.type === "auto_retry_end" && event.success === false) {
 				log.warn("router model retry exhausted", { error: event.finalError });
 			}
 		});
-		router.restore();
-		return router;
+		this.sessions.set(key, made);
+		this.sessionUsedAt.set(key, Date.now());
+		await this.evictSessions(key);
+		return made;
+	}
+
+	/** A transcript file per conversation, when the Router persists at all. */
+	private sessionManagerFor(key: string): any {
+		if (this.config.sessionDir === "") return SessionManager.inMemory();
+		try {
+			const name = key === SESSION_COLD ? "cold" : safeName(key);
+			return SessionManager.open(join(this.config.sessionDir, `${name}.json`));
+		} catch (err) {
+			log.warn("router session file unreadable; starting in memory", {
+				thread: key,
+				error: (err as Error).message,
+			});
+			return SessionManager.inMemory();
+		}
+	}
+
+	/** Keep the warm set small: the coldest session that is not mid-turn goes. */
+	private async evictSessions(keep: string): Promise<void> {
+		while (this.sessions.size > SESSION_LIMIT) {
+			const coldest = [...this.sessionUsedAt.entries()]
+				.filter(([id]) => id !== keep && !this.sessionBusy.has(id))
+				.sort((a, b) => a[1] - b[1])[0];
+			if (coldest === undefined) return;
+			const [id] = coldest;
+			const session = this.sessions.get(id);
+			this.sessions.delete(id);
+			this.sessionUsedAt.delete(id);
+			await session?.dispose().catch(() => {});
+			metrics.counter("mir_router_sessions_evicted_total");
+		}
+	}
+
+	/** Every session the Router is holding, for an abort or a shutdown. */
+	private heldSessions(): AgentSessionLike[] {
+		return [...this.sessions.values()];
 	}
 
 	// ----- Tools the Router uses to act -----
@@ -1371,6 +1456,12 @@ export class RouterLayer {
 		// makes can inherit them: a task with no channel answers nobody.
 		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id, origin?.hand);
 		this.endRequested = false;
+		// The turn's conversation is the one the batch came from: its own session, so
+		// nothing it was told in another chat can reach this answer.
+		const sessionKey = this.turn.originThreadId ?? SESSION_COLD;
+		const session = await this.sessionFor(sessionKey);
+		this.sessionBusy.add(sessionKey);
+		this.activeSessionKey = sessionKey;
 		this.turnInFlightSince = Date.now();
 		metrics.gauge("mir_router_turn_in_flight", 1);
 		await this.loadJournal();
@@ -1382,10 +1473,10 @@ export class RouterLayer {
 			queue: this.inbox.length,
 		});
 		try {
-			await this.promptWithTimeout(prompt);
+			await this.promptWithTimeout(session, prompt);
 			// The turn (including any queued follow-ups) must be settled before we
 			// judge whether the model replied — otherwise attribution races the model.
-			await settleSession(this.session);
+			await settleSession(session);
 			await this.ensureReply(batch);
 			const duration = Date.now() - this.turn.startedAt;
 			metrics.observe("mir_router_turn_ms", duration);
@@ -1409,6 +1500,8 @@ export class RouterLayer {
 				await this.handleTurnFailure(batch, err as Error);
 			}
 		} finally {
+			this.sessionBusy.delete(sessionKey);
+			this.activeSessionKey = null;
 			this.turnInFlightSince = 0;
 			metrics.gauge("mir_router_turn_in_flight", 0);
 			// A stopped turn says nothing, and a name is not what the person stopped:
@@ -1471,7 +1564,7 @@ export class RouterLayer {
 		}
 	}
 
-	private async promptWithTimeout(prompt: string): Promise<void> {
+	private async promptWithTimeout(session: AgentSessionLike, prompt: string): Promise<void> {
 		let timer: NodeJS.Timeout | undefined;
 		const timeout = new Promise<never>((_, reject) => {
 			timer = setTimeout(
@@ -1481,11 +1574,11 @@ export class RouterLayer {
 			timer.unref();
 		});
 		try {
-			await Promise.race([this.session.prompt(prompt), timeout]);
+			await Promise.race([session.prompt(prompt), timeout]);
 		} catch (err) {
 			// A hung turn must not wedge the layer: abort it and let the retry path
 			// decide whether the batch is retried or failed.
-			await this.session.abort?.().catch(() => {});
+			await session.abort?.().catch(() => {});
 			throw err;
 		} finally {
 			if (timer) clearTimeout(timer);
@@ -2392,7 +2485,11 @@ export class RouterLayer {
 		}
 		const answeringThisThread = this.turnInFlightSince !== 0 && this.turn.originThreadId === threadId;
 		log.info("thread stopped", { thread: threadId, reason: why, tasks: stopped.length, turnAborted: answeringThisThread });
-		if (answeringThisThread) await this.session.abort?.().catch(() => {});
+		if (answeringThisThread) {
+			// Only that conversation's session: a stop in one chat is not a stop in
+			// every other chat the Router is holding.
+			await this.sessions.get(this.turn.originThreadId ?? SESSION_COLD)?.abort?.().catch(() => {});
+		}
 		// An entry of its own, which also moves the thread's state: a stop is not an
 		// absence of a reply.
 		this.record(threadId, { kind: "stop", note: why });
@@ -2558,7 +2655,8 @@ export class RouterLayer {
 	private requestTurnEnd(): void {
 		if (this.endRequested) return;
 		this.endRequested = true;
-		const session = this.session;
+		const session = this.sessions.get(this.activeSessionKey ?? SESSION_COLD);
+		if (session === undefined) return;
 		// A tick later: the tool call that decided this is still unwinding, and aborting
 		// inside its own execution is a fight with the loop it is trying to stop.
 		const timer = setTimeout(() => {
@@ -2570,7 +2668,7 @@ export class RouterLayer {
 	/** Watchdog hook: abort a hung turn. */
 	async abortTurn(reason: string): Promise<void> {
 		log.warn("aborting router turn", { reason });
-		await this.session.abort?.().catch(() => {});
+		await Promise.all(this.heldSessions().map((session) => session.abort?.().catch(() => {})));
 	}
 
 	getTask(taskId: string): Task | undefined {
@@ -2601,13 +2699,18 @@ export class RouterLayer {
 		// An in-flight turn may still touch the store; let it finish or abort it
 		// before the caller closes the database underneath it.
 		if (this.turnInFlightSince > 0) {
-			await this.session.abort?.().catch(() => {});
+			const busy = [...this.sessionBusy]
+				.map((key) => this.sessions.get(key))
+				.filter((held): held is AgentSessionLike => held !== undefined);
+			await Promise.all(busy.map((session) => session.abort?.().catch(() => {})));
 			await Promise.race([
-				settleSession(this.session).catch(() => {}),
+				Promise.all(busy.map((session) => settleSession(session).catch(() => {}))),
 				sleep(5000),
 			]);
 		}
-		await this.session.dispose().catch(() => {});
+		await Promise.all(this.heldSessions().map((session) => session.dispose().catch(() => {})));
+		this.sessions.clear();
+		this.sessionUsedAt.clear();
 	}
 }
 

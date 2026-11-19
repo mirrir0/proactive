@@ -48,6 +48,7 @@ import { AnomalousChannel } from "./channels/anomalous.ts";
 import type { BrainHost } from "./api/protocol.ts";
 import { ThreadLog, newThreadId } from "./threadlog.ts";
 import { Journal } from "./journal.ts";
+import { AppServer } from "./mcp-app/server.ts";
 import type { HandStatus } from "./hands/protocol.ts";
 
 export interface SuperAgentDeps {
@@ -91,6 +92,8 @@ export class SuperAgent {
 	private readonly threadLog: ThreadLog;
 	/** What the Router remembers about each conversation, in git. */
 	private readonly journal: Journal;
+	/** This brain's views, for a client that renders MCP Apps. Off unless configured. */
+	private appServer: AppServer | null = null;
 	private housekeepingTimer: NodeJS.Timeout | null = null;
 	/** Daemon-side MCP tool catalog (merged from worker `mcp_catalog` reports). */
 	private readonly mcpCatalog = new Map<string, McpCatalogEntry>();
@@ -346,6 +349,37 @@ export class SuperAgent {
 					...(event.from === undefined ? {} : { metadata: { user: event.from } }),
 				});
 			});
+		}
+
+		// The card, served as an MCP App: a client fetches `ui://mir/work` and the
+		// view asks `work_status`. Only when a port is configured, and never without
+		// a token — the same rule as the client API.
+		if (this.config.mcpApp.port > 0) {
+			if (this.config.mcpApp.token === "") {
+				log.warn("mcp app server not started: no token", { hint: "set MIR_API_TOKEN" });
+			} else {
+				this.appServer = new AppServer({
+					host: this.config.mcpApp.host,
+					port: this.config.mcpApp.port,
+					token: this.config.mcpApp.token,
+					log,
+					name: "mir",
+					version: "1.0.0",
+					workStatus: (taskId) => this.cardData(taskId),
+					stopWork: async (taskId) => {
+						try {
+							await this.router?.stopTask(taskId, "stopped from the card");
+							return { ok: true };
+						} catch (err) {
+							return { ok: false, error: (err as Error).message };
+						}
+					},
+				});
+				await this.appServer.start().catch((err: unknown) => {
+					this.appServer = null;
+					log.warn("mcp app server could not start", { error: (err as Error).message });
+				});
+			}
 		}
 
 		this.router = await RouterLayer.create({
@@ -639,6 +673,25 @@ export class SuperAgent {
 	set onTurnComplete(cb: (() => void) | null) {
 		this._onTurnComplete = cb;
 	}
+	/**
+	 * One task, as the card shows it — read from the router's live map, so a view
+	 * always answers with the state now. That is what makes a reload correct.
+	 */
+	private cardData(taskId: string) {
+		const task = this.router?.listTasks().find((candidate) => candidate.id === taskId);
+		if (task === undefined) return undefined;
+		return {
+			taskId: task.id,
+			title: task.title,
+			description: task.description,
+			status: task.status,
+			...(task.endpointId === undefined ? {} : { endpointId: task.endpointId }),
+			...(task.result === undefined ? {} : { result: task.result }),
+			...(task.error === undefined ? {} : { error: task.error }),
+			createdAt: task.createdAt,
+		};
+	}
+
 	listTasks() {
 		return this.router?.listTasks() ?? [];
 	}
@@ -731,6 +784,8 @@ export class SuperAgent {
 		this.anomalousChannel = null;
 		await this.apiServer?.stop().catch(() => {});
 		this.apiServer = null;
+		await this.appServer?.stop().catch(() => {});
+		this.appServer = null;
 		await this.watchdog?.dispose();
 		await this.handsServer?.stop();
 		this.handsHub?.dispose();

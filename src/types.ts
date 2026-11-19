@@ -206,6 +206,12 @@ export interface SuperAgentConfig {
 	socketPath: string;
 	/** The client API a display connects to. Off by default. */
 	api: BrainApiConfig;
+	/**
+	 * The MCP app server: where a client fetches this brain's views (`ui://mir/work`)
+	 * and calls their tools. Off unless a port is set, and it refuses to start
+	 * without a token.
+	 */
+	mcpApp: { host: string; port: number; token: string };
 	/** HTTP webhook channel bind address. */
 	httpHost: string;
 	httpPort: number;
@@ -269,6 +275,7 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 	maxDispatchQueue: 50,
 	providerRouting: undefined,
 	socketPath: "",
+	mcpApp: { host: "127.0.0.1", port: 0, token: "" },
 	api: { socketPath: "", token: "" },
 	httpHost: "127.0.0.1",
 	httpPort: 4599,

@@ -1,0 +1,38 @@
+{
+	"$comment": "What a client needs to run mir as an agent. Placeholders in braces are filled by the client: {socket}, {token}, {stateDir}, {mcpConfig}.",
+	"name": "mir",
+	"version": "1.0.0",
+	"protocol": 1,
+	"transport": { "kind": "unix", "path": "{socket}" },
+	"command": ["mir", "serve"],
+	"env": {
+		"MIR_API_SOCKET": "{socket}",
+		"MIR_API_TOKEN": "{token}",
+		"MIR_HOME": "{stateDir}",
+		"MIR_MCP_CONFIG_PATH": "{mcpConfig}",
+		"MIR_MCP_APP_HOST": "127.0.0.1",
+		"MIR_MCP_APP_PORT": "0"
+	},
+	"health": { "frame": "hello", "timeoutMs": 5000 },
+	"token": { "kind": "derived", "from": "host-secret" },
+	"capabilities": {
+		"threads": { "entries": true, "names": true, "rename": true, "stop": true },
+		"streaming": "deltas",
+		"dispatch": { "tasks": true, "cards": true },
+		"hands": true,
+		"journal": true,
+		"readLog": true
+	},
+	"views": [
+		{
+			"uri": "ui://mir/work",
+			"mimeType": "text/html;profile=mcp-app",
+			"transport": "mcp",
+			"note": "One piece of work. The URI carries ?taskId=, so re-reading it after a reload returns the state now."
+		}
+	],
+	"tools": {
+		"from": "mcp",
+		"note": "The client passes its own tools in as MCP servers, in the same config as the member's connected services."
+	}
+}

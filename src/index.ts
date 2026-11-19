@@ -15,9 +15,10 @@ import { buildConfig, runDaemon } from "./daemon.ts";
 import { ProcessManager } from "./process-manager.ts";
 import { MirStore } from "./store.ts";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hashToken } from "./hands/protocol.ts";
 import { runEndpoint } from "./endpoint/main.ts";
 import { ensurePaths, mirPaths, requiredDirs, socketFits, socketLimit } from "./paths.ts";
@@ -29,6 +30,7 @@ function usage(): void {
 			"",
 			"  init              create this machine's mir directories and config",
 			"  paths             print where this install keeps its files",
+			"  manifest          print the agent manifest a client runs this brain from",
 			"  serve             run the daemon with its client API on (see MIR_API_*)",
 			"  daemon            run the daemon in the foreground (dev)",
 			"  start             start mir-daemon under pm2",
@@ -364,6 +366,24 @@ async function main(): Promise<void> {
 		console.log(`config file ${paths.configFile}`);
 		console.log(`daemon     ${paths.daemonSocket}`);
 		console.log(`hands      ${paths.handsSocket}`);
+		return;
+	}
+
+	/**
+	 * `mir manifest` — what a client needs to run this agent.
+	 *
+	 * Shipped as a file and printed from the binary, so a client can read it without
+	 * knowing where mir is installed. It is the whole plug: command, transport,
+	 * placeholders, capabilities and views, with no client-specific knowledge in it.
+	 */
+	if (cmd === "manifest") {
+		const path = fileURLToPath(new URL("../agent.manifest.json", import.meta.url));
+		const raw = readFileSync(path, "utf8");
+		if (rest.includes("--compact")) {
+			console.log(JSON.stringify(JSON.parse(raw)));
+			return;
+		}
+		console.log(raw.trimEnd());
 		return;
 	}
 

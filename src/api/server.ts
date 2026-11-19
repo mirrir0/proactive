@@ -24,7 +24,13 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
-import { BRAIN_API_VERSION, type BrainHost, type BrainToClient, type ClientToBrain } from "./protocol.ts";
+import {
+	BRAIN_API_VERSION,
+	BRAIN_CAPABILITIES,
+	type BrainHost,
+	type BrainToClient,
+	type ClientToBrain,
+} from "./protocol.ts";
 import type { ThreadEntry, ThreadStatus } from "../threadlog.ts";
 import { FrameDecoder, encodeFrame, hashToken, tokensEqual } from "../hands/protocol.ts";
 import type { Logger } from "../telemetry.ts";
@@ -157,7 +163,13 @@ export class BrainServer {
 				greeted = true;
 				this.subscribers.set(socket, { threads: new Set() });
 				this.options.log.info("brain client connected", { agent: message.agent });
-				send({ type: "ready", v: BRAIN_API_VERSION, agent: message.agent, hands: this.options.host.hands() });
+				send({
+					type: "ready",
+					v: BRAIN_API_VERSION,
+					agent: message.agent,
+					hands: this.options.host.hands(),
+					capabilities: BRAIN_CAPABILITIES,
+				});
 				return;
 			}
 			this.handle(socket, message, send, refuse);

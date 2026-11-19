@@ -66,9 +66,52 @@ export type ClientToBrain =
 	| { type: "stop"; id: string; threadId: string }
 	| { type: "hands"; id: string };
 
+/**
+ * What a brain can do, said rather than assumed.
+ *
+ * The failure this prevents: a client hard-codes "a thread has cards, a card has a
+ * stop button, a task runs on a hand", and every other agent has to pretend to be
+ * this one. Each field here is something a client may render *if it is there*.
+ */
+export interface BrainCapabilities {
+	/** Threads and their entries: the rail a client draws. */
+	threads: { entries: boolean; names: boolean; rename: boolean; stop: boolean };
+	/** How a turn's words arrive. */
+	streaming: "deltas" | "message" | "none";
+	/** Work started from a conversation, and whether it has a card. */
+	dispatch: { tasks: boolean; cards: boolean };
+	/** Execution environments this brain can reach. */
+	hands: boolean;
+	/** The brain's own memory of a conversation. */
+	journal: boolean;
+	/** Reading a thread's log on demand. */
+	readLog: boolean;
+}
+
+/** What this implementation can do, for the `ready` frame. */
+export const BRAIN_CAPABILITIES: BrainCapabilities = {
+	threads: { entries: true, names: true, rename: true, stop: true },
+	streaming: "deltas",
+	dispatch: { tasks: true, cards: true },
+	hands: true,
+	journal: true,
+	readLog: true,
+};
+
 export type BrainToClient =
 	/** The first frame, always: what this brain is and what it can do now. */
-	| { type: "ready"; v: number; agent: string; hands: HandStatus[] }
+	| {
+			type: "ready";
+			v: number;
+			agent: string;
+			hands: HandStatus[];
+			/**
+			 * What this brain can do, so a client renders what exists instead of
+			 * assuming. A client that knows only `v` is not wrong, it is older: the
+			 * fields are additive and an unknown one is ignored.
+			 */
+			capabilities: BrainCapabilities;
+	  }
 	| { type: "threads"; id: string; threads: ThreadSummary[] }
 	| {
 			type: "snapshot";

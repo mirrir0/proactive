@@ -600,17 +600,32 @@ test("thread log: a dispatch and a worker's conclusion are the work thread's ent
 			endpointId: "studio-mac",
 		});
 		const started = h.threadLog!.entries("work-1");
-		assert.equal(started.length, 1);
+		assert.equal(started.length, 2, "the state, and the card");
 		assert.equal(started[0]!.kind, "status");
 		assert.match((started[0] as { note?: string }).note ?? "", /studio-mac/);
+		const card = started[1]!;
+		assert.equal(card.kind, "app");
+		assert.match((card as { uri: string }).uri, /^ui:\/\/mir\/work\?taskId=/, "the entry points at this task's card");
+		assert.equal((card as unknown as { data: { taskId: string } }).data.taskId, task.id);
 
 		h.router.handleWorkerConclusion(task.workerId!, "the report is written");
 		const after = h.threadLog!.entries("work-1");
+		// Everything but the card: what the worker said, then that the thread is
+		// done. The card is asserted on its own below.
 		assert.deepEqual(
-			after.slice(1).map((entry) => (entry.kind === "text" ? entry.text : entry.kind)),
+			after
+				.slice(2)
+				.filter((entry) => entry.kind !== "app")
+				.map((entry) => (entry.kind === "text" ? entry.text : entry.kind)),
 			["the report is written", "status"],
 			"the worker's answer, then that the thread is done",
 		);
+		// And the card was refreshed with the answer, so a reload shows it.
+		const lastCard = after.filter((entry) => entry.kind === "app").at(-1) as unknown as {
+			data: { status: string; result?: string };
+		};
+		assert.equal(lastCard.data.status, "done");
+		assert.equal(lastCard.data.result, "the report is written");
 		assert.equal(h.threadLog!.status("work-1"), "done");
 	} finally {
 		await h.cleanup();
@@ -837,7 +852,7 @@ test("a conclusion in a work thread still goes to the Router, and says the threa
 	try {
 		const task = await h.router.dispatchTask({ title: "check the build", description: "check it", threadId: "work-9" });
 		h.router.handleWorkerConclusion(task.workerId!, "the build passes");
-		const entries = h.threadLog!.entries("work-9");
+		const entries = h.threadLog!.entries("work-9").filter((entry) => entry.kind !== "app");
 		assert.deepEqual(
 			entries.slice(1).map((entry) => (entry.kind === "text" ? entry.text : entry.kind)),
 			["the build passes", "status"],

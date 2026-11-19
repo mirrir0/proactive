@@ -83,6 +83,27 @@ export type ThreadEntry =
 	 * live: a client that opens the chat later reads the same name it has now.
 	 */
 	| { seq: number; at: number; kind: "title"; title: string }
+	/**
+	 * Work this thread is showing, as an app the client renders.
+	 *
+	 * Not a card the client has to understand: a pointer. `server` names an MCP
+	 * server the client already knows, `uri` a `ui://` resource on it, and `data`
+	 * what the view needs to draw itself. Which is why an agent with a card of its
+	 * own and an agent with none are the same shape to the client — and why the
+	 * entry carries a task id rather than a snapshot: a client that reloads asks
+	 * the server for the state now, instead of drawing yesterday's.
+	 */
+	| {
+			seq: number;
+			at: number;
+			kind: "app";
+			/** The MCP server that serves the view: `mir`, or another agent's name. */
+			server: string;
+			/** The `ui://` resource to render. */
+			uri: string;
+			/** What the view needs to draw itself, and to ask for more. */
+			data: Record<string, unknown>;
+	  }
 
 /** What a client needs to list a thread without reading it. */
 export interface ThreadSummary {

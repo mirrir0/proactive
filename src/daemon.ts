@@ -116,6 +116,13 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			socketPath: env.MIR_API_SOCKET ? expandHome(env.MIR_API_SOCKET) : "",
 			token: env.MIR_API_TOKEN ?? "",
 		},
+		// A client that renders views fetches them here; the same token as the
+		// client API, because it is the same brain answering.
+		mcpApp: {
+			host: env.MIR_MCP_APP_HOST ?? "127.0.0.1",
+			port: numEnv("MIR_MCP_APP_PORT", 0),
+			token: env.MIR_API_TOKEN ?? "",
+		},
 		workerIdleExitMs: numEnv("MIR_WORKER_IDLE_MS", 120_000),
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),
 		maxTokens: numEnv("MIR_MAX_TOKENS", 8192),

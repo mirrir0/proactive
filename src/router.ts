@@ -47,6 +47,7 @@ import { redactSecrets } from "./security.ts";
 import { createPiSession, settleSession, type AgentSessionLike, type SessionFactory } from "./session.ts";
 import { brainResourceLoader, useSkillTool } from "./skills.ts";
 import { JOURNAL_MAX_CHARS, type Journal } from "./journal.ts";
+import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
 import type { NewThreadEntry, ThreadEntry, ThreadLog } from "./threadlog.ts";
 
@@ -314,6 +315,9 @@ function entryText(entry: ThreadEntry): string {
 			return entry.note ?? "";
 		case "title":
 			return entry.title;
+		case "app":
+			// The view is the entry; its data is for the view, not for a search.
+			return "";
 	}
 }
 
@@ -334,6 +338,18 @@ function conversationLine(entry: ThreadEntry): string | undefined {
 			return `· the person stopped it${entry.note === undefined ? "" : `: ${entry.note}`}`;
 		case "title":
 			return `· the chat was named "${entry.title}"`;
+		case "app": {
+			// Work started, said as the person would: what it is, and where it runs
+			// when that matters. The card itself is the client's business.
+			const title = typeof entry.data.title === "string" ? entry.data.title : undefined;
+			const endpoint = typeof entry.data.endpointId === "string" ? entry.data.endpointId : undefined;
+			const state = typeof entry.data.status === "string" ? entry.data.status : undefined;
+			if (title === undefined) return undefined;
+			const where = endpoint === undefined ? "" : ` on ${endpoint}`;
+			return state === "done" || state === "failed" || state === "stopped"
+				? `· "${title}" ${state}${where}`
+				: `· started "${title}"${where}`;
+		}
 		// A hand call is how the answer was found, like a tool call: the person
 		// never saw it, and the conclusion already says whether it worked.
 		default:
@@ -621,6 +637,31 @@ export class RouterLayer {
 		this.deps.store.putScratchpadItem(item);
 		this.writeScratchpadCopy();
 		return item;
+	}
+
+	/**
+	 * Show, or refresh, the card for a task.
+	 *
+	 * Appended on each transition that changes what a person would see — started,
+	 * finished, failed, stopped — never on progress: the log is the durable record,
+	 * and the view polls for the rest. Appending rather than editing is the log's
+	 * whole design, and a client renders the last card for a task.
+	 */
+	private recordCard(threadId: string | undefined, taskId: string): void {
+		if (threadId === undefined || threadId === "") return;
+		const task = this.tasks.get(taskId);
+		if (task === undefined) return;
+		const data: Record<string, unknown> = {
+			taskId: task.id,
+			title: task.title,
+			description: task.description,
+			status: task.status,
+			...(task.endpointId === undefined ? {} : { endpointId: task.endpointId }),
+			...(task.result === undefined ? {} : { result: task.result }),
+			...(task.error === undefined ? {} : { error: task.error }),
+			createdAt: task.createdAt,
+		};
+		this.record(threadId, { kind: "app", server: "mir", uri: cardUriFor(task.id), data });
 	}
 
 	/** Close a line: done, or dropped when it stopped being worth doing. */
@@ -1657,6 +1698,9 @@ export class RouterLayer {
 			status: atCapacity ? "waiting" : "running",
 			note: `dispatched: ${input.title}${input.endpointId === undefined ? "" : ` on ${input.endpointId}`}`,
 		});
+		// And the card: a pointer to this task, not a snapshot of it. A client that
+		// reloads renders the last one and asks the app server for the state now.
+		this.recordCard(input.threadId, id);
 		this.deps.context.spill({
 			id: `task:${id}`,
 			type: "task",
@@ -1868,6 +1912,9 @@ export class RouterLayer {
 			this.deps.store.upsertTask(task);
 			metrics.counter("mir_tasks_completed_total", 1, { status: "done", fast: String(Boolean(task.fast)) });
 			this.closeScratchpadForTask(task.id, "done");
+			// The card, now that the task has its answer: a reload renders this one
+			// and asks the app server for the state, so it is never stale.
+			this.recordCard(task.threadId, task.id);
 			metrics.observe("mir_task_duration_ms", Date.now() - task.createdAt, { fast: String(Boolean(task.fast)) });
 			this.deps.context.spill({
 				id: `task:${task.id}`,
@@ -2003,6 +2050,10 @@ export class RouterLayer {
 		task.error = reason ?? "stopped by operator";
 		task.updatedAt = Date.now();
 		this.deps.store.upsertTask(task);
+		// A stop from the card goes through the same path as a stop from anywhere
+		// else, and the card learns it from the log like every other client.
+		this.recordCard(task.threadId, task.id);
+		this.closeScratchpadForTask(task.id, "dropped");
 		// A queued task has no worker yet: just remove it from the queue.
 		const queueIdx = this.dispatchQueue.findIndex((i) => i.taskId === taskId);
 		if (queueIdx >= 0) this.dispatchQueue.splice(queueIdx, 1);
@@ -2051,6 +2102,9 @@ export class RouterLayer {
 		// An entry of its own, which also moves the thread's state: a stop is not an
 		// absence of a reply.
 		this.record(threadId, { kind: "stop", note: why });
+		// And the cards say stopped, so a reload does not show a spinner for work
+		// that ended.
+		for (const task of stopped) this.recordCard(threadId, task.id);
 		return stopped;
 	}
 

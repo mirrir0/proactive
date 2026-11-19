@@ -4,6 +4,8 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { MirStore } from "../src/store.ts";
+import { buildConfig } from "../src/daemon.ts";
+import { mirPaths } from "../src/paths.ts";
 import { SecretRegistry } from "../src/security.ts";
 import { createLogger } from "../src/telemetry.ts";
 import { HandExecutor } from "../src/hands/executor.ts";
@@ -669,4 +671,12 @@ test("endpoint CLI: missing required flags fail loudly", () => {
 	assert.throws(() => parseEndpointArgs(["--hub", "h:1", "--id", "x"], {}), /missing --token/);
 	// v2 added `shell`, `editFile` and read paging: the ops a machine's own tools need.
 	assert.equal(HANDS_PROTOCOL_VERSION, 2);
+});
+
+test("the local hand is rooted at the brain's home, not the directory it was started from", () => {
+	// A brain started from a checkout otherwise hands its Workers the repository: a
+	// task about a space folder reads and writes the source tree instead, and the
+	// answer looks like it came from the right place.
+	const config = buildConfig();
+	assert.deepEqual(config.hands.localPolicy.roots, [mirPaths().home]);
 });

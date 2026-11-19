@@ -182,7 +182,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 			local: boolEnv("MIR_HANDS_LOCAL", true),
 			localPolicy: normalizePolicy(
 				{
-					roots: csvEnv("MIR_HANDS_LOCAL_ROOTS") ?? [process.cwd()],
+					// The daemon's own machine, rooted at *its* home — not at whatever
+					// directory it was started from. A brain started from a checkout
+					// otherwise hands its Workers the repository, and a task that asked
+					// about a space folder reads and writes the source tree instead.
+					roots: csvEnv("MIR_HANDS_LOCAL_ROOTS") ?? [paths.home],
 					allow: csvEnv("MIR_HANDS_LOCAL_ALLOW") ?? DEFAULT_HAND_POLICY.allow,
 					deny: csvEnv("MIR_HANDS_LOCAL_DENY") ?? [],
 					maxConcurrent: numEnv("MIR_HANDS_LOCAL_MAX_CONCURRENT", DEFAULT_HAND_POLICY.maxConcurrent),

@@ -31,6 +31,18 @@ import { rmDir, tmpDir } from "./helpers/fakes.ts";
 
 const log = createLogger({ level: "error", format: "json", write: () => {} });
 
+/**
+ * The tests below spawn real sandboxed processes — node under seatbelt or bubblewrap,
+ * with the proxy in front of it — and each costs seconds. They are the only tests here
+ * that need a working OS sandbox, and they were 30 of this suite's 34 seconds.
+ *
+ * So they are opt-in: `npm run test:sandbox`. What stays on always is the pure logic —
+ * the config a policy maps to, and a hand that claims to be sandboxed refusing to run
+ * without one — because those are the invariants, and a slow test that needs a runtime
+ * is not a check anybody runs on every save.
+ */
+const integration = process.env["MIR_SANDBOX_TESTS"] === "1" ? test : test.skip;
+
 const root = tmpDir("mir-srt-root-");
 const outside = tmpDir("mir-srt-outside-");
 const secretsDir = path.join(root, "secrets");
@@ -109,7 +121,7 @@ test("sandbox: a hand that claims to be sandboxed refuses to run without one", a
 	assert.match(result.error ?? "", /sandbox-required/);
 });
 
-test("sandbox: initializes when the platform supports it", async () => {
+integration("sandbox: initializes when the platform supports it", async () => {
 	if (!sandboxSupported()) {
 		// The contract still holds: asking for a sandbox that cannot exist throws.
 		await assert.rejects(() => createSrtSandbox(policy(), log), /does not support/);
@@ -126,7 +138,7 @@ test("sandbox: initializes when the platform supports it", async () => {
 	assert.equal(sandbox.kind, "srt");
 });
 
-test("sandbox: a write inside the roots succeeds", async () => {
+integration("sandbox: a write inside the roots succeeds", async () => {
 	if (!executor) return;
 	const target = path.join(root, "inside.txt");
 	const result = await executor.run("exec", {
@@ -136,7 +148,7 @@ test("sandbox: a write inside the roots succeeds", async () => {
 	assert.equal(fs.readFileSync(target, "utf8"), "ok");
 });
 
-test("sandbox: a write outside the roots is blocked and reported as policy", async () => {
+integration("sandbox: a write outside the roots is blocked and reported as policy", async () => {
 	if (!executor) return;
 	const target = path.join(outside, "escape.txt");
 	const result = await executor.run("exec", {
@@ -148,7 +160,7 @@ test("sandbox: a write outside the roots is blocked and reported as policy", asy
 	assert.match(result.error ?? "", /blocked by sandbox policy/i);
 });
 
-test("sandbox: reading a denied path is blocked", async () => {
+integration("sandbox: reading a denied path is blocked", async () => {
 	if (!executor) return;
 	const result = await executor.run("exec", {
 		argv: [
@@ -161,7 +173,7 @@ test("sandbox: reading a denied path is blocked", async () => {
 	assert.ok(!(result.stdout ?? "").includes("PRIVATE KEY"));
 });
 
-test("sandbox: network is mediated and denied hosts are refused", async () => {
+integration("sandbox: network is mediated and denied hosts are refused", async () => {
 	if (!executor) return;
 	// The proxy is what the child talks to; its presence proves mediation.
 	const env = await executor.run("exec", {

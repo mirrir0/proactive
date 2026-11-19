@@ -17,11 +17,12 @@
 		"endpoint": "tsx src/endpoint/main.ts",
 		"build": "tsc -p tsconfig.build.json",
 		"check": "tsc --noEmit",
-		"test": "node --import tsx --test test/*.test.ts",
-		"test:watch": "node --import tsx --test --watch test/*.test.ts",
+		"test": "node --import tsx --test --test-concurrency=6 test/*.test.ts",
+		"test:watch": "node --import tsx --test --test-concurrency=6 --watch test/*.test.ts",
 		"smoke:hands": "tsx scripts/smoke-hands.ts",
 		"smoke:brain": "tsx scripts/smoke-brain.ts",
-		"trace": "tsx scripts/trace.ts"
+		"trace": "tsx scripts/trace.ts",
+		"test:sandbox": "MIR_SANDBOX_TESTS=1 node --import tsx --test test/hands-sandbox.test.ts test/hands-confined.test.ts"
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.82",

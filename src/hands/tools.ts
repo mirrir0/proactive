@@ -20,6 +20,9 @@ import { redactSecrets } from "../security.ts";
 import { metrics } from "../telemetry.ts";
 
 export interface HandToolsOptions {
+	/** What the task calls its hand, and where that hand's files start. */
+	readonly handName?: string;
+	readonly handRoot?: string;
 	client: HandsClient;
 	/** Pin every call to one hand (the task's assigned endpoint). */
 	endpointId?: string;
@@ -78,6 +81,8 @@ function toToolResult(result: HandCallResult, maxChars?: number): AgentToolResul
 export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 	const { client } = options;
 	const pinned = options.endpointId;
+	const handName = options.handName;
+	const handRoot = options.handRoot;
 	const maxChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
 
 	const call = async (
@@ -242,12 +247,18 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				);
 				const text = hands.length
 					? hands
-							.map(
-								(h) =>
-									`${h.endpointId} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}/${h.policy.maxConcurrent}\n  roots: ${h.policy.roots.join(", ") || "(none)"}\n  allow: ${h.policy.allow.join(", ") || "(none)"}`,
-							)
+							.map((h) => {
+								// The hand's own policy carries no roots — it enforces them itself,
+								// and what it reports is display only. The task was told where the
+								// folder is; that is what a Worker needs to know, and the name is
+								// what a person calls it.
+								const roots = h.policy.roots.length > 0 ? h.policy.roots : handRoot === undefined ? [] : [handRoot];
+								const name = handName === undefined ? h.endpointId : `“${handName}”`;
+								const cap = h.policy.maxConcurrent ?? 0;
+								return `${name} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}${cap > 0 ? `/${String(cap)}` : ""}\n  files: ${roots.join(", ") || "(none)"}\n  allow: ${h.policy.allow.join(", ") || "(none)"}`;
+							})
 							.join("\n")
-					: "no hands are connected";
+					: "no hand is connected: nothing here can read a file";
 				return { content: [{ type: "text", text }], details: { hands } };
 			},
 		}),

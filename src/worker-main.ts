@@ -95,6 +95,10 @@ async function main(): Promise<void> {
 		handTools = createHandTools({
 			client: handsClient,
 			endpointId: spec.endpointId,
+			// What the task knows about its hand and the hub does not: a remote hand's
+			// own policy carries no roots, and its name is the person's word for it.
+			...(spec.handName === undefined ? {} : { handName: spec.handName }),
+			...(spec.handRoot === undefined ? {} : { handRoot: spec.handRoot }),
 			signal: stopSignal.signal,
 		});
 		if (connected) {

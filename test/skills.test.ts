@@ -148,7 +148,7 @@ test("the Router's prompt is its own: no coding-assistant framing, no path, and 
 			.join("\n\n"),
 		hideCwd: true,
 	});
-	const rendered = await loader.getSystemPrompt();
+	const rendered = (await loader.getSystemPrompt()) ?? "";
 	// pi's preamble is gone, and with it the directory it would have named — a Router
 	// has no filesystem, and a path in its prompt is a path it quotes as the person's.
 	assert.equal(/coding assistant running inside pi/.test(rendered), false, "not pi's preamble");

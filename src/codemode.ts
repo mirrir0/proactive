@@ -205,8 +205,12 @@ export function createCodemodeTool(options: CodemodeToolOptions = {}): ToolDefin
 		name: "codemode",
 		label: "Codemode",
 		description:
-			"Execute JavaScript in a sandboxed QuickJS VM. Use for file manipulation, data transformation, HTTP requests, or any computation. " +
+			"Run JavaScript for pure computation: data transformation, parsing, arithmetic. " +
 			`Available: ${capabilitiesLine(capabilities)}. ` +
+			// Said because it was tried: the sandbox is QuickJS, not Node. A model that
+			// reaches for `require` or `process` gets a ReferenceError and concludes the
+			// machine is broken, when the answer is that this is not where files live.
+			"No `require`, no `import`, no `process`, no `fs`: this is not Node. Files are the hand's, and `exec`/`read_file`/`list_dir` are how you reach them. " +
 			"Return a value to send it back as the tool result.",
 		parameters: Type.Object({
 			code: Type.String({ description: "JavaScript code to execute." }),

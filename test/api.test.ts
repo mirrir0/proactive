@@ -47,6 +47,7 @@ function scriptedHost(entries: ThreadEntry[] = []) {
 		addHand: (request) => ({ handId: request.handId, token: `token-for-${request.handId}`, hubPort: 4700 }),
 		entries: (threadId, since) => entries.filter((e) => e.seq > since && threadId === "t1"),
 		status: (threadId) => (threadId === "t1" ? "running" : "idle"),
+		threadFacts: () => ({}),
 		say: (threadId, content) => {
 			said.push({ threadId, content });
 		},

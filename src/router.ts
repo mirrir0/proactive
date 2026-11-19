@@ -451,6 +451,8 @@ export class RouterLayer {
 	private readonly helloTimers = new Map<string, NodeJS.Timeout>();
 	/** Per-worker output waiting to be written into its thread. */
 	private readonly deltaBuffers = new Map<string, { text: string; timer: NodeJS.Timeout }>();
+	/** What a worker has already said in its threads, so its conclusion is not repeated. */
+	private readonly streamedByWorker = new Map<string, string>();
 	/** Each conversation's journal, as last read or written: the turn reads it synchronously. */
 	private readonly journalCache = new Map<string, string>();
 	private readonly inbox: InboxItem[] = [];
@@ -878,6 +880,24 @@ export class RouterLayer {
 			...(task.error === undefined ? {} : { error: task.error }),
 			createdAt: task.createdAt,
 		};
+		// One card per task per thread. The entry is a pointer, and a second pointer to
+		// the same task is a second card on screen: the state it carries is refreshed
+		// in place, and a client that can read the resource asks the app server anyway.
+		const existing = this.deps.threadLog
+			?.entries(threadId)
+			.filter((entry) => entry.kind === "app" && entry.uri === cardUriFor(task.id))
+			.at(-1);
+		if (existing !== undefined) {
+			this.deps.store.updateThreadEntryPayload(threadId, existing.seq, {
+				server: "mir",
+				uri: cardUriFor(task.id),
+				data,
+			});
+			// A client already showing this card is told the new state, at the sequence
+			// it already has: an update, not a second card.
+			this.deps.publishEntry?.(threadId, { ...existing, data } as never);
+			return;
+		}
 		this.record(threadId, { kind: "app", server: "mir", uri: cardUriFor(task.id), data });
 	}
 
@@ -2366,6 +2386,11 @@ export class RouterLayer {
 		for (const threadId of rec.threadIds) {
 			this.record(threadId, { kind: "text", role: "assistant", text: buffered.text, workerId });
 		}
+		// What has already been said, so the conclusion is not said again. The stream
+		// and the conclusion are the same words: the model streams its answer and then
+		// reports it, and a person read it twice, word for word, in one thread.
+		const streamed = this.streamedByWorker.get(workerId) ?? "";
+		this.streamedByWorker.set(workerId, streamed + buffered.text);
 	}
 
 	async handleWorkerConclusion(workerId: string, text: string): Promise<void> {
@@ -2385,6 +2410,13 @@ export class RouterLayer {
 			log.warn("conclusion from unknown worker", { worker: workerId });
 			return;
 		}
+		// The conclusion is the last assistant message after the last tool call, and a
+		// Worker that streamed it has already said it. Recording it again is the same
+		// words twice in one thread, which is what "the answer came out doubled" looked
+		// like. What is always recorded is that the worker finished.
+		const streamed = (this.streamedByWorker.get(workerId) ?? "") + pending;
+		const alreadySaid = streamed.replace(/\s+/g, " ").includes(text.replace(/\s+/g, " ").trim());
+		this.streamedByWorker.delete(workerId);
 		rec.status = "done";
 		rec.lastHeartbeat = Date.now();
 		rec.progress = "conclusion reported";
@@ -2415,7 +2447,7 @@ export class RouterLayer {
 		// Router to pass it on to a channel.
 		for (const threadId of rec.threadIds) {
 			if (reportIsChat && threadId === reportThread) continue;
-			this.record(threadId, { kind: "text", role: "assistant", text, workerId });
+			if (!alreadySaid) this.record(threadId, { kind: "text", role: "assistant", text, workerId });
 			this.record(threadId, { kind: "status", status: "done", note: `worker ${workerId} finished` });
 		}
 

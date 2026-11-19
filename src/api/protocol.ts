@@ -149,6 +149,10 @@ export type BrainToClient =
 			seq: number;
 			status: ThreadStatus;
 			entries: ThreadEntry[];
+			/** The work thread of the task that asked for this one, when one did. */
+			parentThreadId?: string;
+			/** 0 for a chat's work, 1 for a check. Absent means 0. */
+			depth?: number;
 	  }
 	| { type: "entry"; threadId: string; entry: ThreadEntry }
 	| { type: "status"; threadId: string; status: ThreadStatus }
@@ -180,6 +184,11 @@ export interface BrainHost {
 	chatThread(chatId: string, title?: string): string;
 	/** One thread's entries after `since`, oldest first. */
 	entries(threadId: string, since: number): ThreadEntry[];
+	/**
+	 * Where a thread sits in the tree: the work thread of the task that asked for this
+	 * one, and how deep it is. Absent for a chat's own thread and for the cold start.
+	 */
+	threadFacts(threadId: string): { parentThreadId?: string; depth?: number };
 	/** A thread's status right now. */
 	status(threadId: string): ThreadStatus;
 	/**

@@ -648,6 +648,19 @@ export class MirStore {
 		return { rows: rows.reverse(), total };
 	}
 
+	/**
+	 * Rewrite one entry's payload in place.
+	 *
+	 * Only for a card: its entry is a pointer to a task, and the task's state moves. A
+	 * second pointer would be a second card on screen, so the row is updated and the
+	 * sequence — the order a client has already read — is left alone.
+	 */
+	updateThreadEntryPayload(threadId: string, seq: number, payload: unknown): void {
+		this.db
+			.prepare(`UPDATE thread_entries SET payload = ? WHERE thread_id = ? AND seq = ?`)
+			.run(JSON.stringify(payload), threadId, seq);
+	}
+
 	listThreadEntries(threadId: string, since: number, limit: number): EntryRow[] {
 		return this.db
 			.prepare(

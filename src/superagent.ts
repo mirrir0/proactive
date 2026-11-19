@@ -912,6 +912,15 @@ export class SuperAgent {
 			chatThread: (chatId, title) => this.threadLog.chatThread(chatId, title),
 			entries: (threadId, since) => this.threadLog.entries(threadId, since),
 			status: (threadId) => this.threadLog.status(threadId),
+			threadFacts: (threadId) => {
+				const task = this.router?.listTasks().find((candidate) => candidate.workThreadId === threadId);
+				if (task === undefined) return {};
+				const parent = task.parentTaskId === undefined ? undefined : this.router?.getTask(task.parentTaskId);
+				return {
+					...(parent?.workThreadId === undefined ? {} : { parentThreadId: parent.workThreadId }),
+					...(task.depth === undefined || task.depth === 0 ? {} : { depth: task.depth }),
+				};
+			},
 			say: (threadId, content, hand) => {
 				const eventId = `api-${crypto.randomUUID()}`;
 				// A thread that shows a chat answers into that chat; the channel is

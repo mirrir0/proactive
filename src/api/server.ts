@@ -264,6 +264,7 @@ export class BrainServer {
 					seq,
 					status: host.status(message.threadId),
 					entries,
+					...host.threadFacts(message.threadId),
 				});
 				this.watch(message.threadId, socket);
 				return;

@@ -1326,3 +1326,47 @@ test("a check cannot dispatch a check", async () => {
 		await h.cleanup();
 	}
 });
+
+test("a worker that streamed its answer does not say it again as a conclusion", async () => {
+	const h = await makeRouter({ threadLog: true });
+	try {
+		const chat = h.threadLog!.chatThread("chat-stream", "A chat");
+		const task = await h.router.dispatchTask({ title: "Say it once", description: "answer", threadId: chat });
+		const workerId = task.workerId!;
+		await waitFor(() => h.router.getTask(task.id)?.workThreadId !== undefined, 2000, "the work thread exists");
+		const workThread = h.router.getTask(task.id)!.workThreadId!;
+
+		// The stream: the answer, in two chunks.
+		h.router.handleWorkerDelta(workerId, "The files are ");
+		h.router.handleWorkerDelta(workerId, "a.md and b.md.");
+		await tick(900); // let the delta flush timer write what was streamed
+		await h.router.handleWorkerConclusion(workerId, "The files are a.md and b.md.");
+
+		const said = (h.threadLog!.entries(workThread) ?? [])
+			.filter((entry) => entry.kind === "text" && entry.role === "assistant")
+			.map((entry) => (entry as { text: string }).text)
+			.join("");
+		assert.equal(said.match(/a\.md and b\.md/g)?.length, 1, "the answer is in the log once");
+		assert.ok(
+			(h.threadLog!.entries(workThread) ?? []).some((entry) => entry.kind === "status" && entry.status === "done"),
+			"and the thread still says the worker finished",
+		);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a task has one card in a thread, and its state is refreshed in place", async () => {
+	const h = await makeRouter({ threadLog: true });
+	try {
+		const chat = h.threadLog!.chatThread("chat-one", "A chat");
+		const task = await h.router.dispatchTask({ title: "Do the thing", description: "it", threadId: chat });
+		await h.router.handleWorkerConclusion(task.workerId!, "done: it is done");
+		const cards = (h.threadLog!.entries(chat) ?? []).filter((entry) => entry.kind === "app");
+		assert.equal(cards.length, 1, "one card, not one per state change");
+		const card = cards[0] as { data: { status: string } };
+		assert.equal(card.data.status, "done", "and it carries the state now");
+	} finally {
+		await h.cleanup();
+	}
+});

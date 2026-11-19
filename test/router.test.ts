@@ -1370,3 +1370,26 @@ test("a task has one card in a thread, and its state is refreshed in place", asy
 		await h.cleanup();
 	}
 });
+
+test("an unflushed stream does not swallow the conclusion", async () => {
+	const h = await makeRouter({ threadLog: true });
+	try {
+		const chat = h.threadLog!.chatThread("chat-unflushed", "A chat");
+		const task = await h.router.dispatchTask({ title: "Say it", description: "answer", threadId: chat });
+		const workerId = task.workerId!;
+		await waitFor(() => h.router.getTask(task.id)?.workThreadId !== undefined, 2000, "the work thread exists");
+		const workThread = h.router.getTask(task.id)!.workThreadId!;
+
+		// The stream never flushed: the conclusion arrives first.
+		h.router.handleWorkerDelta(workerId, "The answer is 42.");
+		await h.router.handleWorkerConclusion(workerId, "The answer is 42.");
+
+		const said = (h.threadLog!.entries(workThread) ?? [])
+			.filter((entry) => entry.kind === "text" && entry.role === "assistant")
+			.map((entry) => (entry as { text: string }).text)
+			.join("");
+		assert.equal(said, "The answer is 42.", "the work thread has the answer, once");
+	} finally {
+		await h.cleanup();
+	}
+});

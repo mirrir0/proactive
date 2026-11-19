@@ -2414,7 +2414,10 @@ export class RouterLayer {
 		// Worker that streamed it has already said it. Recording it again is the same
 		// words twice in one thread, which is what "the answer came out doubled" looked
 		// like. What is always recorded is that the worker finished.
-		const streamed = (this.streamedByWorker.get(workerId) ?? "") + pending;
+		// Only what was *written* counts: an unflushed buffer was dropped above when the
+		// conclusion already contains it, so the conclusion is the first time these words
+		// reach the log and it must be written.
+		const streamed = this.streamedByWorker.get(workerId) ?? "";
 		const alreadySaid = streamed.replace(/\s+/g, " ").includes(text.replace(/\s+/g, " ").trim());
 		this.streamedByWorker.delete(workerId);
 		rec.status = "done";

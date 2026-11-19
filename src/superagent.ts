@@ -252,6 +252,41 @@ export class SuperAgent {
 					case "tool_result":
 						this.router?.handleWorkerToolResult(workerId, msg.toolCallId, msg.isError, msg.result);
 						break;
+					case "dispatch_child": {
+						// A Worker asked for a check and is blocked on the answer. The task it
+						// belongs to is the parent — not the worker id, which is a process.
+						const parent = this.router?.taskForWorker(workerId);
+						if (parent === undefined) {
+							this.control?.sendChildResult(workerId, msg.requestId, false, "this worker has no task");
+							break;
+						}
+						void this.router!
+							.dispatchChildTask(parent.id, {
+								title: msg.title,
+								description: msg.description,
+								...(msg.instructions === undefined ? {} : { instructions: msg.instructions }),
+							})
+							.then((answer) => this.control?.sendChildResult(workerId, msg.requestId, answer.ok, answer.text))
+							.catch((err: unknown) =>
+								this.control?.sendChildResult(workerId, msg.requestId, false, (err as Error).message),
+							);
+						break;
+					}
+					case "stop_child":
+						void this.router
+							?.stopChild(workerId, msg.taskId)
+							.then((result) => this.control?.sendStopResult(workerId, msg.requestId, result.ok, result.error))
+							.catch((err: unknown) =>
+								this.control?.sendStopResult(workerId, msg.requestId, false, (err as Error).message),
+							);
+						break;
+					case "message": {
+						const result = this.router?.routeMessage(workerId, msg.to, redactSecrets(msg.text));
+						if (result !== undefined && !result.ok) {
+							log.info("a message between agents was not delivered", { to: msg.to, error: result.error });
+						}
+						break;
+					}
 					case "delta":
 						// A worker never talks to a user directly — but its thread does, so
 						// its output is the thread's log, coalesced (handleWorkerDelta).
@@ -410,6 +445,7 @@ export class SuperAgent {
 				isConnected: (workerId) => this.control?.isConnected(workerId) ?? false,
 			},
 			sendEventToWorker: (workerId, event) => this.control?.sendEvent(workerId, event) ?? false,
+			sendToWorker: (workerId, from, text) => this.control?.sendMessage(workerId, from, text) ?? false,
 			mcpServers: this.config.mcpServers,
 			hands: this.handsHub
 				? {
@@ -854,7 +890,21 @@ export class SuperAgent {
 	private brainHost(): BrainHost {
 		return {
 			listThreads: (filter) => {
-				const summaries = this.threadLog.summaries(filter?.limit ?? 100);
+				const summaries = this.threadLog.summaries(filter?.limit ?? 100).map((thread) => {
+					// Where a thread sits in a tree is the tasks' business, not the log's: a
+					// check's work thread is a child of the work thread of the task that
+					// asked for it. A client draws the rail from this, so it is computed
+					// here rather than left for each client to guess.
+					const task = this.router?.listTasks().find((candidate) => candidate.workThreadId === thread.id);
+					const parentTask =
+						task?.parentTaskId === undefined ? undefined : this.router?.getTask(task.parentTaskId);
+					const parentThreadId = parentTask?.workThreadId;
+					return {
+						...thread,
+						...(parentThreadId === undefined ? {} : { parentThreadId }),
+						...(task?.depth === undefined || task.depth === 0 ? {} : { depth: task.depth }),
+					};
+				});
 				return filter?.status === undefined
 					? summaries
 					: summaries.filter((thread) => thread.status === filter.status);

@@ -83,6 +83,16 @@ export interface Task {
 	fast?: boolean;
 	/** Hand this task was pinned to, when the Router chose one. */
 	endpointId?: string;
+	/**
+	 * The task that asked for this one, when a Worker fanned out.
+	 *
+	 * A child's conclusion is a return value for its parent's tool call, not a
+	 * message to a person — and a child cannot dispatch further: depth stops at one
+	 * level, as a tool list rather than an instruction.
+	 */
+	parentTaskId?: string;
+	/** 0 for the Router's own dispatch, 1 for a Worker's check. Absent means 0. */
+	depth?: number;
 }
 
 export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
@@ -216,6 +226,14 @@ export interface SuperAgentConfig {
 	/** Max triggers folded into one Router prompt (rest are handled next turn). */
 	maxBatchSize: number;
 	maxConcurrentWorkers: number;
+	/**
+	 * How many checks a Worker may have running at once, across all Workers.
+	 *
+	 * Budgeted apart from top-level workers: a check is cheap and a person is not
+	 * waiting on it directly, but a Worker that fans out twenty of them is one Worker
+	 * holding twenty slots the Router cannot use.
+	 */
+	maxNestedWorkers: number;
 	/** Tasks beyond `maxConcurrentWorkers` wait here instead of being rejected. */
 	maxDispatchQueue: number;
 	providerRouting?: OpenRouterRouting;
@@ -313,6 +331,7 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 	batchWindowMs: 500,
 	maxBatchSize: 20,
 	maxConcurrentWorkers: 8,
+	maxNestedWorkers: 4,
 	maxDispatchQueue: 50,
 	providerRouting: undefined,
 	socketPath: "",

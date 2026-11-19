@@ -98,6 +98,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		batchWindowMs: numEnv("MIR_BATCH_WINDOW_MS", 500),
 		maxBatchSize: numEnv("MIR_MAX_BATCH_SIZE", 20),
 		maxConcurrentWorkers: numEnv("MIR_MAX_WORKERS", 8),
+		maxNestedWorkers: numEnv("MIR_MAX_NESTED_WORKERS", 4),
 		maxDispatchQueue: numEnv("MIR_MAX_DISPATCH_QUEUE", 50),
 		providerRouting:
 			only || quantizations ? { only, quantizations, allow_fallbacks: false } : undefined,

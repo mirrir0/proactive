@@ -1276,3 +1276,53 @@ test("a warm session set is capped, and a session mid-turn is never evicted", as
 		await h.cleanup();
 	}
 });
+
+test("a Worker's check runs on the same hand, and its conclusion is the answer", async () => {
+	const h = await makeRouter();
+	try {
+		const parent = await h.router.dispatchTask({
+			title: "Find the todos",
+			description: "search the space",
+			endpointId: "space:one",
+		});
+		const answer = h.router.dispatchChildTask(parent.id, { title: "Grep for TODOs", description: "grep the folder" });
+		// The child is a task like any other, on its parent's hand, one level down.
+		await waitFor(() => h.router.listTasks().length === 2, 2000, "the check exists");
+		const child = h.router.listTasks().find((task) => task.parentTaskId === parent.id)!;
+		assert.equal(child.endpointId, "space:one", "a check reads the same folder its parent does");
+		assert.equal(child.depth, 1);
+		assert.equal(
+			h.published.some(({ entry }) => entry.kind === "app"),
+			false,
+			"a check gets no card of its own",
+		);
+
+		// Its conclusion is the value the parent's tool call returns — not a message to
+		// anybody, and not a Router turn.
+		await waitFor(() => child.workerId !== undefined, 2000, "the check has a worker");
+		await h.router.handleWorkerConclusion(child.workerId!, "3 TODOs, all in docs/");
+		const settled = await Promise.race([answer, tick(50).then(() => undefined)]);
+		assert.deepEqual(settled, { ok: true, text: "3 TODOs, all in docs/" });
+		assert.equal(h.router.getTask(child.id)?.status, "done");
+		assert.equal(h.channel.replies.length, 0, "nobody was told anything");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a check cannot dispatch a check", async () => {
+	const h = await makeRouter();
+	try {
+		const parent = await h.router.dispatchTask({ title: "top", description: "do the thing" });
+		const child = await h.router.dispatchTask({
+			title: "check",
+			description: "look at it",
+			parentTaskId: parent.id,
+		});
+		const refused = await h.router.dispatchChildTask(child.id, { title: "deeper", description: "no" });
+		assert.equal(refused.ok, false);
+		assert.match(refused.text, /one level/);
+	} finally {
+		await h.cleanup();
+	}
+});

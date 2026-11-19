@@ -112,6 +112,8 @@ interface TaskRow {
 	instructions: string | null;
 	thread_id: string | null;
 	work_thread_id?: string | null;
+	parent_task_id?: string | null;
+	depth?: number | null;
 	channel_id: string | null;
 	reply_to: string | null;
 	status: string;
@@ -338,6 +340,8 @@ export class MirStore {
 		// A task's own work thread: where the Worker's narration and tool calls go,
 		// which is not the chat it was dispatched from.
 		this.ensureColumn("tasks", "work_thread_id", "TEXT");
+		this.ensureColumn("tasks", "parent_task_id", "TEXT");
+		this.ensureColumn("tasks", "depth", "INTEGER NOT NULL DEFAULT 0");
 		this.ensureColumn("threads", "status", "TEXT NOT NULL DEFAULT 'idle'");
 		this.ensureColumn("threads", "seq", "INTEGER NOT NULL DEFAULT 0");
 	}
@@ -414,8 +418,8 @@ export class MirStore {
 		this.db
 			.prepare(
 				`INSERT INTO tasks
-				 (id, title, description, instructions, thread_id, work_thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 (id, title, description, instructions, thread_id, work_thread_id, channel_id, reply_to, status, worker_id, fast, result, error, created_at, updated_at, parent_task_id, depth)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET
 					title = excluded.title,
 					description = excluded.description,
@@ -429,7 +433,9 @@ export class MirStore {
 					fast = excluded.fast,
 					result = excluded.result,
 					error = excluded.error,
-					updated_at = excluded.updated_at`,
+					updated_at = excluded.updated_at,
+					parent_task_id = excluded.parent_task_id,
+					depth = excluded.depth`,
 			)
 			.run(
 				task.id,
@@ -447,6 +453,8 @@ export class MirStore {
 				task.error ?? null,
 				task.createdAt,
 				task.updatedAt,
+				task.parentTaskId ?? null,
+				task.depth ?? 0,
 			);
 	}
 
@@ -1074,6 +1082,8 @@ function rowToTask(row: TaskRow): Task {
 		instructions: row.instructions ?? undefined,
 		threadId: row.thread_id ?? undefined,
 		workThreadId: row.work_thread_id ?? undefined,
+		parentTaskId: row.parent_task_id ?? undefined,
+		depth: row.depth ?? 0,
 		channelId: row.channel_id ?? undefined,
 		replyTo: row.reply_to ?? undefined,
 		status: row.status as TaskStatus,

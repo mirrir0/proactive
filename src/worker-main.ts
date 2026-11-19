@@ -22,7 +22,7 @@ import { loadEnv } from "./env.ts";
 import type { OpenRouterRouting } from "./types.ts";
 import type { WorkerSpec } from "./process-manager.ts";
 import { taskMessage } from "./task-message.ts";
-import { WorkerRuntime, createWorkerControlTools } from "./worker.ts";
+import { WorkerRuntime, createAgentTools, createWorkerControlTools } from "./worker.ts";
 import { ControlClient } from "./ipc.ts";
 import { McpManager, type McpConfig } from "./mcp.ts";
 import { createCodemodeTool } from "./codemode.ts";
@@ -146,15 +146,35 @@ async function main(): Promise<void> {
 	// everything the worker can call — the hand tools most of all. Filtering only the
 	// MCP and codemode set meant `MIR_WORKER_TOOL_DENY=exec` removed nothing that
 	// mattered: the tools that touch a disk are the hand's, and they went unfiltered.
-	const offered = [...controlTools(), ...handTools];
+	const client = new ControlClient(spec.socketPath, spec.workerId, spec.taskId);
+	await client.connect();
+
+	// How a Worker reaches other agents: through the daemon, which owns the tree.
+	// Nothing here names a socket or a process — the daemon decides who `parent` is,
+	// and refuses a task this Worker was not given.
+	const clientChannel = {
+		dispatchChild: (requestId: string, title: string, description: string, instructions?: string) =>
+			client.dispatchChild(requestId, title, description, instructions),
+		message: (to: string, text: string) => client.message(to, text),
+		stopTask: (taskId: string) => client.stopTask(taskId),
+	};
+
+	// The tools for talking to other agents: `message` always, and dispatch/stop only
+	// for a Worker that may fan out. Depth stops at one level here — as a tool list,
+	// not an instruction a model could reason its way around — so a check gets
+	// `message` and nothing to dispatch with.
+	const agentTools = createAgentTools(clientChannel, {
+		taskId: spec.taskId,
+		canDispatch: (spec.depth ?? 0) === 0,
+		...(spec.parentTaskId === undefined ? {} : { parentTaskId: spec.parentTaskId }),
+	});
+	const offered = [...agentTools, ...controlTools(), ...handTools];
 	const permitted = filterToolNames(
 		offered.map((tool) => String(tool.name)),
 		spec.toolPolicy ?? {},
 	);
 	const customTools = offered.filter((tool) => permitted.includes(String(tool.name)));
 
-	const client = new ControlClient(spec.socketPath, spec.workerId, spec.taskId);
-	await client.connect();
 	if (capabilities.mcp) {
 		// Publish our catalog so the Router's mcp_query reflects reality.
 		client.mcpCatalog(mcp.getServerReports(), mcp.getToolCatalog());
@@ -281,6 +301,14 @@ async function main(): Promise<void> {
 			event.id,
 		);
 	});
+	// Another agent's words, at this Worker's next turn boundary. A message is a note,
+	// not an instruction to drop what it is doing: the runtime queues it behind the
+	// turn in flight.
+	client.onMessage((from, text) => {
+		armIdle();
+		worker.enqueueFollowUp([`Message from ${from}:`, "", text, "", "Act on it if it changes your task; otherwise report your conclusion as you were going to."].join("\n"));
+	});
+
 	// A stop must land even when the turn is inside a tool: abort the session so
 	// the tool sees it, then exit on a deadline rather than waiting for a turn
 	// that may never finish.

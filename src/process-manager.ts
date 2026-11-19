@@ -47,6 +47,10 @@ export interface WorkerSpec {
 	mcpConfig?: McpConfig;
 	/** Hand this task is pinned to (omitted = the hub picks one). */
 	endpointId?: string;
+	/** The task that asked for this one, when a Worker fanned out. */
+	parentTaskId?: string;
+	/** 0 for the Router's own dispatch, 1 for a Worker's check. */
+	depth?: number;
 	/** Where that hand keeps its files, from its own policy. */
 	handRoot?: string;
 	/** What the hand is called, when it says. */

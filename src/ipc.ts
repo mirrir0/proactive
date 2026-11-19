@@ -172,6 +172,16 @@ export class ControlServer {
 		return this.send(workerId, { type: "event", event });
 	}
 
+	/** The answer to a `dispatch_child`: the child's conclusion, or why it stopped. */
+	sendChildResult(workerId: string, requestId: string, ok: boolean, text: string): boolean {
+		return this.send(workerId, { type: "child_result", requestId, text, ok });
+	}
+
+	/** Another agent's words, delivered at the target's next turn boundary. */
+	sendMessage(workerId: string, from: string, text: string): boolean {
+		return this.send(workerId, { type: "message", from, text });
+	}
+
 	sendStopResult(workerId: string, requestId: string, ok: boolean, error?: string): void {
 		this.send(workerId, { type: "stop_result", requestId, ok, ...(error === undefined ? {} : { error }) });
 	}
@@ -233,6 +243,7 @@ export class ControlClient {
 	private readonly eventHandlers = new Set<(e: ChannelEvent) => void>();
 	private readonly abortHandlers = new Set<(reason?: string) => void>();
 	private readonly systemHandlers = new Set<(msg: SystemMessage) => void>();
+	private readonly messageHandlers = new Set<(from: string, text: string) => void>();
 	/** Child dispatches waiting on the daemon: requestId → resolve. */
 	private readonly childWaits = new Map<string, (result: { text: string; ok: boolean }) => void>();
 	/** Stops waiting on the daemon: requestId → resolve. */
@@ -266,6 +277,7 @@ export class ControlClient {
 				if (msg.type === "event") for (const h of this.eventHandlers) h(msg.event);
 				if (msg.type === "abort") for (const h of this.abortHandlers) h(msg.reason);
 				if (msg.type === "system") for (const h of this.systemHandlers) h(msg);
+				if (msg.type === "message") for (const h of this.messageHandlers) h(msg.from, msg.text);
 				if (msg.type === "child_result") {
 					const resolve = this.childWaits.get(msg.requestId);
 					if (resolve !== undefined) {
@@ -291,6 +303,10 @@ export class ControlClient {
 	onAbort(h: (reason?: string) => void): void {
 		this.abortHandlers.add(h);
 	}
+	onMessage(h: (from: string, text: string) => void): void {
+		this.messageHandlers.add(h);
+	}
+
 	onSystem(h: (msg: SystemMessage) => void): void {
 		this.systemHandlers.add(h);
 	}

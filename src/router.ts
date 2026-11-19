@@ -79,6 +79,8 @@ export interface RouterDependencies {
 	control?: RouterControl;
 	/** Deliver a follow-up event to a worker (fast-path pass-through). */
 	sendEventToWorker?: (workerId: string, event: ChannelEvent) => boolean;
+	/** One agent's words to another, at its next turn boundary. */
+	sendToWorker?: (workerId: string, from: string, text: string) => boolean;
 	/** Called when a persisted worker is found dead at boot, so pm2 can clean it up. */
 	onOrphanedWorker?: (workerId: string, taskId: string) => void;
 	/** Injectable session factory (tests use a scripted session). */
@@ -119,6 +121,14 @@ export interface TaskInput {
 	fast?: boolean;
 	/** Pin the task to one hand; omitted = the hub picks the least-loaded capable one. */
 	endpointId?: string;
+	/**
+	 * The task that asked for this one.
+	 *
+	 * A child's conclusion is the return value of its parent's tool call, so it is
+	 * never pushed to a channel and never gets a card: the parent's card already
+	 * shows the work, and a person does not need a second one for a check.
+	 */
+	parentTaskId?: string;
 }
 
 interface WorkerRecord {
@@ -428,6 +438,8 @@ export class RouterLayer {
 	private readonly tasks = new Map<string, Task>();
 	private readonly workers = new Map<string, WorkerRecord>();
 	private readonly dispatchQueue: Array<{ taskId: string; input: TaskInput }> = [];
+	/** Parents blocked on a check: task id → the answer they are waiting for. */
+	private readonly children = new Map<string, (answer: { ok: boolean; text: string }) => void>();
 	/**
 	 * Workers that have been started and have not said hello yet.
 	 *
@@ -1970,9 +1982,26 @@ export class RouterLayer {
 			updatedAt: now,
 			fast: input.fast ?? false,
 			endpointId: input.endpointId,
+			...(input.parentTaskId === undefined ? {} : { parentTaskId: input.parentTaskId }),
+			depth: input.parentTaskId === undefined ? 0 : (this.tasks.get(input.parentTaskId)?.depth ?? 0) + 1,
 		};
 		this.tasks.set(id, full);
 		this.deps.store.upsertTask(full);
+
+		// A check a Worker asked for. Its parent's card is the acknowledgement and its
+		// answer is a tool result, so nothing here is said to a person: no scratchpad
+		// line, no status entry, no card. A person watching would see a second card for
+		// work they did not ask for.
+		if (input.parentTaskId !== undefined) {
+			metrics.counter("mir_tasks_nested_total");
+			if (atCapacity) {
+				this.dispatchQueue.push({ taskId: id, input });
+				return full;
+			}
+			await this.spawnWorker(full, input);
+			return full;
+		}
+
 		// The list of what is in flight is written by the dispatch, not by the
 		// Router remembering to write it. That is the difference between a list that
 		// can drift and one that cannot.
@@ -1987,8 +2016,6 @@ export class RouterLayer {
 			status: atCapacity ? "waiting" : "running",
 			note: `dispatched: ${input.title}${input.endpointId === undefined ? "" : ` on ${input.endpointId}`}`,
 		});
-		// And the card: a pointer to this task, not a snapshot of it. A client that
-		// reloads renders the last one and asks the app server for the state now.
 		this.recordCard(input.threadId, id);
 		this.deps.context.spill({
 			id: `task:${id}`,
@@ -2014,6 +2041,102 @@ export class RouterLayer {
 
 		await this.spawnWorker(full, input);
 		return full;
+	}
+
+	/**
+	 * Ask for a task of its own: a Worker's check.
+	 *
+	 * The Worker blocks on the answer — the conclusion is this call's result — and the
+	 * child runs on the same hand, so a check inside a space reads the same folder its
+	 * parent does. Depth stops at one level: the child's tool list has no dispatch.
+	 */
+	async dispatchChildTask(
+		parentTaskId: string,
+		input: { title: string; description: string; instructions?: string },
+	): Promise<{ ok: boolean; text: string }> {
+		const parent = this.tasks.get(parentTaskId);
+		if (parent === undefined) return { ok: false, text: `no such task: ${parentTaskId}` };
+		if ((parent.depth ?? 0) >= 1) {
+			return { ok: false, text: "a check cannot dispatch a check: one level is the depth" };
+		}
+		if (this.children.size >= this.config.maxNestedWorkers) {
+			return { ok: false, text: `too many checks running (${this.config.maxNestedWorkers}); wait for one to finish` };
+		}
+		const id = `task-${crypto.randomUUID()}`;
+		const answer = new Promise<{ ok: boolean; text: string }>((resolve) => {
+			this.children.set(id, resolve);
+		});
+		try {
+			await this.dispatchTask({
+				id,
+				title: input.title,
+				description: input.description,
+				...(input.instructions === undefined ? {} : { instructions: input.instructions }),
+				// Same hand as the parent: a check inside a space must read that space.
+				...(parent.endpointId === undefined ? {} : { endpointId: parent.endpointId }),
+				parentTaskId,
+			});
+		} catch (err) {
+			this.children.delete(id);
+			return { ok: false, text: `could not start the check: ${(err as Error).message}` };
+		}
+		return answer;
+	}
+
+	/** The task a worker is running, when it is still known. */
+	taskForWorker(workerId: string): Task | undefined {
+		const rec = this.workers.get(workerId);
+		return rec === undefined ? undefined : this.tasks.get(rec.taskId);
+	}
+
+	/**
+	 * Pass one agent's words to another.
+	 *
+	 * `to` is `"parent"` or a task id. The daemon decides who that is, because only it
+	 * knows the whole tree: a Worker cannot address a task it was not given, and a
+	 * message that names an unrelated task is refused rather than delivered.
+	 */
+	routeMessage(fromWorkerId: string, to: string, text: string): { ok: boolean; error?: string } {
+		const from = this.taskForWorker(fromWorkerId);
+		if (from === undefined) return { ok: false, error: "this worker has no task" };
+		let target: Task | undefined;
+		if (to === "parent") {
+			target = from.parentTaskId === undefined ? undefined : this.tasks.get(from.parentTaskId);
+			if (target === undefined) return { ok: false, error: "this task has no parent" };
+		} else {
+			target = this.tasks.get(to);
+			// Only a child of this Worker, or its own parent: an agent may talk along the
+			// edge it was given, not to arbitrary tasks in the brain.
+			const related = target !== undefined && (target.parentTaskId === from.id || from.parentTaskId === target.id);
+			if (target === undefined || !related) return { ok: false, error: `no related task ${to}` };
+		}
+		if (target.workerId === undefined) return { ok: false, error: `${to} has no worker yet` };
+		const delivered = this.deps.sendToWorker?.(target.workerId, from.title, text) ?? false;
+		if (!delivered) return { ok: false, error: `${to} is not connected` };
+		metrics.counter("mir_agent_messages_total");
+		return { ok: true };
+	}
+
+	/** Stop a check this Worker dispatched, and nothing else. */
+	async stopChild(workerId: string, taskId: string): Promise<{ ok: boolean; error?: string }> {
+		const from = this.taskForWorker(workerId);
+		const target = this.tasks.get(taskId);
+		if (from === undefined || target === undefined) return { ok: false, error: "no such task" };
+		if (target.parentTaskId !== from.id) return { ok: false, error: "that task is not yours to stop" };
+		try {
+			await this.stopTask(taskId, "stopped by the Worker that asked for it");
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: (err as Error).message };
+		}
+	}
+
+	/** Resolve a waiting parent. Idempotent: a task can only be settled once. */
+	private settleChild(taskId: string, answer: { ok: boolean; text: string }): void {
+		const resolve = this.children.get(taskId);
+		if (resolve === undefined) return;
+		this.children.delete(taskId);
+		resolve(answer);
 	}
 
 	/** Spawn a Worker process for an already-registered task. */
@@ -2069,6 +2192,8 @@ export class RouterLayer {
 				mcpConfigPath: this.config.mcpConfigPath,
 				...(this.deps.mcpServers === undefined ? {} : { mcpConfig: this.deps.mcpServers.current() }),
 				endpointId: task.endpointId,
+				...(task.parentTaskId === undefined ? {} : { parentTaskId: task.parentTaskId }),
+				depth: task.depth ?? 0,
 				...(this.handRootFor(task.endpointId) === undefined
 					? {}
 					: {
@@ -2266,6 +2391,18 @@ export class RouterLayer {
 		this.persistWorker(workerId);
 
 		const task = this.tasks.get(rec.taskId);
+		// A check's conclusion is the return value of the tool call that asked for it.
+		// It is not pushed to a channel and does not start a Router turn: the Worker
+		// that asked is blocked on the answer, and gets it as a tool result.
+		if (task?.parentTaskId !== undefined) {
+			task.status = "done";
+			task.result = text;
+			task.updatedAt = Date.now();
+			this.deps.store.upsertTask(task);
+			metrics.counter("mir_tasks_completed_total", 1, { status: "done", nested: "true" });
+			this.settleChild(task.id, { ok: true, text: redactSecrets(text) });
+			return;
+		}
 		// A conclusion that lands in a *chat* is the answer, and it is delivered
 		// there directly; a thread with no chat is work being done for someone who
 		// will be told through a channel, and it keeps its own "done" marker.

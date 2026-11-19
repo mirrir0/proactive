@@ -116,6 +116,10 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		api: {
 			socketPath: env.MIR_API_SOCKET ? expandHome(env.MIR_API_SOCKET) : "",
 			token: env.MIR_API_TOKEN ?? "",
+			// One daemon can serve several members: a host signs a token per member
+			// with a secret both sides hold, and the token names who it is for.
+			...(env.MIR_API_SECRET === undefined ? {} : { secret: env.MIR_API_SECRET }),
+			...(env.MIR_API_MEMBER === undefined ? {} : { member: env.MIR_API_MEMBER }),
 		},
 		// A client that renders views fetches them here; the same token as the
 		// client API, because it is the same brain answering.

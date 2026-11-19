@@ -206,7 +206,18 @@ export interface SuperAgentConfig {
 	/** Local Unix socket for the daemon↔worker control channel. */
 	socketPath: string;
 	/** The client API a display connects to. Off by default. */
-	api: BrainApiConfig;
+	api: BrainApiConfig & {
+		/**
+		 * The secret a signed member token is verified with.
+		 *
+		 * One daemon, several members: a token names its member and is signed with a
+		 * secret both sides already hold. Empty means a single-member install, where
+		 * `token` is the only way in.
+		 */
+		secret?: string;
+		/** The member the static token belongs to. */
+		member?: string;
+	};
 	/** Where this install keeps its files (paths.ts). The instance record lives here. */
 	paths: MirPaths;
 	/**

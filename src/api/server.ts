@@ -33,6 +33,7 @@ import {
 } from "./protocol.ts";
 import type { ThreadEntry, ThreadStatus } from "../threadlog.ts";
 import { FrameDecoder, encodeFrame, hashToken, tokensEqual } from "../hands/protocol.ts";
+import { DEFAULT_MEMBER, verifyMemberToken } from "./tokens.ts";
 import type { Logger } from "../telemetry.ts";
 
 export interface BrainServerOptions {
@@ -40,6 +41,16 @@ export interface BrainServerOptions {
 	socketPath: string;
 	/** Shared bearer token. Without one the server refuses to start. */
 	token: string;
+	/**
+	 * The secret signed member tokens are verified with.
+	 *
+	 * Set when one daemon serves several members: a token then names its member, and
+	 * the static `token` is what a single-member install presents. Absent, this is a
+	 * one-member daemon and only `token` is accepted.
+	 */
+	secret?: string;
+	/** The member the static token belongs to. Defaults to `local`. */
+	member?: string;
 	host: BrainHost;
 	log: Logger;
 }
@@ -54,6 +65,23 @@ export class BrainServer {
 	/** threadId → the connections watching it, so an entry reaches each once. */
 	private readonly watchers = new Map<string, Set<net.Socket>>();
 	private readonly subscribers = new Map<net.Socket, Subscriber>();
+
+	/**
+	 * The member a token names, or undefined.
+	 *
+	 * Two ways in, and they are different things: a signed token says *which* member,
+	 * and the static token says "the one this install has". The static one is not a
+	 * fallback for a failed signature — that would make the secret optional for an
+	 * attacker.
+	 */
+	private memberFor(token: string): string | undefined {
+		if (this.options.secret !== undefined && this.options.secret !== "") {
+			const member = verifyMemberToken(this.options.secret, token);
+			if (member !== undefined) return member;
+		}
+		if (tokensEqual(hashToken(token), this.tokenHash)) return this.options.member ?? DEFAULT_MEMBER;
+		return undefined;
+	}
 	private readonly tokenHash: string;
 	private readonly options: BrainServerOptions;
 
@@ -156,13 +184,17 @@ export class BrainServer {
 					refuse("version", `this brain speaks api v${String(BRAIN_API_VERSION)}; the client speaks v${String(message.v)}`);
 					return;
 				}
-				if (!tokensEqual(hashToken(message.token), this.tokenHash)) {
+				// Who this is. A signed token names its member; the static token means
+				// the one member this install serves. A bad signature is refused — never
+				// downgraded to the static token.
+				const member = this.memberFor(message.token);
+				if (member === undefined) {
 					refuse("auth", "invalid token");
 					return;
 				}
 				greeted = true;
 				this.subscribers.set(socket, { threads: new Set() });
-				this.options.log.info("brain client connected", { agent: message.agent });
+				this.options.log.info("brain client connected", { agent: message.agent, member });
 				send({
 					type: "ready",
 					v: BRAIN_API_VERSION,

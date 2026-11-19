@@ -311,6 +311,8 @@ export class SuperAgent {
 			this.apiServer = new BrainServer({
 				socketPath: this.config.api.socketPath,
 				token: this.config.api.token,
+				...(this.config.api.secret === undefined ? {} : { secret: this.config.api.secret }),
+				...(this.config.api.member === undefined ? {} : { member: this.config.api.member }),
 				host: this.brainHost(),
 				log,
 			});

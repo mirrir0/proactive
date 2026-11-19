@@ -109,10 +109,11 @@ export class HandExecutor {
 	/** Run one unit of work. Never throws; policy violations become results. */
 	async run(op: HandOp, input: unknown, ctx: ExecutorRunContext = {}): Promise<HandResult> {
 		const started = Date.now();
-		if (this.running >= this.options.policy.maxConcurrent) {
+		const cap = this.options.policy.maxConcurrent ?? 0;
+		if (cap > 0 && this.running >= cap) {
 			return {
 				ok: false,
-				error: `hand is at capacity (${this.options.policy.maxConcurrent} concurrent)`,
+				error: `hand is at capacity (${String(cap)} concurrent)`,
 				durationMs: 0,
 			};
 		}

@@ -82,7 +82,14 @@ export interface HandPolicy {
 	deny: string[];
 	maxOutputBytes: number;
 	maxFileBytes: number;
-	maxConcurrent: number;
+	/**
+	 * How many calls this hand runs at once. Omitted or 0 means no limit.
+	 *
+	 * A hand is a machine, and the machine is the limit: a cap of two turned a batch of
+	 * three independent reads into "hand is at capacity" — a refusal invented by the
+	 * brain for a machine that was not busy.
+	 */
+	maxConcurrent?: number;
 	defaultTimeoutMs: number;
 	maxTimeoutMs: number;
 	/** Env var names passed through to child processes (plus a safe base set). */
@@ -132,7 +139,7 @@ export const DEFAULT_HAND_POLICY: HandPolicy = {
 	deny: [],
 	maxOutputBytes: 256 * 1024,
 	maxFileBytes: 1024 * 1024,
-	maxConcurrent: 2,
+	maxConcurrent: 0,
 	defaultTimeoutMs: 120_000,
 	maxTimeoutMs: 15 * 60_000,
 	envAllow: [],

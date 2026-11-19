@@ -259,7 +259,7 @@ export function renderSection(options: PageOptions): string {
 							.map(
 								(hand) => `<div class="box">
 					<div class="box head"><span class="title">${escapeHtml(hand.name || hand.endpointId)}</span>${pill(hand.connected ? "running" : "stopped")}</div>
-					<div class="meta"><span class="mono">${escapeHtml(hand.endpointId)}</span><span>exec ${hand.capabilities.exec ? "yes" : "no"}</span><span>fs ${escapeHtml(String(hand.capabilities.fs))}</span><span>running ${hand.running}/${hand.policy.maxConcurrent}</span></div>
+					<div class="meta"><span class="mono">${escapeHtml(hand.endpointId)}</span><span>exec ${hand.capabilities.exec ? "yes" : "no"}</span><span>fs ${escapeHtml(String(hand.capabilities.fs))}</span><span>running ${String(hand.running)}${hand.policy.maxConcurrent === undefined || hand.policy.maxConcurrent <= 0 ? "" : `/${String(hand.policy.maxConcurrent)}`}</span></div>
 					<div class="mono">${hand.policy.roots.map((root) => escapeHtml(root)).join("<br>")}</div>
 				</div>`,
 							)

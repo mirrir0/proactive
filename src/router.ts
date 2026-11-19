@@ -1502,7 +1502,7 @@ export class RouterLayer {
 					? hands
 							.map(
 								(h) =>
-									`${h.endpointId} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}/${h.policy.maxConcurrent}\n  roots: ${h.policy.roots.join(", ") || "(none)"}`,
+									`${h.endpointId} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}${h.policy.maxConcurrent !== undefined && h.policy.maxConcurrent > 0 ? `/${String(h.policy.maxConcurrent)}` : ""}\n  roots: ${h.policy.roots.join(", ") || "(none)"}`,
 							)
 							.join("\n")
 					: "no hands are connected";

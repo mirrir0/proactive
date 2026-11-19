@@ -95,7 +95,7 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 		denyWritePaths: merged.denyWritePaths ?? [],
 		maxOutputBytes: Math.max(1024, merged.maxOutputBytes),
 		maxFileBytes: Math.max(1024, merged.maxFileBytes),
-		maxConcurrent: Math.max(1, merged.maxConcurrent),
+		maxConcurrent: Math.max(0, merged.maxConcurrent ?? 0),
 		defaultTimeoutMs: Math.max(1000, merged.defaultTimeoutMs),
 		maxTimeoutMs: Math.max(merged.defaultTimeoutMs, merged.maxTimeoutMs),
 	};
@@ -343,7 +343,7 @@ export function describePolicy(policy: HandPolicy): string {
 	return [
 		`roots=${policy.roots.join(",") || "(none)"}`,
 		`exec=${policy.allow.join(",") || "(none)"}`,
-		`concurrency=${policy.maxConcurrent}`,
+		`concurrency=${policy.maxConcurrent === undefined || policy.maxConcurrent <= 0 ? "unlimited" : String(policy.maxConcurrent)}`,
 		`timeout=${policy.defaultTimeoutMs}ms/${policy.maxTimeoutMs}ms`,
 		`output=${policy.maxOutputBytes}B`,
 	].join(" ");

@@ -254,7 +254,11 @@ export class HandsHub {
 		const candidates = [...this.endpoints.values()]
 			.filter((connection) => connection.connected)
 			.filter((connection) => handSupports(connection.capabilities, op).ok)
-			.filter((connection) => connection.running < connection.policy.maxConcurrent)
+			// A hand with no cap is always available: the machine decides, not the brain.
+			.filter((connection) => {
+				const cap = connection.policy.maxConcurrent ?? 0;
+				return cap <= 0 || connection.running < cap;
+			})
 			// Least loaded first, then most recently seen; local hands win ties so a
 			// task does not leave the machine for no reason.
 			.sort(

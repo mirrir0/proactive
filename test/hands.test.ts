@@ -726,3 +726,35 @@ test("the default deny list covers keys and the brain's own state", () => {
 		assert.ok(denied.includes(path), `${path} is denied by default`);
 	}
 });
+
+test("a hand with no cap runs as many calls as the machine can, and a cap still bites", async () => {
+	const dir = await tmpDir("mir-no-cap-");
+	const unlimited = new HandExecutor({
+		policy: normalizePolicy({ roots: [dir], sandbox: "none", allow: ["echo"] }),
+		capabilities: { exec: true, shell: false, fs: "rw", git: true },
+		secrets: new SecretRegistry(),
+		log: silentLog,
+	});
+	// Three at once: a cap of two would refuse the third, and the machine was not busy.
+	const results = await Promise.all([
+		unlimited.run("exec", { argv: ["echo", "one"] }),
+		unlimited.run("exec", { argv: ["echo", "two"] }),
+		unlimited.run("exec", { argv: ["echo", "three"] }),
+	]);
+	assert.deepEqual(results.map((r) => r.ok), [true, true, true]);
+
+	const capped = new HandExecutor({
+		policy: normalizePolicy({ roots: [dir], sandbox: "none", allow: ["echo"], maxConcurrent: 1 }),
+		capabilities: { exec: true, shell: false, fs: "rw", git: true },
+		secrets: new SecretRegistry(),
+		log: silentLog,
+	});
+	const [first, second] = await Promise.all([
+		capped.run("exec", { argv: ["echo", "a"] }),
+		capped.run("exec", { argv: ["echo", "b"] }),
+	]);
+	assert.equal(first.ok, true);
+	assert.equal(second.ok, false, "a cap that is set is still a cap");
+	assert.match(second.error ?? "", /at capacity/);
+	await rmDir(dir);
+});

@@ -433,7 +433,9 @@ export function parseEndpointArgs(argv: string[], env: NodeJS.ProcessEnv = proce
 		roots: resolvedRoots,
 		allow,
 		deny,
-		maxConcurrent: num(flag(argv, "max-concurrent") ?? env.MIR_HANDS_MAX_CONCURRENT, DEFAULT_HAND_POLICY.maxConcurrent),
+		// 0 is "no limit": the machine is the limit, and a brain-invented cap turned three
+		// independent reads into "hand is at capacity".
+		maxConcurrent: num(flag(argv, "max-concurrent") ?? env.MIR_HANDS_MAX_CONCURRENT, DEFAULT_HAND_POLICY.maxConcurrent ?? 0),
 		defaultTimeoutMs: num(flag(argv, "timeout") ?? env.MIR_HANDS_TIMEOUT_MS, DEFAULT_HAND_POLICY.defaultTimeoutMs),
 		maxTimeoutMs: num(flag(argv, "max-timeout") ?? env.MIR_HANDS_MAX_TIMEOUT_MS, DEFAULT_HAND_POLICY.maxTimeoutMs),
 		maxOutputBytes: num(flag(argv, "max-output") ?? env.MIR_HANDS_MAX_OUTPUT, DEFAULT_HAND_POLICY.maxOutputBytes),

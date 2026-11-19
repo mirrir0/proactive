@@ -61,7 +61,7 @@ export interface DashboardState {
 		connected: boolean;
 		running: number;
 		capabilities: Record<string, unknown>;
-		policy: { maxConcurrent: number; roots: string[] };
+		policy: { maxConcurrent?: number; roots: string[] };
 	}>;
 	readonly metrics: { counters: Record<string, number>; gauges: Record<string, number> };
 	/** Samples this server took, oldest first — what the line and area charts read. */

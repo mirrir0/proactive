@@ -247,6 +247,48 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
 
+/** How many entries to read when rebuilding a chat's conversation for a turn. */
+const CONVERSATION_SCAN = 400;
+
+/** How many of those lines to show: the tail is the part a turn answers from. */
+const CONVERSATION_LINES = 40;
+
+/** How much of one line to keep, so a pasted wall of text cannot fill the turn. */
+const CONVERSATION_LINE_CHARS = 600;
+
+/**
+ * One line of a conversation, as a turn reads it.
+ *
+ * Not a transcript: the entries that *are* the conversation (what the person said,
+ * what the assistant said, a dispatch, a stop, a rename) become a line each, and
+ * the machinery — tool calls, tool results, hand calls, status — becomes nothing.
+ * A turn does not need to know that a tool ran; it needs to know what was said,
+ * because the model's context is not this chat's (one session serves them all).
+ */
+function conversationLine(entry: ThreadEntry): string | undefined {
+	switch (entry.kind) {
+		case "text": {
+			const said = entry.text.replace(/\s+/g, " ").trim();
+			if (said === "") return undefined;
+			const clipped = said.length > CONVERSATION_LINE_CHARS ? `${said.slice(0, CONVERSATION_LINE_CHARS)}…` : said;
+			return entry.role === "user" ? `them: ${clipped}` : `you said: ${clipped}`;
+		}
+		case "status": {
+			const note = entry.note ?? "";
+			if (!note.startsWith("dispatched: ")) return undefined;
+			return `· dispatched ${note.slice("dispatched: ".length)}`;
+		}
+		case "stop":
+			return `· the person stopped it${entry.note === undefined ? "" : `: ${entry.note}`}`;
+		case "title":
+			return `· the chat was named "${entry.title}"`;
+		// A hand call is how the answer was found, like a tool call: the person
+		// never saw it, and the conclusion already says whether it worked.
+		default:
+			return undefined;
+	}
+}
+
 /**
  * The channels a person types into. Their words are conversation, so they belong
  * in the thread's log; a tool's or the watchdog's trigger is machinery, and the
@@ -1001,9 +1043,51 @@ export class RouterLayer {
 			}
 		}
 
+		lines.push(this.conversationBlock(batch));
 		lines.push(this.stateBlock());
 		lines.push(this.instructionsBlock());
 		return lines.join("\n");
+	}
+
+	/**
+	 * The conversation this turn is in, oldest first.
+	 *
+	 * The Router's model session is not this chat's: one session answers every
+	 * conversation, so its own history is a pile of them in arrival order. What
+	 * makes a turn answer *this* chat is the log — the last lines of it, handed
+	 * over as text, ending where the batch begins so the person's own message is
+	 * not said twice.
+	 */
+	private conversationBlock(batch: InboxItem[]): string {
+		const threadId = this.originOf(batch)?.threadId;
+		const threadLog = this.deps.threadLog;
+		if (threadLog === undefined || threadId === undefined || threadId === "") return "";
+		const entries = threadLog.entries(threadId, 0, CONVERSATION_SCAN);
+		// This turn's own message was written at admission and is repeated in the
+		// Inbound block, so the history ends where the batch begins: the earliest
+		// entry this batch brought is the last line not shown.
+		const incoming = new Set(
+			batch.flatMap((item) => (item.kind === "trigger" ? [item.trigger.text.trim()] : [])),
+		);
+		let cut = entries.length;
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			const entry = entries[index]!;
+			if (entry.kind === "text" && entry.role === "user" && incoming.has(entry.text.trim())) cut = index;
+		}
+		const lines: string[] = [];
+		for (const entry of entries.slice(0, cut)) {
+			const line = conversationLine(entry);
+			if (line !== undefined) lines.push(line);
+		}
+		if (lines.length === 0) return "";
+		const kept = lines.slice(-CONVERSATION_LINES);
+		return [
+			"=== This conversation, oldest first ===",
+			"Everything below already happened in this chat. It is the record, not a summary: answer from it before dispatching anything.",
+			...(lines.length > kept.length ? [`(… ${lines.length - kept.length} earlier line(s) not shown)`] : []),
+			...kept,
+			"",
+		].join("\n");
 	}
 
 	private stateBlock(): string {
@@ -1301,15 +1385,23 @@ export class RouterLayer {
 		rec.progress = "conclusion reported";
 		this.persistWorker(workerId);
 
+		const task = this.tasks.get(rec.taskId);
+		// A conclusion that lands in a *chat* is the answer, and it is delivered
+		// there directly; a thread with no chat is work being done for someone who
+		// will be told through a channel, and it keeps its own "done" marker.
+		const reportThread = task?.threadId;
+		const reportIsChat =
+			reportThread !== undefined && reportThread !== "" && this.deps.threadLog?.chatOf(reportThread) !== undefined;
+
 		// The work thread's own record: what the worker said, then that it ended.
 		// A client watching the thread sees the answer without waiting for the
 		// Router to pass it on to a channel.
 		for (const threadId of rec.threadIds) {
+			if (reportIsChat && threadId === reportThread) continue;
 			this.record(threadId, { kind: "text", role: "assistant", text });
 			this.record(threadId, { kind: "status", status: "done", note: `worker ${workerId} finished` });
 		}
 
-		const task = this.tasks.get(rec.taskId);
 		if (task) {
 			task.status = "done";
 			task.result = text;
@@ -1324,6 +1416,33 @@ export class RouterLayer {
 				ref: `mir://task/${task.id}`,
 				inlineIds: [`worker:${workerId}`],
 			});
+		}
+
+		// The conclusion is the answer, so it goes to the conversation now — not when
+		// a model next gets a turn. A turn on a slow provider is a minute or more, and
+		// a model asked to relay an answer it was handed says it twice: once in the
+		// worker's words and once in its own.
+		if (reportIsChat && reportThread !== undefined) {
+			this.record(reportThread, { kind: "text", role: "assistant", text });
+			// And the turn that the dispatch opened is over: without this the chat
+			// keeps its thinking loader up, because nothing else closes a turn no
+			// model run opened.
+			this.record(reportThread, { kind: "status", status: "idle", note: "the worker finished" });
+			const channel = this.deps.channels.find((candidate) => candidate.id === task?.channelId);
+			if (channel !== undefined && task?.replyTo !== undefined) {
+				// A person reading a channel (a terminal, an HTTP reply) never sees the
+				// thread, so the answer is said there too. Best-effort, like every send.
+				void channel
+					.respond(redactSecrets(text), { eventId: task.replyTo, threadId: reportThread })
+					.catch((err: unknown) =>
+						log.warn("could not deliver a conclusion to its channel", {
+							channel: task.channelId,
+							error: (err as Error).message,
+						}),
+					);
+			}
+			metrics.counter("mir_conclusions_delivered_direct_total");
+			return;
 		}
 
 		this.push({

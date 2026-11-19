@@ -791,3 +791,87 @@ test("the invariants go to the system prompt, and the skills go with them", asyn
 		await h.cleanup();
 	}
 });
+
+test("a conclusion in a chat is the answer: no model turn, and the chat says it is done", async () => {
+	// What this prevents: the Router's model being handed a finished answer and
+	// asked to say it again — a minute on a slow provider, and the person reads it
+	// twice, once in the worker's words and once in the model's.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "relayed" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-1", "The report");
+		const task = await h.router.dispatchTask({ title: "write the report", description: "write it", threadId, channelId: "terminal", replyTo: "evt-1" });
+		const turnsBefore = h.sessions[0]?.prompts.length ?? 0;
+
+		h.router.handleWorkerConclusion(task.workerId!, "The report is at /tmp/report.md, 12 pages.");
+
+		const entries = h.threadLog!.entries(threadId);
+		const texts = entries.filter((entry) => entry.kind === "text" && entry.role === "assistant");
+		assert.equal(texts.length, 1, "the worker's words are the answer, once");
+		assert.match((texts[0] as { text: string }).text, /The report is at \/tmp\/report\.md/);
+		const last = entries.at(-1);
+		assert.equal(last?.kind, "status");
+		assert.equal((last as { status: string }).status, "idle", "the turn is over, so the chat is idle");
+		assert.equal(h.threadLog!.status(threadId), "idle");
+
+		// No Router turn was started, and nothing was queued for one.
+		assert.equal(h.sessions[0]?.prompts.length ?? 0, turnsBefore, "no model turn for a delivered conclusion");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a conclusion in a work thread still goes to the Router, and says the thread is done", async () => {
+	// The other half: a thread with no chat is work done for someone who will be
+	// told through a channel. It keeps its own marker, and the Router still relays.
+	const h = await makeRouter({ threadLog: true, script: () => [] });
+	try {
+		const task = await h.router.dispatchTask({ title: "check the build", description: "check it", threadId: "work-9" });
+		h.router.handleWorkerConclusion(task.workerId!, "the build passes");
+		const entries = h.threadLog!.entries("work-9");
+		assert.deepEqual(
+			entries.slice(1).map((entry) => (entry.kind === "text" ? entry.text : entry.kind)),
+			["the build passes", "status"],
+		);
+		assert.equal(h.threadLog!.status("work-9"), "done", "a work thread ends done, not idle");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a turn reads the conversation it is in, ending where its own message begins", async () => {
+	// One session serves every chat, so the session's history is not this chat's.
+	// The log is: the last lines of it, machinery left out, and the person's new
+	// message said once rather than twice.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "respond_terminal", args: { text: "noted" } }],
+	});
+	try {
+		const threadId = h.threadLog!.chatThread("chat-2", "Deploys");
+		h.threadLog!.append(threadId, { kind: "text", role: "user", text: "the deploy failed" });
+		h.threadLog!.append(threadId, { kind: "text", role: "assistant", text: "which branch?" });
+		h.threadLog!.append(threadId, { kind: "tool_call", toolCallId: "c1", toolName: "dispatch_task" });
+		h.threadLog!.append(threadId, { kind: "tool_result", toolCallId: "c1", isError: false });
+		h.threadLog!.append(threadId, { kind: "status", status: "idle", note: "turn finished" });
+
+		h.router.submitTrigger(makeTrigger({ threadId, text: "main" }));
+		await waitFor(() => (h.sessions[0]?.prompts.length ?? 0) > 0, 3000, "a turn");
+		const prompt = h.sessions[0]!.prompts[0] ?? "";
+
+		// The block, on its own: the rest of the prompt mentions tools by design.
+		const start = prompt.indexOf("=== This conversation, oldest first ===");
+		assert.ok(start >= 0, "the conversation block is in the prompt");
+		const conversation = prompt.slice(start, prompt.indexOf("=== State ===", start));
+		assert.match(conversation, /them: the deploy failed/);
+		assert.match(conversation, /you said: which branch\?/);
+		assert.doesNotMatch(conversation, /dispatch_task/, "tool calls are machinery, not conversation");
+		assert.doesNotMatch(conversation, /turn finished/, "statuses are not conversation either");
+		// The new message appears once: in the Inbound block, not again as history.
+		assert.equal(prompt.split("main").length - 1, 1, "the person's message is said once");
+	} finally {
+		await h.cleanup();
+	}
+});

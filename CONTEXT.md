@@ -40,6 +40,23 @@ unowned event deserves the Router's attention. Its policies are natural language
 and can be enabled/disabled without code. It is skipped for Threads that already
 have a subscriber: those are known-interesting.
 
+## The turn prompt
+
+A turn's message is the inbound events, then **this conversation** — the last 40
+lines of the chat's thread, oldest first, ending where the batch begins so the
+person's own message is not said twice — then the state block, then the
+instructions. The conversation is there because the model's session is not this
+chat's: the log is what makes a turn answer *this* conversation. What goes in it
+is conversation only: what the person said, what the assistant said, a dispatch, a
+stop, a rename. Tool calls, tool results, hand calls and statuses are machinery
+and are left out — the answer already says whether the work worked.
+
+A **conclusion** that lands in a chat is delivered there directly: recorded, the
+turn closed (`idle`), and said through the channel. No model turn follows, because
+the worker's words *are* the answer and a model asked to relay them says it twice.
+A conclusion in a work thread (no chat) keeps its `done` marker and still goes to
+the Router, which tells whatever channel asked.
+
 ## Router scheduling
 
 **Inbox** — the Router's single serialized queue. Triggers, worker conclusions,

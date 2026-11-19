@@ -1126,7 +1126,7 @@ test("a Worker's narration goes to its own thread, not the person's chat", async
 	}
 });
 
-test("a dispatch shows the card, not the tool call beside it", async () => {
+test("a dispatch shows both the call and the card", async () => {
 	// A chat is read by a person: the card says what started, in their words, with its
 	// state and its answer. The raw `dispatch_task` call — a tool block with `{}`
 	// arguments next to it — is the same fact in machine words, said twice.
@@ -1144,13 +1144,13 @@ test("a dispatch shows the card, not the tool call beside it", async () => {
 
 		const entries = h.threadLog!.entries(chat);
 		assert.ok(entries.some((entry) => entry.kind === "app"), "the card is there");
+		// The call is the way in: a client that can render MCP Apps reaches the view
+		// through it, and a client that cannot still shows what was dispatched.
+		const call = entries.find((entry) => entry.kind === "tool_call" && entry.toolName === "dispatch_task");
+		assert.ok(call !== undefined, "and so is the dispatch's own call");
 		assert.ok(
-			!entries.some((entry) => entry.kind === "tool_call" && entry.toolName === "dispatch_task"),
-			"and the dispatch's tool call is not drawn beside it",
-		);
-		assert.ok(
-			!entries.some((entry) => entry.kind === "tool_result"),
-			"nor its result",
+			entries.some((entry) => entry.kind === "tool_result"),
+			"with the result that names the task",
 		);
 	} finally {
 		await h.cleanup();

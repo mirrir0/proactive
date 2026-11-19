@@ -292,7 +292,7 @@ const CONVERSATION_MIN_LINES = 20;
  * A dispatch is the card; a stop is the stop line. Their raw tool call is the same
  * fact in machine words, and a chat is read by a person.
  */
-const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["dispatch_task", "stop_task"]);
+const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["stop_task"]);
 
 /** How many log entries `read_log` will look through. */
 const READ_LOG_SCAN = 800;

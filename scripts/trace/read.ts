@@ -46,6 +46,8 @@ export interface TaskRow {
 	readonly instructions: string | undefined;
 	readonly threadId: string | undefined;
 	readonly reportThreadId: string | undefined;
+	/** Where the task's own work is written (mir's split of work from conversation). */
+	readonly workThreadId: string | undefined;
 	readonly parentTaskId: string | undefined;
 	readonly depth: number;
 	readonly status: string;
@@ -130,7 +132,11 @@ function toTask(row: Record<string, unknown>): TaskRow {
 		description: String(row.description ?? ""),
 		instructions: asString(row.instructions) ?? undefined,
 		threadId: asString(row.thread_id) ?? undefined,
-		reportThreadId: asString(row.report_thread_id) ?? undefined,
+		// mir's task carries the thread it reports into (`thread_id`) and the thread
+		// its own work is written to (`work_thread_id`); the fork called the first one
+		// `report_thread_id` and had no second.
+		reportThreadId: asString(row.report_thread_id ?? row.thread_id) ?? undefined,
+		workThreadId: asString(row.work_thread_id ?? undefined) ?? undefined,
 		parentTaskId: asString(row.parent_task_id) ?? undefined,
 		depth: asNumber(row.depth) ?? 0,
 		status: String(row.status ?? ""),
@@ -191,7 +197,7 @@ export function openState(path: string): StateReader {
 		tasks() {
 			return db
 				.prepare(
-					"SELECT id, title, description, instructions, thread_id, report_thread_id, parent_task_id, depth, status, result, error, created_at, updated_at, fast FROM tasks",
+					"SELECT * FROM tasks",
 				)
 				.all()
 				.map((row) => toTask(row as Record<string, unknown>));

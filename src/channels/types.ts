@@ -53,12 +53,21 @@ export interface ReplyContext {
  * exact per turn, otherwise the "did the model answer?" fallback fires on
  * stale state and double-posts.
  */
+/**
+ * Where a turn's replies are counted — and refused.
+ *
+ * A turn has one reply. A model that keeps calling the response tool is a model
+ * talking to itself: it has already said the thing, and each further call is another
+ * bubble in a person's chat. The recorder is the only place every delivery passes
+ * through, so it is where the rule is kept.
+ */
 export interface ReplyRecorder {
-	record(channelId: string, text: string, ctx: ReplyContext): void;
+	/** Undefined when it was delivered; a reason when it was refused. */
+	record(channelId: string, text: string, ctx: ReplyContext): { ok: true } | { ok: false; reason: string };
 }
 
 /** A no-op recorder for callers that do not track deliveries. */
-export const NOOP_RECORDER: ReplyRecorder = { record: () => {} };
+export const NOOP_RECORDER: ReplyRecorder = { record: () => ({ ok: true }) };
 
 export interface Channel {
 	/** Stable id used in prompts and tool names: `respond_<id>`. */

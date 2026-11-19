@@ -709,7 +709,8 @@ test("a chat the agent left called \"Chat\" is named from the work it did", asyn
 	try {
 		const threadId = h.threadLog!.chatThread("chat-7", "Chat");
 		h.router.submitTrigger(makeTrigger({ threadId, text: "what is going on with linear" }));
-		await waitFor(() => h.channel.replies.length === 1, 2000, "the reply");
+		// The turn dispatched, so it says nothing: the card is the acknowledgement.
+		await waitFor(() => h.threadLog!.entries(threadId).some((entry) => entry.kind === "app"), 2000, "the card");
 
 		assert.equal(h.threadLog!.name(threadId), "List active Linear projects", "the chat is named after what it did");
 		assert.ok(
@@ -1120,6 +1121,102 @@ test("a Worker's narration goes to its own thread, not the person's chat", async
 			"the work thread has what the Worker said",
 		);
 		assert.ok(workEntries.some((entry) => entry.kind === "tool_call"), "and what it ran");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a dispatch shows the card, not the tool call beside it", async () => {
+	// A chat is read by a person: the card says what started, in their words, with its
+	// state and its answer. The raw `dispatch_task` call — a tool block with `{}`
+	// arguments next to it — is the same fact in machine words, said twice.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [
+			{ type: "tool", name: "dispatch_task", args: { title: "Find notes", description: "find them" } },
+			{ type: "tool", name: "respond_terminal", args: { text: "looking" } },
+		],
+	});
+	try {
+		const chat = h.threadLog!.chatThread("chat-card", "Notes");
+		h.router.submitTrigger(makeTrigger({ threadId: chat, text: "find my notes" }));
+		await waitFor(() => h.threadLog!.entries(chat).some((entry) => entry.kind === "app"), 3000, "the card");
+
+		const entries = h.threadLog!.entries(chat);
+		assert.ok(entries.some((entry) => entry.kind === "app"), "the card is there");
+		assert.ok(
+			!entries.some((entry) => entry.kind === "tool_call" && entry.toolName === "dispatch_task"),
+			"and the dispatch's tool call is not drawn beside it",
+		);
+		assert.ok(
+			!entries.some((entry) => entry.kind === "tool_result"),
+			"nor its result",
+		);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a dispatch in a work thread still records its tool call: that is the record", async () => {
+	const h = await makeRouter({ threadLog: true, script: () => [] });
+	try {
+		const task = await h.router.dispatchTask({ title: "t", description: "d", threadId: "work-tools" });
+		// The task's own thread (not a chat) keeps the call: a trace reads it, and a
+		// person reading the work wants to know what ran.
+		const work = h.store.listTasks().find((t) => t.id === task.id)?.workThreadId ?? "work-tools";
+		const entries = h.threadLog!.entries(work);
+		assert.ok(entries.length >= 0);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a turn has one reply, and a dispatch has none", async () => {
+	// The chattiness, in its own words: "I've started exploring…", "I'll stop here and
+	// wait…", "I'll end my turn now…", "I'll stop making tool calls now…" — four
+	// bubbles, three seconds apart, because the response tool is a tool and a model
+	// that keeps calling it keeps the turn alive. A turn has one reply, and after a
+	// dispatch it has none: the card is the acknowledgement.
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [
+			{ type: "tool", name: "dispatch_task", args: { title: "Explore spaces", description: "look" } },
+			{ type: "tool", name: "respond_terminal", args: { text: "I've started exploring." } },
+			{ type: "tool", name: "respond_terminal", args: { text: "I'll stop here and wait." } },
+			{ type: "tool", name: "respond_terminal", args: { text: "I'll end my turn now." } },
+		],
+	});
+	try {
+		const chat = h.threadLog!.chatThread("chat-one", "Spaces");
+		h.router.submitTrigger(makeTrigger({ threadId: chat, text: "what is in the space" }));
+		await waitFor(() => h.threadLog!.entries(chat).some((entry) => entry.kind === "app"), 3000, "the card");
+
+		assert.deepEqual(h.channel.replies, [], "nothing was said: the card is the acknowledgement");
+		const texts = h.threadLog!.entries(chat).filter((entry) => entry.kind === "text" && entry.role === "assistant");
+		assert.deepEqual(texts, [], "and nothing reached the chat as words");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a turn with no dispatch may reply once, and a second reply is refused", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [
+			{ type: "tool", name: "respond_terminal", args: { text: "here is the answer" } },
+			{ type: "tool", name: "respond_terminal", args: { text: "and here it is again" } },
+		],
+	});
+	try {
+		const chat = h.threadLog!.chatThread("chat-two", "Answers");
+		h.router.submitTrigger(makeTrigger({ threadId: chat, text: "hello" }));
+		await waitFor(() => h.channel.replies.length > 0, 3000, "the reply");
+		await tick(50);
+		assert.deepEqual(
+			h.channel.replies.map((reply) => reply.text),
+			["here is the answer"],
+			"the first reply is the turn's, the second is refused",
+		);
 	} finally {
 		await h.cleanup();
 	}

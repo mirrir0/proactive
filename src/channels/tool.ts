@@ -48,8 +48,17 @@ export function makeResponseTool(channel: Channel, recorder: ReplyRecorder = NOO
 		}),
 		async execute(_toolCallId, params) {
 			const ctx: ReplyContext = { eventId: params.reply_to, threadId: params.thread };
+			// Counted before it is delivered: a refused reply must not reach a person
+			// and then be apologised for.
+			const verdict = recorder.record(channel.id, params.text, ctx);
+			if (!verdict.ok) {
+				return {
+					content: [{ type: "text", text: verdict.reason }],
+					details: { channel: channel.id, chars: 0 },
+					isError: true,
+				};
+			}
 			await channel.respond(params.text, ctx);
-			recorder.record(channel.id, params.text, ctx);
 			return {
 				content: [{ type: "text", text: `sent on ${channel.id}` }],
 				details: { channel: channel.id, chars: params.text.length },

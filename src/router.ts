@@ -286,6 +286,14 @@ const CONVERSATION_TAIL_LINES = 120;
 /** However tight the budget, a turn always sees this much of the conversation. */
 const CONVERSATION_MIN_LINES = 20;
 
+/**
+ * The Router's tools whose effect is already an entry of its own.
+ *
+ * A dispatch is the card; a stop is the stop line. Their raw tool call is the same
+ * fact in machine words, and a chat is read by a person.
+ */
+const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["dispatch_task", "stop_task"]);
+
 /** How many log entries `read_log` will look through. */
 const READ_LOG_SCAN = 800;
 
@@ -416,6 +424,29 @@ export class RouterLayer {
 
 	private readonly recorder: ReplyRecorder = {
 		record: (channelId, text, ctx) => {
+			// A turn has one reply. The model that keeps calling the response tool is
+			// talking to itself: it has already said the thing, and every further call
+			// is another bubble in a person's chat — "I'll stop here and wait", four
+			// times, three seconds apart, because the tool it called let it continue.
+			if (this.turn.replies.length > 0) {
+				metrics.counter("mir_router_replies_refused_total", 1, { reason: "second" });
+				return {
+					ok: false,
+					reason:
+						"You have already replied in this turn. Nothing more is delivered: stop calling tools and end the turn. The person has your words once.",
+				};
+			}
+			// And a dispatch is its own acknowledgement: the card in the conversation
+			// says what started, in the person's words. A sentence beside it is the same
+			// fact twice, and the second one is always an announcement.
+			if (this.turn.dispatches.length > 0) {
+				metrics.counter("mir_router_replies_refused_total", 1, { reason: "after-dispatch" });
+				return {
+					ok: false,
+					reason:
+						"You have already dispatched, and the work is shown in the conversation with its own card. Do not announce it: end the turn and say nothing. The answer arrives when the work does.",
+				};
+			}
 			this.turn.replies.push({ channelId, text, ctx, at: Date.now() });
 			metrics.counter("mir_router_replies_total", 1, { channel: channelId });
 			// The product's channel writes its reply into the chat's thread itself
@@ -423,9 +454,11 @@ export class RouterLayer {
 			// post every answer twice. Every other channel has no such write, and is
 			// logged here — where every delivery passes, so no reply can reach a
 			// person without reaching the log a panel reads.
-			if (channelId === "anomalous") return;
-			// A reply that names no thread belongs to the one the turn is answering.
-			this.record(ctx.threadId ?? this.turn.originThreadId, { kind: "text", role: "assistant", text });
+			if (channelId !== "anomalous") {
+				// A reply that names no thread belongs to the one the turn is answering.
+				this.record(ctx.threadId ?? this.turn.originThreadId, { kind: "text", role: "assistant", text });
+			}
+			return { ok: true };
 		},
 	};
 
@@ -436,7 +469,20 @@ export class RouterLayer {
 	 * dispatch becomes a card that links to the work, because the call and its
 	 * result are entries there like everything else.
 	 */
+	/**
+	 * The Router's own tool calls, in a chat.
+	 *
+	 * Two of them are not drawn as tool calls, because the conversation already says
+	 * what they did: `dispatch_task` writes the card (the work, its state, its answer)
+	 * and `stop_task` writes the stop. A tool block beside them is the same fact
+	 * twice — a raw call with `{}` arguments next to a card that says the same thing
+	 * in the person's words.
+	 *
+	 * They are still recorded in a *work* thread: that is the record of what happened,
+	 * and a trace reads it.
+	 */
 	private recordTurnTool(call: { id: string; name: string; args: unknown }): void {
+		if (SUPERSEDED_IN_CHAT.has(call.name) && this.turnInChat()) return;
 		this.record(this.turn.originThreadId, {
 			kind: "tool_call",
 			toolCallId: call.id,
@@ -446,8 +492,15 @@ export class RouterLayer {
 	}
 
 	/** What that call answered, on the same thread. */
-	private recordTurnToolResult(callId: string, result: unknown, isError = false): void {
+	private recordTurnToolResult(callId: string, result: unknown, isError = false, toolName?: string): void {
+		if (toolName !== undefined && SUPERSEDED_IN_CHAT.has(toolName) && this.turnInChat()) return;
 		this.record(this.turn.originThreadId, { kind: "tool_result", toolCallId: callId, isError, result });
+	}
+
+	/** Whether this turn is answering a chat — a thread a person is reading. */
+	private turnInChat(): boolean {
+		const threadId = this.turn.originThreadId;
+		return threadId !== undefined && this.deps.threadLog?.chatOf(threadId) !== undefined;
 	}
 
 	/** Append to a thread's log and tell whoever is watching. Absent log = no-op. */
@@ -627,9 +680,12 @@ export class RouterLayer {
 					router.turn.dispatches.push(task.id);
 					// The card reads `details.threadId`: the task's own thread, which is
 					// where its work is written and what a click opens.
-					router.recordTurnToolResult(callId, {
-						details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId },
-					});
+					router.recordTurnToolResult(
+						callId,
+						{ details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId } },
+						false,
+						"dispatch_task",
+					);
 					return {
 						content: [
 							{
@@ -643,7 +699,7 @@ export class RouterLayer {
 						details: { taskId: task.id, workerId: task.workerId, status: task.status },
 					};
 				} catch (err) {
-					router.recordTurnToolResult(callId, { error: (err as Error).message }, true);
+					router.recordTurnToolResult(callId, { error: (err as Error).message }, true, "dispatch_task");
 					return {
 						content: [{ type: "text", text: `dispatch failed: ${(err as Error).message}` }],
 						details: { error: (err as Error).message },
@@ -1089,9 +1145,12 @@ export class RouterLayer {
 					router.turn.dispatches.push(task.id);
 					// The card reads `details.threadId`: the task's own thread, which is
 					// where its work is written and what a click opens.
-					router.recordTurnToolResult(callId, {
-						details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId },
-					});
+					router.recordTurnToolResult(
+						callId,
+						{ details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId } },
+						false,
+						"stop_task",
+					);
 					return {
 						content: [{ type: "text", text: `stopped task ${task.id}` }],
 						details: { taskId: task.id, status: task.status },

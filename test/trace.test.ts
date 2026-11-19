@@ -46,6 +46,7 @@ const task = (over: Partial<TaskRow> & { id: string }): TaskRow => ({
 	instructions: undefined,
 	threadId: undefined,
 	reportThreadId: undefined,
+	workThreadId: undefined,
 	parentTaskId: undefined,
 	depth: 0,
 	status: "done",

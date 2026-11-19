@@ -1530,9 +1530,40 @@ export class RouterLayer {
 			const text = redactSecrets(
 				`I couldn't complete that request (${err.message}). The event is recorded; nothing was lost.`,
 			);
-			await channel?.respond(text, { eventId: origin.id, threadId: origin.threadId }).catch(() => {});
-			this.record(origin.threadId, { kind: "text", role: "assistant", text });
+			await this.say(origin.threadId, origin.channelId, text, { eventId: origin.id });
 		}
+	}
+
+	/**
+	 * Say something in a thread, once.
+	 *
+	 * The product's channel writes its reply into the thread itself (`deliver`), so
+	 * recording it here as well posts every answer twice — which is exactly what a
+	 * doubled conclusion looked like, word for word, twice in one bubble. Every other
+	 * channel has no such write and is logged here: every delivery passes through this
+	 * one method, so no answer reaches a person without reaching the log, and none
+	 * reaches it twice.
+	 */
+	private async say(
+		threadId: string | undefined,
+		channelId: string | undefined,
+		text: string,
+		ctx: { eventId?: string } = {},
+	): Promise<void> {
+		const channel = this.deps.channels.find((candidate) => candidate.id === channelId);
+		if (channel === undefined) {
+			this.record(threadId, { kind: "text", role: "assistant", text });
+			return;
+		}
+		if (channel.id !== "anomalous") this.record(threadId, { kind: "text", role: "assistant", text });
+		await channel
+			.respond(text, {
+				...(ctx.eventId === undefined ? {} : { eventId: ctx.eventId }),
+				...(threadId === undefined ? {} : { threadId }),
+			})
+			.catch((err: unknown) =>
+				log.warn("could not deliver a reply", { channel: channelId, error: (err as Error).message }),
+			);
 	}
 
 	/** Deliver the model's plain text when it acted through no tool at all. */
@@ -1550,9 +1581,7 @@ export class RouterLayer {
 			event: origin.id,
 		});
 		metrics.counter("mir_router_fallback_replies_total", 1, { channel: origin.channelId });
-		const delivered = redactSecrets(text);
-		await channel.respond(delivered, { eventId: origin.id, threadId: origin.threadId });
-		this.record(origin.threadId, { kind: "text", role: "assistant", text: delivered });
+		await this.say(origin.threadId, origin.channelId, redactSecrets(text), { eventId: origin.id });
 	}
 
 	private originOf(batch: InboxItem[]): { channelId: string; id?: string; threadId?: string } | undefined {
@@ -2099,7 +2128,7 @@ export class RouterLayer {
 		}
 	}
 
-	handleWorkerConclusion(workerId: string, text: string): void {
+	async handleWorkerConclusion(workerId: string, text: string): Promise<void> {
 		// Whatever the worker was mid-sentence on: if the conclusion contains it, it
 		// is the same words arriving twice — the streamed prefix and the finished
 		// sentence — so the buffer is dropped rather than flushed. Anything earlier
@@ -2163,24 +2192,16 @@ export class RouterLayer {
 		// a model asked to relay an answer it was handed says it twice: once in the
 		// worker's words and once in its own.
 		if (reportIsChat && reportThread !== undefined) {
-			this.record(reportThread, { kind: "text", role: "assistant", text, workerId });
+			// The answer, once. The product's channel writes its reply into the thread
+			// itself; every other channel is logged here — saying it both ways is how a
+			// conclusion came out twice, word for word.
+			await this.say(reportThread, task?.channelId, redactSecrets(text), {
+				...(task?.replyTo === undefined ? {} : { eventId: task.replyTo }),
+			});
 			// And the turn that the dispatch opened is over: without this the chat
 			// keeps its thinking loader up, because nothing else closes a turn no
 			// model run opened.
 			this.record(reportThread, { kind: "status", status: "idle", note: "the worker finished" });
-			const channel = this.deps.channels.find((candidate) => candidate.id === task?.channelId);
-			if (channel !== undefined && task?.replyTo !== undefined) {
-				// A person reading a channel (a terminal, an HTTP reply) never sees the
-				// thread, so the answer is said there too. Best-effort, like every send.
-				void channel
-					.respond(redactSecrets(text), { eventId: task.replyTo, threadId: reportThread })
-					.catch((err: unknown) =>
-						log.warn("could not deliver a conclusion to its channel", {
-							channel: task.channelId,
-							error: (err as Error).message,
-						}),
-					);
-			}
 			metrics.counter("mir_conclusions_delivered_direct_total");
 			return;
 		}

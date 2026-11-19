@@ -221,7 +221,7 @@ test("conclusions: a worker result is relayed once and the task is marked done",
 		});
 		const workerId = h.router.listWorkers()[0]!.id;
 		h.router.handleWorkerHello(workerId);
-		h.router.handleWorkerConclusion(workerId, "fixed: changed 3 files");
+		await h.router.handleWorkerConclusion(workerId, "fixed: changed 3 files");
 
 		await waitFor(() => h.channel.replies.length === 1, 2000, "one relayed reply");
 		assert.equal(h.channel.replies[0]!.text, "all done");
@@ -477,7 +477,7 @@ test("retry: a failed conclusion relay is retried, not dropped", async () => {
 	try {
 		await h.router.dispatchTask({ title: "t", description: "d", channelId: "terminal" });
 		const workerId = h.router.listWorkers()[0]!.id;
-		h.router.handleWorkerConclusion(workerId, "the work is finished");
+		await h.router.handleWorkerConclusion(workerId, "the work is finished");
 
 		await waitFor(() => h.channel.replies.length === 1, 3000, "relayed conclusion");
 		assert.equal(h.channel.replies[0]!.text, "relayed on retry");
@@ -614,7 +614,7 @@ test("thread log: a dispatch and a worker's conclusion are the work thread's ent
 		assert.match((card as { uri: string }).uri, /^ui:\/\/mir\/work\?taskId=/, "the entry points at this task's card");
 		assert.equal((card as unknown as { data: { taskId: string } }).data.taskId, task.id);
 
-		h.router.handleWorkerConclusion(task.workerId!, "the report is written");
+		await h.router.handleWorkerConclusion(task.workerId!, "the report is written");
 		const after = h.threadLog!.entries("work-1");
 		// Everything but the card: what the worker said, then that the thread is
 		// done. The card is asserted on its own below.
@@ -647,7 +647,7 @@ test("thread log: a worker's stream is coalesced, not a line per token", async (
 		h.router.handleWorkerDelta(workerId, "king");
 		h.router.handleWorkerDelta(workerId, " on it");
 		// The conclusion flushes whatever was buffered, before its own entries.
-		h.router.handleWorkerConclusion(workerId, "done");
+		await h.router.handleWorkerConclusion(workerId, "done");
 		const text = h.threadLog!
 			.entries("work-2")
 			.filter((entry) => entry.kind === "text")
@@ -834,7 +834,7 @@ test("a conclusion in a chat is the answer: no model turn, and the chat says it 
 		const task = await h.router.dispatchTask({ title: "write the report", description: "write it", threadId, channelId: "terminal", replyTo: "evt-1" });
 		const turnsBefore = h.sessions[0]?.prompts.length ?? 0;
 
-		h.router.handleWorkerConclusion(task.workerId!, "The report is at /tmp/report.md, 12 pages.");
+		await h.router.handleWorkerConclusion(task.workerId!, "The report is at /tmp/report.md, 12 pages.");
 
 		const entries = h.threadLog!.entries(threadId);
 		const texts = entries.filter((entry) => entry.kind === "text" && entry.role === "assistant");
@@ -858,7 +858,7 @@ test("a conclusion in a work thread still goes to the Router, and says the threa
 	const h = await makeRouter({ threadLog: true, script: () => [] });
 	try {
 		const task = await h.router.dispatchTask({ title: "check the build", description: "check it", threadId: "work-9" });
-		h.router.handleWorkerConclusion(task.workerId!, "the build passes");
+		await h.router.handleWorkerConclusion(task.workerId!, "the build passes");
 		const entries = h.threadLog!.entries("work-9").filter((entry) => entry.kind !== "app");
 		assert.deepEqual(
 			entries.slice(1).map((entry) => (entry.kind === "text" ? entry.text : entry.kind)),
@@ -919,7 +919,7 @@ test("a dispatch writes an outstanding line, and its conclusion closes it", asyn
 		assert.equal(open[0]!.taskId, task.id);
 		assert.match(open[0]!.text, /check the lockfile/);
 
-		h.router.handleWorkerConclusion(task.workerId!, "the lockfile is missing");
+		await h.router.handleWorkerConclusion(task.workerId!, "the lockfile is missing");
 		const after = h.store.listScratchpad();
 		assert.equal(after.length, 1);
 		assert.equal(after[0]!.status, "done", "the conclusion closed the line");

@@ -222,7 +222,11 @@ export class SuperAgent {
 						this.router?.handleWorkerStatus(workerId, msg.status, msg.progress);
 						break;
 					case "conclusion":
-						this.router?.handleWorkerConclusion(workerId, msg.text);
+						void this.router
+							?.handleWorkerConclusion(workerId, msg.text)
+							.catch((err: unknown) =>
+								log.warn("could not deliver a conclusion", { worker: workerId, error: (err as Error).message }),
+							);
 						break;
 					case "release":
 						this.router?.handleWorkerRelease(workerId, msg.eventId, msg.reason);

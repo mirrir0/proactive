@@ -228,6 +228,15 @@ export interface SuperAgentConfig {
 	workerIdleExitMs: number;
 	/** Worker heartbeat interval, independent of turn progress. */
 	workerHeartbeatMs: number;
+	/**
+	 * How long a spawned Worker may take to connect before its task fails.
+	 *
+	 * A process manager that accepts a start and then loses the child is the common
+	 * case — pm2's fork entry failing to resolve, a container without the module —
+	 * and it reads exactly like a task that is running and doing nothing. Silence
+	 * is not a state a person can see, so it gets a deadline and a word.
+	 */
+	workerHelloTimeoutMs: number;
 	/** Cap on max_tokens per request (avoids OpenRouter reserving the whole context). */
 	maxTokens: number;
 	/** Directory where per-worker durable session files are written (pi-durable). */
@@ -288,6 +297,7 @@ export const DEFAULT_CONFIG: SuperAgentConfig = {
 	queuePollMs: 2000,
 	workerIdleExitMs: 120_000,
 	workerHeartbeatMs: 15_000,
+	workerHelloTimeoutMs: 20_000,
 	maxTokens: 8192,
 	workerSessionDir: "",
 	stateDir: "",

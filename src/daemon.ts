@@ -130,6 +130,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): SuperAgentCon
 		},
 		workerIdleExitMs: numEnv("MIR_WORKER_IDLE_MS", 120_000),
 		workerHeartbeatMs: numEnv("MIR_WORKER_HEARTBEAT_MS", 15_000),
+		workerHelloTimeoutMs: numEnv("MIR_WORKER_HELLO_MS", 20_000),
 		maxTokens: numEnv("MIR_MAX_TOKENS", 8192),
 		workerSessionDir: expandHome(env.MIR_WORKER_STATE_DIR ?? join(paths.state, "worker-state")),
 		// The durable store (SQLite, the journal, spilled objects) is the data

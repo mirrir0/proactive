@@ -41,6 +41,8 @@ async function makeRouter(
 		threadLog?: boolean;
 		/** Give the router a journal (a git-less one, so a test writes no repository). */
 		journal?: boolean;
+		/** How long a spawned worker may take to say hello, for the timeout test. */
+		helloTimeoutMs?: number;
 	} = {},
 ): Promise<Harness> {
 	const dir = tmpDir();
@@ -65,6 +67,7 @@ async function makeRouter(
 		maxConcurrentWorkers: options.maxConcurrentWorkers ?? 4,
 		maxTriggerAttempts: options.maxTriggerAttempts ?? 3,
 		routerRetryBackoffMs: 1,
+		...(options.helloTimeoutMs === undefined ? {} : { workerHelloTimeoutMs: options.helloTimeoutMs }),
 		objectRetention: 1000,
 	};
 	const journal = options.journal === true ? new Journal({ dir: `${dir}/journal`, log: createLogger({ level: "error", format: "json", write: () => {} }), git: false }) : undefined;
@@ -1002,6 +1005,49 @@ test("the tail is a budget: it keeps far more than forty lines, and says what it
 		assert.ok(them.length >= 40, `far more than the old forty-line window, saw ${them.length} of them`);
 		assert.match(prompt, /earlier line\(s\) not shown/, "a window that drops lines says so");
 		assert.match(prompt, /they belong in your journal/, "and what to do about it");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a worker that never says hello fails its task, out loud, where the person is reading", async () => {
+	// The failure this is for: pm2 accepts the start, the child dies on its first
+	// import, and nothing else happens. The task says running, the worker row says
+	// busy, the thread says nothing — which is indistinguishable from quiet work,
+	// and a person watching it has no way to tell.
+	const h = await makeRouter({ threadLog: true, script: () => [], helloTimeoutMs: 40 });
+	try {
+		const threadId = h.threadLog!.chatThread("chat-hello", "Notes");
+		const task = await h.router.dispatchTask({ title: "Find your notes", description: "find them", threadId, channelId: "terminal", replyTo: "evt-9" });
+
+		// No hello is sent: the worker process never reached its control socket.
+		await waitFor(() => h.store.listTasks().find((t) => t.id === task.id)?.status === "failed", 2000, "the task failed");
+
+		const failed = h.store.listTasks().find((t) => t.id === task.id)!;
+		assert.match(failed.error ?? "", /never started/);
+		const entries = h.threadLog!.entries(threadId);
+		const status = entries.filter((entry) => entry.kind === "status").at(-1) as { status: string; note?: string };
+		assert.equal(status.status, "failed", "the thread says the work failed");
+		assert.match(status.note ?? "", /never started/, "and why");
+		// The card says it too, so a reload does not show a spinner for work that
+		// ended before it began.
+		const card = entries.filter((entry) => entry.kind === "app").at(-1) as unknown as { data: { status: string } };
+		assert.equal(card.data.status, "failed");
+		// And the person is told through the channel they asked on.
+		assert.ok(h.channel.replies.some((reply) => /never started/.test(reply.text)), "the channel was told");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a worker that says hello keeps its task", async () => {
+	const h = await makeRouter({ threadLog: true, script: () => [], helloTimeoutMs: 60 });
+	try {
+		const threadId = h.threadLog!.chatThread("chat-hello-2", "Notes");
+		const task = await h.router.dispatchTask({ title: "Find your notes", description: "find them", threadId });
+		h.router.handleWorkerHello(task.workerId!);
+		await tick(120);
+		assert.equal(h.store.listTasks().find((t) => t.id === task.id)?.status, "running", "a connected worker is not failed");
 	} finally {
 		await h.cleanup();
 	}

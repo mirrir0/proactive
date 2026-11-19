@@ -391,6 +391,15 @@ export class RouterLayer {
 	private readonly tasks = new Map<string, Task>();
 	private readonly workers = new Map<string, WorkerRecord>();
 	private readonly dispatchQueue: Array<{ taskId: string; input: TaskInput }> = [];
+	/**
+	 * Workers that have been started and have not said hello yet.
+	 *
+	 * A spawned process is not a running worker: the process manager accepts the
+	 * start, the child dies on its first import, and nothing else happens — which is
+	 * indistinguishable from a task that is quietly working. So each spawn gets a
+	 * deadline, and a worker that misses it fails its task out loud.
+	 */
+	private readonly helloTimers = new Map<string, NodeJS.Timeout>();
 	/** Per-worker output waiting to be written into its thread. */
 	private readonly deltaBuffers = new Map<string, { text: string; timer: NodeJS.Timeout }>();
 	/** Each conversation's journal, as last read or written: the turn reads it synchronously. */
@@ -1818,6 +1827,15 @@ export class RouterLayer {
 			});
 			metrics.counter("mir_worker_spawns_total", 1, { fast: String(Boolean(task.fast)) });
 			log.info("worker spawned", { task: task.id, worker: workerId, model: workerModelId, hand: task.endpointId ?? "auto" });
+			// Started is not connected. The deadline is what tells the two apart.
+			const timer = setTimeout(() => {
+				this.helloTimers.delete(workerId);
+				const reason = `the worker never started (no hello within ${Math.round(this.config.workerHelloTimeoutMs / 1000)}s)`;
+				log.warn("worker never said hello", { worker: workerId, task: task.id, reason });
+				this.failWorker(workerId, reason);
+			}, this.config.workerHelloTimeoutMs);
+			timer.unref?.();
+			this.helloTimers.set(workerId, timer);
 		} catch (err) {
 			this.failWorker(workerId, `failed to spawn worker: ${(err as Error).message}`);
 		} finally {
@@ -1858,6 +1876,11 @@ export class RouterLayer {
 
 	/** A Worker connected to the control channel. */
 	handleWorkerHello(workerId: string): void {
+		const timer = this.helloTimers.get(workerId);
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			this.helloTimers.delete(workerId);
+		}
 		const rec = this.workers.get(workerId);
 		if (!rec) {
 			log.warn("hello from unknown worker", { worker: workerId });
@@ -2120,6 +2143,11 @@ export class RouterLayer {
 	}
 
 	private failWorker(workerId: string, reason: string): void {
+		const timer = this.helloTimers.get(workerId);
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			this.helloTimers.delete(workerId);
+		}
 		const rec = this.workers.get(workerId);
 		if (!rec) return;
 		const task = this.tasks.get(rec.taskId);
@@ -2129,6 +2157,18 @@ export class RouterLayer {
 			task.updatedAt = Date.now();
 			this.deps.store.upsertTask(task);
 			metrics.counter("mir_tasks_completed_total", 1, { status: "failed", fast: String(Boolean(task.fast)) });
+			this.closeScratchpadForTask(task.id, "dropped");
+			// Silence is not a state a person can see. The thread says the work
+			// failed, in the words the log has, and the card says the same — so a chat
+			// that was waiting on this stops waiting and says why.
+			this.record(task.threadId, { kind: "status", status: "failed", note: reason });
+			this.recordCard(task.threadId, task.id);
+			const channel = this.deps.channels.find((candidate) => candidate.id === task.channelId);
+			if (channel !== undefined && task.replyTo !== undefined) {
+				void channel
+					.respond(reason, { eventId: task.replyTo, ...(task.threadId === undefined ? {} : { threadId: task.threadId }) })
+					.catch(() => {});
+			}
 		}
 		this.workers.delete(workerId);
 		this.deps.store.deleteWorker(workerId);
@@ -2152,6 +2192,11 @@ export class RouterLayer {
 		if (queueIdx >= 0) this.dispatchQueue.splice(queueIdx, 1);
 		if (task.workerId) {
 			const workerId = task.workerId;
+			const timer = this.helloTimers.get(workerId);
+			if (timer !== undefined) {
+				clearTimeout(timer);
+				this.helloTimers.delete(workerId);
+			}
 			this.deps.control?.abort(workerId, reason);
 			this.workers.delete(workerId);
 			this.deps.store.deleteWorker(workerId);
@@ -2376,6 +2421,8 @@ export class RouterLayer {
 		this.disposed = true;
 		if (this.drainTimer) clearTimeout(this.drainTimer);
 		this.drainTimer = null;
+		for (const timer of this.helloTimers.values()) clearTimeout(timer);
+		this.helloTimers.clear();
 		// An in-flight turn may still touch the store; let it finish or abort it
 		// before the caller closes the database underneath it.
 		if (this.turnInFlightSince > 0) {

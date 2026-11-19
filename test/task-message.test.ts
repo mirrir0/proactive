@@ -45,7 +45,10 @@ test("the Worker is told what it may touch, and which hand", () => {
 	const text = taskMessage(base);
 	assert.match(text, /In this process: no connected services, no computation sandbox, no network\./);
 	assert.match(text, /No files of your own — the hand has those\./);
-	assert.match(text, /You are on: "desk-1"|You are on: .*desk-1/);
+	// No name and an id: the brief says "the hand this task was assigned", never the id —
+	// a Worker that reads one repeats it to a person.
+	assert.match(text, /You are on: the hand this task was assigned/);
+	assert.equal(text.includes("desk-1"), false, "the id is machinery");
 });
 
 test("a Worker with no hand is told so, rather than left to guess", () => {
@@ -56,7 +59,7 @@ test("a Worker with no hand is told so, rather than left to guess", () => {
 
 test("an unpinned Worker is told the hub picks the hand", () => {
 	const text = taskMessage({ ...base, endpointId: undefined });
-	assert.match(text, /the hub's least-loaded capable hand/);
+	assert.match(text, /whichever hand the hub picks/);
 });
 
 test("the procedure is not in the message: it is a skill", () => {

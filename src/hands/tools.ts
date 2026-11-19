@@ -85,12 +85,30 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 	const handRoot = options.handRoot;
 	const maxChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
 
+	/**
+	 * The hand this task is on.
+	 *
+	 * Pinned when the client said; otherwise the hub picks, and the first answer *becomes*
+	 * the pin. A Worker that is not pinned must not wander: its first `list_dir` on one
+	 * machine and its second `read_file` on another would read two different folders and
+	 * call it one task.
+	 */
+	let settled = pinned;
+
 	const call = async (
 		op: HandOp,
 		input: Record<string, unknown>,
 		timeoutMs?: number,
-	): Promise<HandCallResult> =>
-		client.call({ op, input, endpointId: pinned, timeoutMs }, options.signal === undefined ? {} : { signal: options.signal });
+	): Promise<HandCallResult> => {
+		const result = await client.call(
+			{ op, input, endpointId: settled, timeoutMs },
+			options.signal === undefined ? {} : { signal: options.signal },
+		);
+		if (settled === undefined && result.ok && typeof result.endpointId === "string" && result.endpointId !== "") {
+			settled = result.endpointId;
+		}
+		return result;
+	};
 
 	return [
 		defineTool({

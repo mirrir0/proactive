@@ -69,8 +69,14 @@ export function taskMessage(spec: TaskSpec): string {
 		// Where the work happens, and which machine — the `hands` skill says how to
 		// use it. A Worker told neither will run commands in its own process and
 		// report files that were never touched.
+		// A name, or nothing: an id is machinery, and a Worker that reads one repeats it to a
+		// person — "the current space (hand space:01M7K4Q…)" is what that looks like.
 		const label =
-			spec.handName === undefined ? (spec.endpointId ?? "the hub's least-loaded capable hand") : `“${spec.handName}” (${spec.endpointId ?? "a hand"})`;
+			spec.handName !== undefined
+				? `“${spec.handName}”`
+				: spec.endpointId !== undefined
+					? "the hand this task was assigned"
+					: "whichever hand the hub picks (call `list_hands` to see it)";
 		lines.push(`Execution happens on a hand (see the \`hands\` skill). You are on: ${label}.`);
 		// The folder the hand is rooted at is where "here" is. It is the hand's own
 		// policy, so this is true of any hand — a space, a repo, a build box — and a

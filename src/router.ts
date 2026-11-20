@@ -1,10 +1,7 @@
 /**
- * The long-lived routing layer: every event and every Worker conclusion arrives here,
- * and one turn runs at a time.
- *
- * It never executes a task and never writes raw text: it answers by calling a channel's
- * `respond_<channel>` and dispatches by calling `dispatch_task`. One serialized inbox,
- * batching as a consequence of a busy turn, and durable state (ADR 0002).
+ * Every event and every Worker conclusion arrives here, one turn at a time. It never executes
+ * a task and never writes raw text: it answers through `respond_<channel>` and dispatches
+ * through `dispatch_task`.
  */
 
 import {
@@ -34,10 +31,7 @@ import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
 import { newThreadId, type NewThreadEntry, type ThreadEntry, type ThreadLog } from "./threadlog.ts";
 
-/**
- * Long enough that a streaming reply is a paragraph, short enough that a watcher sees
- * the work move.
- */
+/** Long enough for a paragraph, short enough that a watcher sees the work move. */
 const DELTA_FLUSH_MS = 750;
 
 export interface RouterControl {
@@ -333,11 +327,7 @@ export const ROUTER_INVARIANTS: readonly string[] = [
 ];
 
 export class RouterLayer {
-	/**
-	 * One session per conversation, kept warm: a shared session let one chat's context
-	 * surface in another's answer. Capped, because a session each forever is a leak with
-	 * a transcript.
-	 */
+	/** A shared session let one chat's context surface in another's answer. Capped, or it is a leak. */
 	private readonly sessions = new Map<string, AgentSessionLike>();
 	private readonly sessionUsedAt = new Map<string, number>();
 	private readonly sessionBusy = new Set<string>();

@@ -1,8 +1,6 @@
 /**
- * The brain's client API: what a display needs, and nothing more. A client cannot
- * dispatch a task or change a policy. A thread is opened, not polled.
- *
- * Framing is the hands protocol's — newline-delimited JSON, one frame per line.
+ * The brain's client API: what a display needs and nothing more. A client cannot dispatch a
+ * task or change a policy; a thread is opened, not polled. Framing is the hands protocol's.
  */
 
 import type { HandStatus } from "../hands/protocol.ts";
@@ -96,11 +94,7 @@ export type BrainToClient =
 			v: number;
 			agent: string;
 			hands: HandStatus[];
-			/**
-			 * What this brain can do, so a client renders what exists instead of
-			 * assuming. A client that knows only `v` is not wrong, it is older: the
-			 * fields are additive and an unknown one is ignored.
-			 */
+			/** Additive: an unknown field is ignored, so an older client is not wrong. */
 			capabilities: BrainCapabilities;
 	  }
 	| { type: "threads"; id: string; threads: ThreadSummary[] }
@@ -139,17 +133,11 @@ export interface HandRegistration {
 export interface BrainHost {
 	/** Every thread, newest activity first. */
 	listThreads(filter?: ThreadFilter): ThreadSummary[];
-	/**
-	 * The thread a chat shows, minted on first use — holding the chat's name when
-	 * the client knows it, so the agent can read what this chat is called.
-	 */
+	/** Minted on first use, holding the chat's name when the client knows it. */
 	chatThread(chatId: string, title?: string): string;
 	/** One thread's entries after `since`, oldest first. */
 	entries(threadId: string, since: number): ThreadEntry[];
-	/**
-	 * Where a thread sits in the tree: the work thread of the task that asked for this
-	 * one, and how deep it is. Absent for a chat's own thread and for the cold start.
-	 */
+	/** The work thread of the task that asked for this one, and how deep. Absent for a chat's own. */
 	threadFacts(threadId: string): { parentThreadId?: string; depth?: number };
 	/** A thread's status right now. */
 	status(threadId: string): ThreadStatus;

@@ -1,8 +1,6 @@
 /**
- * Everything the Router knows that must survive a restart: the trigger log (idempotent
- * by `id`, replayed on boot), tasks, the worker registry, threads, and the spilled
- * objects behind Chain of Recall. One SQLite file in WAL, because several processes
- * hold it open.
+ * What survives a restart: the trigger log (idempotent by `id`, replayed on boot), tasks, the
+ * worker registry, threads and the spilled objects. One SQLite file in WAL.
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -28,10 +26,7 @@ export interface StoredEvent {
 	error?: string;
 }
 
-/**
- * `outstanding` is work in flight and is what a new message is reconciled with;
- * `planned` is what the Router meant to do.
- */
+/** `outstanding` is what a new message is reconciled with; `planned` is what it meant to do. */
 export interface ScratchpadRow {
 	id: string;
 	kind: "outstanding" | "planned";
@@ -451,10 +446,7 @@ export class MirStore {
 		return rows.map(rowToTask);
 	}
 
-	/**
-	 * `failed`, not `done`: a task that says it finished when it was killed is worse than
-	 * one that says it did not. Threads go `idle`, or a chat shows a loader forever.
-	 */
+	/** `failed`, not `done`: a task that says it finished when it was killed is worse. Threads go `idle`. */
 	settleInterrupted(now = Date.now()): number {
 		const stranded = this.listTasksByStatus("running");
 		for (const task of stranded) {

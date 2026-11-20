@@ -1,9 +1,6 @@
 /**
- * Which mir is running, and how to reach it — `<runtime>/instance.json`, 0600.
- *
- * It carries the token because the socket's permissions are the token's: both are 0600
- * in one directory. It never carries a provider key. A record whose pid is gone is
- * removed and treated as absent, because a stale record reads as "mir is broken".
+ * `<runtime>/instance.json`, 0600, carrying the token because the socket's permissions are
+ * the token's. It never carries a provider key. A record whose pid is gone is removed.
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -41,12 +38,7 @@ export function removeInstance(paths: MirPaths): void {
 	rmSync(instanceFile(paths), { force: true });
 }
 
-/**
- * The instance this install says is running, or undefined.
- *
- * A record whose process is gone is removed and treated as absent: the alternative
- * is every client trying a dead socket and reporting the wrong cause.
- */
+	/** A record whose process is gone is removed and treated as absent: a stale record reads as "mir is broken". */
 export function readInstance(paths: MirPaths): MirInstance | undefined {
 	const file = instanceFile(paths);
 	if (!existsSync(file)) return undefined;

@@ -1,19 +1,14 @@
 /**
- * A chat in the product, as a place the agent is. Unlike the other channels this one
- * owns no transport: the host pushes messages in and takes replies back.
- *
- * A reply must be addressed. When more than one chat has been heard from and the reply
- * names none, it is refused with words the model can act on — never guessed.
+ * A chat in the product: unlike the other channels, this one owns no transport — the host
+ * pushes in and takes replies back. A reply that names no chat, when more than one has been
+ * heard from, is refused rather than guessed.
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Channel, type ChannelEvent, type ReplyContext, type ReplyRecorder, ReplyBook } from "./types.ts";
 import { makeResponseTool } from "./tool.ts";
 
-/**
- * A thread is the real target — a chat is a window onto one. A reply that knows only a
- * chat is delivered to the chat, and the brain maps it to the thread.
- */
+/** A reply that knows only a chat is delivered to the chat, and the brain maps it to the thread. */
 export interface ReplyTarget {
 	readonly threadId?: string;
 	readonly chatId?: string;
@@ -116,10 +111,7 @@ export class AnomalousChannel implements Channel {
 		return tool;
 	}
 
-/**
- * The thread it was asked about wins; a chat is the fallback. Unaddressed and more than
- * one chat heard from is refused rather than guessed.
- */
+/** Unaddressed and more than one chat heard from is refused rather than guessed. */
 	private resolveTarget(ctx: ReplyContext): ReplyTarget {
 		if (ctx.threadId !== undefined && ctx.threadId !== "") return { threadId: ctx.threadId };
 		if (ctx.replyTo !== undefined && ctx.replyTo !== "") return { chatId: ctx.replyTo };

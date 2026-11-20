@@ -1,8 +1,4 @@
-/**
- * A Channel is a place the agent can be reached: it emits events inbound and owns
- * `respond_<channel>` outbound, so a reply is a tool call and never raw text. It
- * authenticates its own transport before an event is admitted.
- */
+/** A place the agent can be reached: events in, `respond_<channel>` out, its own auth. */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -34,10 +30,7 @@ export interface ReplyContext {
 	replyTo?: string;
 }
 
-/**
- * Where a turn's replies are counted — and refused. A turn has one reply; a further
- * call is another bubble in a person's chat. Every delivery passes through here.
- */
+/** A turn has one reply; a further call is another bubble in a person's chat. */
 export interface ReplyRecorder {
 	/** Undefined when it was delivered; a reason when it was refused. */
 	record(channelId: string, text: string, ctx: ReplyContext): { ok: true } | { ok: false; reason: string };
@@ -78,10 +71,7 @@ export interface Channel {
 	/** Bounded, so the map cannot grow forever. */
 const REPLY_BOOK_CAPACITY = 1000;
 
-/**
- * Shared event-id + reply-context bookkeeping for channels.
- * Bounded FIFO so a long-running daemon cannot leak memory through it.
- */
+/** Bounded FIFO, so a long-running daemon cannot leak memory through it. */
 export class ReplyBook {
 	private readonly byEvent = new Map<string, ReplyContext>();
 	private readonly byThread = new Map<string, ReplyContext>();

@@ -1,7 +1,4 @@
-/**
- * The wire contract between brains (cloud) and hands (execution environments): NDJSON
- * frames, one operation at a time, each with a deadline. See `docs/hands.md`.
- */
+/** NDJSON frames, one operation at a time, each with a deadline. See `docs/hands.md`. */
 
 import crypto from "node:crypto";
 
@@ -48,10 +45,7 @@ export const DEFAULT_HAND_NETWORK: HandNetworkPolicy = {
 	allowUnixSockets: [],
 };
 
-/**
- * Configured on the hand, because the hand is the security principal. The hub can only
- * narrow this, never widen it.
- */
+/** The hand is the security principal; the hub can only narrow this, never widen it. */
 export interface HandPolicy {
 /** Every path and cwd must resolve inside one of these. */
 	roots: string[];
@@ -66,11 +60,7 @@ export interface HandPolicy {
 	maxTimeoutMs: number;
 /** Plus a safe base set. */
 	envAllow: string[];
-	/**
-	 * `srt` restricts reads, writes and network by policy; `confined` is the same fence
-	 * built from `roots` and `denyReadPaths` with seatbelt or bubblewrap; `none` leaves
-	 * the executable allowlist as the only boundary. Requested-but-unavailable throws.
-	 */
+	/** `srt` fences writes and network; `confined` fences reads too; `none` leaves the allowlist. Requested-but-unavailable throws. */
 	sandbox: "none" | "srt" | "confined";
 	network: HandNetworkPolicy;
 /** e.g. ~/.ssh, ~/.aws. */
@@ -79,10 +69,7 @@ export interface HandPolicy {
 	denyWritePaths: string[];
 }
 
-/**
- * The sandbox's read fence: reads are otherwise open, because a hand that cannot read
- * its own toolchain is useless. This is where "this folder and nothing else" starts.
- */
+/** Reads are otherwise open: a hand that cannot read its own toolchain is useless. */
 export const DEFAULT_DENY_READ: readonly string[] = [
 	"~/.ssh",
 	"~/.aws",

@@ -485,11 +485,7 @@ function mcpToolToToolDefinition(serverName: string, mcpTool: any, mcp: McpManag
 	});
 }
 
-/**
- * `inputSchema` is already JSON Schema and TypeBox is JSON Schema, so it is passed
- * through. Rebuilding marked every property required and dropped `enum` and friends, and
- * a model that read that reported the tool as unusable.
- */
+/** Passed through: rebuilding marked every property required and dropped `enum`. */
 function parametersOf(inputSchema: unknown): TSchema {
 	const schema = inputSchema as { readonly type?: unknown; readonly properties?: unknown } | null | undefined;
 	const usable =

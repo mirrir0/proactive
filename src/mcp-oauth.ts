@@ -183,10 +183,7 @@ export class OAuthManager {
 		}
 	}
 
-	/**
-	 * Ensure the server is authorized. If tokens exist, return the auth provider.
-	 * If not, run the interactive OAuth flow first.
-	 */
+	/** Runs the interactive flow first when there are no tokens. */
 	async ensureAuthorized(serverUrl: string): Promise<AuthProvider> {
 		const adapter = this.getAuthProvider(serverUrl);
 		const provider = this.providers.get(serverUrl)!;

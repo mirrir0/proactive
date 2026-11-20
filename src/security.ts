@@ -1,8 +1,4 @@
-/**
- * The three controls that make the daemon deployable: redaction of every known secret,
- * channel authentication, and capability gating for a Worker's tools. Nothing here
- * imports agent code, so every layer can use it.
- */
+/** Redaction, channel authentication and capability gating. Nothing here imports agent code. */
 
 import crypto from "node:crypto";
 
@@ -41,9 +37,7 @@ export class SecretRegistry {
 		return this.byValue.has(value);
 	}
 
-	/**
-	 * Longest-first, so a secret that contains another secret wins.
-	 */
+/** Longest-first, so a secret that contains another secret wins. */
 	redact(text: string): string {
 		if (!text || this.byValue.size === 0) return text;
 		let out = text;

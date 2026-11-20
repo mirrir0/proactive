@@ -17,11 +17,7 @@ import type { Logger } from "./telemetry.ts";
 
 const run = promisify(execFile);
 
-/**
- * Characters, not tokens: the harness has no tokenizer. At the cap the write is refused
- * with an instruction to compact, so the model — the only thing that knows what mattered
- * — does the compacting.
- */
+/** At the cap the write is refused with an instruction to compact, so the model does the compacting. */
 export const JOURNAL_MAX_CHARS = 2400;
 
 export interface JournalStoreOptions {

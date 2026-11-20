@@ -1,11 +1,7 @@
 /**
- * The brain's instructions, as pi skills: `skills/<name>/SKILL.md`, the layout pi
- * discovers.
- *
- * Invariants belong in the system prompt, where nothing can decline to load them;
- * procedures belong in a skill, read when the work matches. This module owns the
- * allow-list: a session's default loader scans the machine's own pi home, so every
- * session here gets a loader limited to the roots we name.
+ * The brain's instructions as pi skills (`skills/<name>/SKILL.md`): invariants in the system
+ * prompt, procedures in a skill. This module owns the allow-list, so the machine's own pi
+ * home cannot leak in.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -58,10 +54,7 @@ function under(path: string, roots: string[]): boolean {
 	return roots.some((root) => real === root || real.startsWith(root.endsWith("/") ? root : `${root}/`));
 }
 
-	/**
-	 * Extensions off: an installed one must not add `subagent` to a supervisor. Context
-	 * files off: `AGENTS.md` in a space folder must not become instructions.
-	 */
+	/** Extensions off, and context files off: `AGENTS.md` in a space folder is not instructions. */
 export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultResourceLoader> {
 	const allowed = allowedRoots(roots);
 	const loader = new DefaultResourceLoader({

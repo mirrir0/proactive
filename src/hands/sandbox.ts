@@ -1,9 +1,6 @@
 /**
- * The sandbox a hand's work runs inside: `srt` (seatbelt, bubblewrap, WFP) with host-side
- * proxies for network allowlisting, or `confined` for a fence that also restricts reads.
- *
- * Two invariants: a sandbox that cannot be provided throws rather than downgrading
- * silently, and argv is shell-quoted element by element because `srt` takes a string.
+ * `srt` (seatbelt, bubblewrap, WFP) for writes and network, or `confined` for a fence that
+ * also restricts reads. A sandbox that cannot be provided throws; argv is shell-quoted.
  */
 
 import fs from "node:fs";
@@ -185,10 +182,9 @@ export async function createSrtSandbox(
 // ---------------------------------------------------------------------------
 
 /**
- * `srt` has `allowWrite` and no `allowRead`, so a hand's root says where a Worker may put
- * things and nothing about what it may look at. This is the OS primitive applied whole —
- * `sandbox-exec` with a deny-by-default seatbelt profile, or `bwrap` with read-only system
- * binds and `--unshare-net`. It fails closed.
+ * `srt` has `allowWrite` and no `allowRead`, so it cannot say what a Worker may look at. This
+ * is the OS primitive applied whole — a deny-by-default seatbelt profile, or `bwrap` with
+ * read-only system binds and `--unshare-net`. It fails closed.
  */
 
 /** Directories a process needs to start at all. Read-only; never a member's data. */
@@ -252,11 +248,7 @@ function realOrSelf(target: string): string {
 	}
 }
 
-/**
- * Two details that cost an afternoon each: ancestors need a read rule of their own (a
- * `subpath` on the leaf does not cover the walk, and the denial is a silent abort), and
- * paths must be resolved (`/tmp` is `/private/tmp`).
- */
+/** Ancestors need a read rule of their own, and paths must be resolved (`/tmp` is `/private/tmp`). */
 export function buildSeatbeltProfile(policy: HandPolicy, capabilities: HandCapabilities): string {
 	const read = new Set<string>(SYSTEM_READ);
 	const write = new Set<string>(["/private/tmp", "/private/var/folders", "/dev"]);

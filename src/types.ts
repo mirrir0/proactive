@@ -214,14 +214,7 @@ export interface SuperAgentConfig {
 	workerIdleExitMs: number;
 	/** Worker heartbeat interval, independent of turn progress. */
 	workerHeartbeatMs: number;
-	/**
-	 * How long a spawned Worker may take to connect before its task fails.
-	 *
-	 * A process manager that accepts a start and then loses the child is the common
-	 * case — pm2's fork entry failing to resolve, a container without the module —
-	 * and it reads exactly like a task that is running and doing nothing. Silence
-	 * is not a state a person can see, so it gets a deadline and a word.
-	 */
+	/** A process manager that accepts a start and loses the child reads exactly like a task doing nothing. */
 	workerHelloTimeoutMs: number;
 	/** Cap on max_tokens per request (avoids OpenRouter reserving the whole context). */
 	maxTokens: number;
@@ -231,10 +224,7 @@ export interface SuperAgentConfig {
 	stateDir: string;
 	/** Path to mcp.config.json for worker MCP server connections. */
 	mcpConfigPath: string;
-	/**
-	 * This member's MCP servers as the stack serves them (`MIR_STACK_URL`). Unset
-	 * means the file is the source, which is how a brain run by hand behaves.
-	 */
+	/** Unset means the file is the source, which is how a brain run by hand behaves. */
 	mcpServers?: McpServers;
 	/** Capabilities granted to Workers (tool surface is a policy decision). */
 	workerCapabilities: WorkerCapabilities;

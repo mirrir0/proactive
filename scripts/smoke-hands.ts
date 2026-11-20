@@ -1,14 +1,6 @@
 /**
- * End-to-end smoke test for the installable hand.
- *
- * Starts a hub, spawns `mir endpoint` as a real subprocess (exactly what
- * an operator installs), waits for it to register, runs one allowed command and
- * one denied one, then tears everything down.
- *
- *   npm run smoke:hands
- *
- * This is the check that the packaged artifact works — unit tests exercise the
- * classes, this exercises the thing you actually install.
+ * The packaged artifact: a hub, a real `mir endpoint` subprocess, one allowed command and
+ * one denied one. Unit tests exercise the classes; this exercises what an operator installs.
  */
 import { spawn } from "node:child_process";
 import path from "node:path";

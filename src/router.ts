@@ -72,17 +72,11 @@ export interface RouterDependencies {
 	hands?: { socketPath: string; listHands: () => HandStatus[] };
 	/** Served as a config, never as a proxy over the socket (ADR 0006). */
 	mcpServers?: { current: () => McpConfig };
-	/**
-	 * The durable thread log. Optional so a test or a minimal deployment can run
-	 * the Router without one; every append is skipped when it is absent.
-	 */
+	/** Optional, so a test or a minimal deployment runs without one. */
 	threadLog?: ThreadLog;
 	/** Called with each entry after it is stored, so a watching client sees it live. */
 	publishEntry?: (threadId: string, entry: ThreadEntry) => void;
-	/**
-	 * The Router's journal: what it remembers about a conversation, in a git repo so
-	 * a post-mortem can read what it believed at the time.
-	 */
+	/** In a git repo, so a post-mortem can read what it believed at the time. */
 	journal?: Journal;
 }
 
@@ -1377,10 +1371,7 @@ export class RouterLayer {
 		this.scheduleDrain();
 	}
 
-	/**
-	 * Coalesce only when idle, with a fixed window from the first arrival.
-	 * The timer is never reset, so a steady stream cannot postpone the turn.
-	 */
+	/** The timer is never reset, so a steady stream cannot postpone the turn. */
 	private scheduleDrain(): void {
 		if (this.disposed || this.draining || this.drainTimer) return;
 		const delay = this.inbox.length === 1 ? Math.max(0, this.config.batchWindowMs) : 0;
@@ -2596,11 +2587,7 @@ export class RouterLayer {
 
 	// ----- Restore / recovery -----
 
-	/**
-	 * Hydrate durable state. Workers from a previous daemon generation are dead
-	 * (their control socket is gone), so their tasks are failed with an explicit
-	 * reason and the Router is told — instead of silently forgetting the work.
-	 */
+	/** A worker from a previous generation is dead, so its task fails with a reason rather than being forgotten. */
 	private restore(): void {
 		for (const task of this.deps.store.listTasks()) this.tasks.set(task.id, task);
 		const persisted = this.deps.store.listWorkers();

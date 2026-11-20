@@ -64,10 +64,7 @@ export function redactSecrets(text: string): string {
 	return secrets.redact(text);
 }
 
-	/**
-	 * A config on disk can carry `${env:NAME}` instead of a value, resolved here at use
-	 * time so the file holds no key.
-	 */
+	/** Resolved at use time, so the file holds no key. */
 export function resolveSecretRefs<T>(value: T): T {
 	const walk = (node: unknown): unknown => {
 		if (typeof node === "string") {
@@ -169,14 +166,7 @@ export interface WorkerCapabilities {
 	codemode: boolean;
 }
 
-/**
- * What a Worker may do in its own process, when nothing says otherwise.
- *
- * `fs: "none"` and `net: false` because the Worker's environment is a hand: a hand
- * has roots, a policy and a sandbox, and the Worker process has none of those. The
- * two that stay on are the ones that are not disk or egress — connected services and
- * codemode's pure computation.
- */
+	/** `fs: none`, `net: false`: a Worker's environment is a hand. Connected services and pure computation stay on. */
 export const DEFAULT_WORKER_CAPABILITIES: WorkerCapabilities = {
 	net: false,
 	fs: "none",
@@ -233,10 +223,7 @@ export function matchToolName(pattern: string, name: string): boolean {
 	return re.test(name);
 }
 
-/**
- * Apply an allow/deny policy to a tool set.
- * Deny wins; a non-empty allow list means "only these".
- */
+/** Deny wins; a non-empty allow list means "only these". */
 export function filterToolNames(
 	names: string[],
 	policy: { allow?: string[]; deny?: string[] },

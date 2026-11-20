@@ -68,10 +68,7 @@ export interface WorkerRuntimeOptions {
 	cwd?: string;
 }
 
-/**
- * Shared SQLite-backed task state store. All workers open the SAME file, so
- * task metadata is durable across worker process restarts.
- */
+/** All workers open the same file, so task metadata survives a process restart. */
 export class WorkerStateStore {
 	private db: DatabaseSync;
 	private readonly dbPath: string;

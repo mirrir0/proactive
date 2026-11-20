@@ -47,10 +47,7 @@ interface ConnectedServer {
 
 export type { McpCatalogEntry, McpDiff, McpServerReport } from "./mcp-catalog.ts";
 
-/**
- * Manager for MCP client connections. One instance per Worker process.
- * Loads mcp.config.json, connects to servers, and exposes their tools.
- */
+/** One per Worker process. */
 export interface McpManagerOptions {
 	/** Without it every Worker pays a connect and a `tools/list` before it can do anything. */
 	readonly cacheDir?: string;

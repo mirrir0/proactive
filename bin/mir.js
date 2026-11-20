@@ -1,17 +1,8 @@
 #!/usr/bin/env node
 /**
- * `mir` — the one executable.
- *
- * Everything mir does is reachable from this command: the brain (`daemon`,
- * `serve`, `start`), its administration (`status`, `hands`, `recall`, `metrics`,
- * `paths`, `init`), and the hand (`endpoint`). The hand used to be a second bin,
- * `mir-endpoint`, which meant an operator had two things to install to get one
- * system — and the endpoint is not a different program, it is a different role.
- *
- * Resolution: the compiled build when there is one (what `npm i -g` installs),
- * otherwise the TypeScript source through tsx (a checkout). Both are resolved
- * from this file, never from the working directory, so `mir` behaves the same
- * from a shell, from pm2, and from a launchd unit.
+ * The one executable: the brain (`daemon`, `serve`, `start`), its administration, and the
+ * hand (`endpoint`) — a role, not a second program. Resolved from this file, never from the
+ * working directory, so it behaves the same from a shell, pm2 and launchd.
  */
 
 import { existsSync } from "node:fs";

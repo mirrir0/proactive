@@ -47,10 +47,7 @@ export interface HandExecutorOptions {
 	capabilities: HandCapabilities;
 	secrets: SecretRegistry;
 	log: Logger;
-	/**
-	 * The OS-level sandbox for `exec`. Required when `policy.sandbox === "srt"`:
-	 * a hand that says it is sandboxed but is not must refuse to run.
-	 */
+	/** A hand that says it is sandboxed and is not must refuse to run. */
 	sandbox?: SandboxWrapper;
 }
 

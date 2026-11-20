@@ -339,10 +339,7 @@ export class MirStore {
 
 	// ----- events (trigger log + dedupe) -----
 
-	/**
-	 * Append an event. Returns false when the id was already seen — that is the
-	 * dedupe path, and the caller must not process the event again.
-	 */
+	/** `false` is the dedupe path: the caller must not process the event again. */
 	insertEvent(event: StoredEvent): boolean {
 		const stmt = this.db.prepare(
 			`INSERT OR IGNORE INTO events

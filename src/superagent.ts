@@ -75,11 +75,7 @@ export class SuperAgent {
 	private handsHub: HandsHub | null = null;
 	private handsServer: HandsServer | null = null;
 	private apiServer: BrainServer | null = null;
-	/**
-	 * The product's own channel, when the client API is on. It is how a reply
-	 * reaches a chat: the Router answers through it, and its `deliver` writes the
-	 * answer into that chat's thread.
-	 */
+	/** Its `deliver` writes the answer into the chat's thread. */
 	private anomalousChannel: AnomalousChannel | null = null;
 	private readonly threadLog: ThreadLog;
 	/** What the Router remembers about each conversation, in git. */
@@ -759,10 +755,7 @@ export class SuperAgent {
 	set onTurnComplete(cb: (() => void) | null) {
 		this._onTurnComplete = cb;
 	}
-	/**
-	 * One task, as the card shows it — read from the router's live map, so a view
-	 * always answers with the state now. That is what makes a reload correct.
-	 */
+	/** Read from the live map, so a view always answers with the state now. */
 	private cardData(taskId: string) {
 		const task = this.router?.listTasks().find((candidate) => candidate.id === taskId);
 		if (task === undefined) return undefined;

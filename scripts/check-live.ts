@@ -1,14 +1,7 @@
 /**
- * check-live — drive one real conversation through a running brain and watch the wire.
- *
- * Two things this must do that a sleep-then-read-a-database cannot:
- *
- *   1. **Show the wire as it happens.** Every frame the brain sends is printed with the
- *      time it took, so "nothing is happening" and "it is thinking" look different. A
- *      check that only prints a verdict at the end cannot tell you where it stalled.
- *   2. **Fail early.** Each step has its own deadline: no `ready` in 3s is a dead socket,
- *      no snapshot in 3s is a broken chat frame, no task in 15s is a Router that did not
- *      dispatch. The overall deadline is the backstop, not the mechanism.
+ * Drive one real conversation through a running brain and print the wire with timings, so
+ * "nothing is happening" and "it is thinking" look different. Each step has its own
+ * deadline; the overall one is the backstop.
  *
  *     node scripts/check-live.ts --socket <path> --secret <token> --say "…" [--hand space:id]
  *

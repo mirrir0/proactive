@@ -92,10 +92,7 @@ function isTsRuntime(): boolean {
 export class ProcessManager implements WorkerSpawner {
 	private pm2: Pm2 | null = null;
 
-	/**
-	 * @param specDir directory for per-worker spec files (0600). Defaults to a
-	 *   temp subdirectory; the daemon passes its state dir.
-	 */
+	/** @param specDir per-worker spec files, 0600. Defaults to a temp dir; the daemon passes its state dir. */
 	constructor(private readonly specDir: string = path.join(process.cwd(), ".mir", "specs")) {}
 
 	async connect(): Promise<void> {

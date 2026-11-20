@@ -1,13 +1,6 @@
 /**
- * Smoke: the brain as a service, and a client driving it over the real socket.
- *
- * This starts a real `mir serve` process (no fake host, no in-process server),
- * connects a real `BrainClient`, and checks the door end to end: the handshake,
- * the thread list, opening a thread, saying into it, and Stop. What it does not
- * check is a model turn — that needs a provider key, and the API's behaviour is
- * what this is for.
- *
- * Run: npm run smoke:brain
+ * A real `mir serve`, a real client, and the door end to end: handshake, threads, open,
+ * say, stop. No model turn — that needs a provider key.
  */
 
 import { spawn } from "node:child_process";

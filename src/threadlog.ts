@@ -59,10 +59,7 @@ export type ThreadEntry =
 	| { seq: number; at: number; kind: "stop"; note?: string }
 	/** Not drawn in the transcript, but a client that opens the chat later reads the same name. */
 	| { seq: number; at: number; kind: "title"; title: string }
-	/**
-	 * A pointer to an MCP App: `server` + `uri` + the data to draw it. The entry carries
-	 * an id rather than a snapshot, so a client that reloads asks for the state now.
-	 */
+	/** An id, not a snapshot: a client that reloads asks for the state now. */
 	| {
 			seq: number;
 			at: number;
@@ -215,13 +212,7 @@ export class ThreadLog {
 		return this.store.threadName(threadId);
 	}
 
-	/**
-	 * Rename a thread, and record it.
-	 *
-	 * The name column is what a list reads; the entry is what a chat reads, so the
-	 * two cannot disagree about what this conversation came to be about. Returns
-	 * the entry, which the caller publishes.
-	 */
+	/** The column a list reads and the entry a chat reads cannot disagree. Returns the entry. */
 	rename(threadId: string, title: string): ThreadEntry {
 		this.store.renameThread(threadId, title);
 		return this.append(threadId, { kind: "title", title });
@@ -267,13 +258,7 @@ export function newThreadId(at: number = Date.now()): string {
 
 const ULID_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/**
- * A Crockford-base32 ULID: 48 bits of time, then 80 bits of randomness.
- *
- * A product that shows a thread as a chip or a mention needs an id it can
- * recognise as one (`ULID_RE` in the anomalous side's markdown tokens). Time
- * first also means ids sort by creation, which is what a thread list wants.
- */
+	/** Time first, so ids sort by creation — and a product can recognise one as an id. */
 export function ulid(at: number = Date.now()): string {
 	let time = "";
 	let remaining = at;

@@ -1,21 +1,7 @@
 /**
- * MCP config watcher (daemon side).
- *
- * Watches `mcp.config.json` for changes and computes a server-level diff
- * (added / removed / changed) against the last successfully parsed snapshot.
- * On a real change it invokes `onChange`, which the daemon uses to broadcast
- * a `system` signal to workers (adding/removing their MCP connections) and to
- * prune the daemon-side catalog cache.
- *
- * Notes:
- *   - The parent directory is watched (not the file) so atomic-save editors
- *     (write tmp + rename) still trigger events.
- *   - Events are debounced (~300ms) because editors often write in bursts.
- *   - A file that fails to parse is logged and skipped — the last good
- *     snapshot stays the baseline, so a corrupt save never tears down
- *     working MCP connections.
- *   - A missing/unreadable file is skipped as well (treated as "no change",
- *     not as "remove every server").
+ * Watches the config file's directory (so atomic saves trigger), debounces bursts, and
+ * diffs servers against the last good snapshot. A corrupt or missing file keeps the last
+ * good baseline rather than tearing down working connections.
  */
 
 import fs from "node:fs";

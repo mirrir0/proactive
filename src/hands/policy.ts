@@ -1,18 +1,9 @@
 /**
- * Hand policy — what a hand is allowed to do, and how it is enforced.
+ * What a hand may do, enforced here for the endpoint and for the daemon's own hand alike.
  *
- * The hand is the security principal: the machine's owner decides what may run
- * there. This module is the enforcement point, and it is shared by the endpoint
- * daemon and by the daemon's built-in local hand so both behave identically.
- *
- * Three rules, each of which exists because the alternative is a known exploit:
- *
- *   1. **Paths are confined to declared roots.** Resolved and checked, never
- *      clamped — a path that escapes is an error, not a surprise write.
- *   2. **Exec is an allowlist of executables, argv only.** No shell by default,
- *      so a model-generated string cannot become `rm -rf /` via `;`.
- *   3. **Children get a filtered environment.** Secrets in the hand's own
- *      environment are never passed down, and are redacted from output.
+ * The hand is the security principal. Paths are confined to declared roots and refused
+ * rather than clamped; exec is an allowlist of executables, argv only; children get a
+ * filtered environment and secrets are redacted from output.
  */
 
 import fs from "node:fs";
@@ -86,9 +77,7 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 			allowLocalBinding: merged.network?.allowLocalBinding ?? false,
 			allowUnixSockets: merged.network?.allowUnixSockets ?? [],
 		},
-		// An explicit list replaces the defaults rather than adding to them: an operator
-		// who names what to deny means that, and a hand with nothing denied is a
-		// decision, not an oversight.
+// An explicit list replaces the defaults: a hand with nothing denied is a decision, not an oversight.
 		denyReadPaths: (merged.denyReadPaths ?? []).map((entry) =>
 			entry.startsWith("~/") ? path.join(process.env["HOME"] ?? "", entry.slice(2)) : entry,
 		),
@@ -101,10 +90,7 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 	};
 }
 
-/**
- * Parse a policy from JSON, or from the flat strings a CLI provides.
- * Unknown keys are ignored so a config can carry forward-compatible fields.
- */
+/** Unknown keys are ignored, so a config can carry forward-compatible fields. */
 export function parsePolicy(raw: string | undefined | null, base: HandPolicy = DEFAULT_HAND_POLICY): HandPolicy {
 	if (!raw || !raw.trim()) return normalizePolicy({}, base);
 	const trimmed = raw.trim();
@@ -135,12 +121,7 @@ function realRoots(roots: string[]): string[] {
 	});
 }
 
-/**
- * The real path of `candidate`, walking to the nearest ancestor that exists.
- *
- * A write target usually does not exist yet, and `realpath` throws on it. Resolving
- * the parent is enough: a symlink anywhere above it is what an escape needs.
- */
+	/** A write target usually does not exist yet, and a symlink above it is what an escape needs. */
 function realCandidate(candidate: string): string {
 	let current = candidate;
 	for (let hops = 0; hops < 64; hops += 1) {
@@ -162,11 +143,7 @@ export function resolveInRoots(roots: string[], p: string, label = "path"): stri
 	if (roots.length === 0) {
 		throw new HandPolicyError("path-outside-roots", `${label}: this hand has no filesystem roots configured`);
 	}
-	// Real paths, both sides. `path.resolve` alone lets a symlink inside a root point
-	// anywhere — `files/link -> /Users/orchid` passes the check and reads the disk — and
-	// the hand's own file tools run in this process, where no OS sandbox is watching.
-	// Resolving the candidate also accepts the root's own aliases: on macOS a temp dir
-	// arrives as `/var/...` and is really `/private/var/...`.
+// Real paths on both sides: `resolve` alone lets a symlink inside a root point anywhere.
 	const real = realRoots(roots);
 	for (let index = 0; index < roots.length; index += 1) {
 		const root = roots[index]!;
@@ -180,13 +157,7 @@ export function resolveInRoots(roots: string[], p: string, label = "path"): stri
 	throw new HandPolicyError("path-outside-roots", `${label} escapes the allowed roots: ${p}`);
 }
 
-/**
- * True when `target` is inside one of `deniedPaths`.
- *
- * The sandbox already enforces `denyRead`/`denyWrite` for spawned processes; the
- * hand's own `read_file`/`write_file`/`list_dir` tools must apply the same rule,
- * or the model could step around the sandbox by asking the hand directly.
- */
+	/** The hand's own file ops apply this too, or the model steps around the sandbox by asking. */
 export function isPathDenied(deniedPaths: string[], target: string): boolean {
 	const absolute = realCandidate(path.resolve(target));
 	for (const entry of deniedPaths) {
@@ -214,10 +185,7 @@ export function executableName(argv: string[]): string {
 	return path.basename(first);
 }
 
-/**
- * Validate an exec request against the policy.
- * Returns the argv to run (never a shell string) or throws.
- */
+/** Returns the argv to run, never a shell string. */
 export function validateExec(
 	input: ExecInput,
 	policy: HandPolicy,
@@ -262,15 +230,7 @@ export function validateExec(
 	return { argv: input.argv, shell: wantsShell, cwd };
 }
 
-/**
- * The argv a `shell` op becomes, after the two grants it needs.
- *
- * The shell is run *as a program* — `/bin/sh -c <command>` — rather than by
- * asking `exec` to reinterpret its argv as a string. That keeps one meaning for
- * `exec` (argv, no shell) and makes this op's own grant unavoidable: the
- * allowlist must name `sh`, or the executable check that gives the allowlist its
- * meaning would stop applying to everything the command then runs.
- */
+	/** `/bin/sh -c <command>` keeps `exec` argv-only, and the allowlist must still name `sh`. */
 export function validateShell(
 	input: ShellInput,
 	policy: HandPolicy,
@@ -296,10 +256,7 @@ export function validateShell(
 /** The POSIX shell a `shell` op runs, when it exists. */
 const SHELL_PATH = "/bin/sh";
 
-/**
- * What a hand says it enforces, for a person to read — never for a decision.
- * Counts, not contents, for the allow and deny lists.
- */
+/** Counts, not contents. */
 export function policySummary(policy: HandPolicy, capabilities: HandCapabilities): HandPolicySummary {
 	return {
 		sandbox: policy.sandbox,
@@ -314,10 +271,7 @@ export function policySummary(policy: HandPolicy, capabilities: HandCapabilities
 	};
 }
 
-/**
- * Build the environment for a child process: the safe base set plus explicit
- * allowlists, minus anything secret-shaped. Never the hand's full environment.
- */
+/** The safe base set plus the allowlists, minus anything secret-shaped — never the full environment. */
 export function filteredEnv(
 	policy: HandPolicy,
 	extra: Record<string, string> | undefined,

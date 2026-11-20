@@ -1,22 +1,7 @@
 /**
- * File/queue channel.
- *
- * Inbound:  drops a JSON file into  <dir>/inbox/*.json
- *           { id?, text, thread?, from?, reply_to? }
- *           The file name is used as the event id. Processed files move to
- *           <dir>/processed/.
- * Outbound: `respond_queue` writes <dir>/outbox/<eventId>.json
- *           { text, thread, event_id, at }.
- *
- * This is the durable, offline-friendly source: anything that can write a file
- * (a cron job, a shell script, another machine) can talk to the agent, and every
- * reply is a file that survives a restart.
- *
- * Two production details that fs.watch alone does not give you:
- *   - a **polling fallback** (`pollMs`), because inotify misses events on NFS,
- *     some Docker mounts and macOS network volumes;
- *   - an **ownership check**: on POSIX only files owned by the daemon's uid are
- *     admitted, so another local user cannot inject events into a shared dir.
+ * A directory as a channel: a JSON file in `inbox/` is an event, a reply is a file in
+ * `outbox/`. Durable and offline-friendly, with a polling fallback for filesystems where
+ * inotify misses events, and a POSIX ownership check so another user cannot inject.
  */
 
 import fs from "node:fs";

@@ -1,16 +1,7 @@
 /**
- * Context Manager — Inline & Spill + Chain of Recall (superagent.md §3.3).
- *
- * Treats the model's context window as a cache:
- *   - Inline: put information likely needed soon directly into the context
- *   - Spill:  keep full info outside the window, leave only a reference/summary
- *   - Chain of Recall: each recalled object inlines the IDs of next-hop objects,
- *     letting the model expand context hop-by-hop along a reference graph.
- *
- * Objects (Triggers, Threads, Worker Sessions, Tasks, Conclusions) get unique
- * ids. Spilling writes to the durable store, so recall still works after a
- * daemon restart — which is the whole point of the mechanism: the Router's
- * transcript cannot hold months of history, but the reference graph can.
+ * Inline & Spill with a chain of recall: a compact summary goes into the window, the full
+ * object stays in the store with an id, and each recalled object names its next hops so
+ * the model can walk the graph. Recall survives a restart, which is the point.
  */
 
 import { Type } from "typebox";
@@ -98,11 +89,7 @@ export class ContextManager {
 			.slice(-limit);
 	}
 
-	/**
-	 * Inline an object into the model context: produce a compact string that
-	 * includes the object's summary plus the IDs of related objects (the chain
-	 * of recall entry points). Long content is truncated with a spill pointer.
-	 */
+	/** Summary plus the ids of related objects; long content is truncated with a spill pointer. */
 	inline(obj: {
 		id: string;
 		type: SpillType;
@@ -151,13 +138,7 @@ export class ContextManager {
 	}
 }
 
-/**
- * `recall` — the Router's Chain-of-Recall tool.
- *
- * Pass an id to fetch one object (its summary plus next-hop ids); pass a query
- * to search. Either way the result inlines the ids of related objects, so the
- * model can hop forward without a bespoke endpoint per object type.
- */
+	/** An id fetches one object, a query searches; either way the next-hop ids come back. */
 export function createRecallTool(context: ContextManager): ToolDefinition {
 	return defineTool({
 		name: "recall",

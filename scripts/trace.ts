@@ -1,22 +1,9 @@
 #!/usr/bin/env node
 /**
- * trace.ts — one chat, end to end: what the person said, what the Router did,
- * what each worker it dispatched did, and what came back.
+ * One chat end to end: what the person said, what the Router did, what each dispatch did,
+ * and what came back. Read-only, in the order it happened, with the waiting visible.
  *
- * This is the instrument for the question "why did the assistant do that?".
- * It reads the brain's own state, read-only, and prints the flow in the order
- * it happened, with the waiting visible and the pathologies counted:
- *
- *   npm run trace                          # the chats this brain has, newest first
- *   npm run trace -- --latest              # the most recent chat, in full
- *   npm run trace -- --chat <chatId>       # one chat
- *   npm run trace -- --thread <threadId>   # one thread, chat or a worker's
- *   npm run trace -- --task <taskId>       # one dispatch's worker, in full
- *   npm run trace -- --chat <id> --json    # the same, for a program
- *
- * Flags: --state <path> (the database, a member's home, or the brains root),
- * --turns <n> (the last n turns), --full (whole arguments, results and briefs),
- * --no-color.
+ *     npm run trace [-- --latest | --chat <id> | --thread <id> | --task <id>] [--json]
  */
 
 import { assemble, clip, formatSpan, type Trace } from "./trace/assemble.ts";

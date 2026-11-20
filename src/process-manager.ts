@@ -1,13 +1,8 @@
 /**
- * pm2 process manager (ADR 0001).
+ * Each Task is its own pm2 app, `mir-worker-<taskId>` (ADR 0001).
  *
- * Each Task runs as its own pm2 app `mir-worker-<taskId>`. The daemon spawns it,
- * hands it the task spec, and deletes it when it finishes.
- *
- * The spec is passed as a **0600 file path**, not as an inline env var: task
- * descriptions can contain private context, and `pm2 env <app>` / `ps eww`
- * would otherwise expose it to every local user. The file is removed when the
- * worker is deleted.
+ * The spec is a 0600 file path, never an inline env var: `pm2 env` and `ps eww` would
+ * otherwise show a task's private context to every local user.
  */
 
 import { fileURLToPath } from "node:url";
@@ -65,14 +60,7 @@ export interface WorkerSpec {
 export interface WorkerSpawner {
 	spawnWorker(spec: WorkerSpec): Promise<string>;
 	killWorker(taskId: string): Promise<void>;
-	/**
-	 * Why a worker that never connected died, when the process manager wrote it
-	 * down.
-	 *
-	 * A process manager that accepts a start and loses the child reports success,
-	 * so the only witness is the child's own stderr. Optional: a spawner that keeps
-	 * no logs simply has nothing to say.
-	 */
+	/** Optional: a spawner that keeps no logs simply has nothing to say. */
 	lastWorkerError?(taskId: string): string | undefined;
 	listWorkers(): Promise<WorkerProcessInfo[]>;
 	disconnect(): Promise<void>;
@@ -104,10 +92,7 @@ function isTsRuntime(): boolean {
 export class ProcessManager implements WorkerSpawner {
 	private pm2: Pm2 | null = null;
 
-	/**
-	 * @param specDir directory for per-worker spec files (0600). Defaults to a
-	 *   temp subdirectory; the daemon passes its state dir.
-	 */
+	/** @param specDir per-worker spec files, 0600. Defaults to a temp dir; the daemon passes its state dir. */
 	constructor(private readonly specDir: string = path.join(process.cwd(), ".mir", "specs")) {}
 
 	async connect(): Promise<void> {
@@ -139,15 +124,7 @@ export class ProcessManager implements WorkerSpawner {
 		}
 	}
 
-	/**
-	 * Say, at boot, that workers will not start.
-	 *
-	 * pm2 runs a child through its own fork entry, and in a pnpm layout with two
-	 * copies of pm2 that file may not resolve: every worker then dies at boot while
-	 * `pm2.start` reports success, which reads as "the task is running and nothing is
-	 * happening". Checking it once at boot — rather than once per task, twenty
-	 * seconds later — is the difference between a hint and an investigation.
-	 */
+	/** Once at boot, not twenty seconds into a task: `pm2.start` reports success even when the child dies. */
 	preflight(): void {
 		if ((process.env.MIR_WORKER_SPAWN ?? "pm2") === "process") return;
 		try {
@@ -167,19 +144,7 @@ export class ProcessManager implements WorkerSpawner {
 		const workerEntry = path.join(here(), dev ? "worker-main.ts" : "worker-main.js");
 		const specPath = this.writeSpec(spec);
 
-		/**
-		 * A worker can be started without pm2.
-		 *
-		 * pm2 is how a worker outlives its daemon (ADR 0001), and it is the default.
-		 * It is also a process manager whose own fork entry has to resolve, and in a
-		 * container — or a pnpm layout with two copies of pm2 — it may not: the worker
-		 * dies at boot with `ERR_MODULE_NOT_FOUND` inside pm2's container, which reads
-		 * as "the task is running and nothing is happening".
-		 *
-		 * So there is a second way, chosen when the operator asks for it: a plain
-		 * child process, tied to this daemon. It is worse at surviving the daemon and
-		 * better at existing at all.
-		 */
+		/** Worse at surviving the daemon, better at existing at all — for a container or a pnpm layout. */
 		if ((process.env.MIR_WORKER_SPAWN ?? "pm2") === "process") {
 			this.spawnDirect(name, workerEntry, dev, spec);
 			log.info("worker spawned without pm2", { worker: spec.workerId, task: spec.taskId });
@@ -233,14 +198,7 @@ export class ProcessManager implements WorkerSpawner {
 		this.direct.set(name, child);
 	}
 
-	/**
-	 * The last thing the child said before it died.
-	 *
-	 * pm2 writes a worker's stderr to `~/.pm2/logs/<app>-error.log`, and when the
-	 * failure is pm2's own (`ProcessContainerFork.js` not resolving in a pnpm
-	 * layout) that file is the only place the reason exists. Reading it turns "the
-	 * worker never started" into "the worker never started: Cannot find module …".
-	 */
+	/** Turns "the worker never started" into "the worker never started: Cannot find module …". */
 	lastWorkerError(taskId: string): string | undefined {
 		const name = `mir-worker-${taskId}`;
 		const file = path.join(homedir(), ".pm2", "logs", `${name}-error.log`);

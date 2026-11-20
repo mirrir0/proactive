@@ -1,14 +1,7 @@
 /**
- * Hands server — the two listeners the hub needs.
- *
- *   1. **Endpoint listener** (TCP, optionally TLS). Endpoints dial *out* to it,
- *      so no inbound port, no firewall change and no static address is needed on
- *      the user's machine. The first frame must be an authenticated `hello`;
- *      anything else is rejected before a single work item is routed.
- *
- *   2. **Client listener** (Unix socket, mode 0600). Workers are local, so their
- *      tool calls ride a local socket. That keeps the model-facing path cheap
- *      and means the network never carries a brain's tool traffic.
+ * Two listeners: endpoints dial *out* to a TCP (optionally TLS) port, so no inbound port
+ * or static address is needed on a member's machine; Workers reach the hub on a local
+ * socket, 0600, so the network never carries a brain's tool traffic.
  */
 
 import net from "node:net";

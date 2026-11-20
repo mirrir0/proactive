@@ -1,20 +1,7 @@
 /**
- * A brain client — the other end of `BrainServer`.
- *
- * Kept here, beside the server, so the two halves of the wire cannot drift: a
- * change to a frame breaks this file and the server's handler in the same
- * commit. The product's host mirrors this shape in its own package (it may not
- * import the brain — see the anomalous proposal §11), and a test here is what
- * says the mirror is right.
- *
- * Two behaviours worth stating, because both are how a display stays honest:
- *
- *   - **`open` resolves with the snapshot and then streams.** `onEntry` is the
- *     subscription; `open` returns once the snapshot has landed, so a caller can
- *     render history and then append, with no gap between them.
- *   - **A dropped connection rejects every request in flight** rather than
- *     leaving promises pending forever. A display that cannot reach its brain
- *     says so; it does not hang.
+ * The other end of `BrainServer`, kept beside it so the two halves of the wire cannot
+ * drift. `open` resolves with the snapshot and then streams; a dropped connection rejects
+ * every request in flight rather than leaving promises pending.
  */
 
 import net from "node:net";
@@ -93,10 +80,7 @@ export class BrainClient {
 		}).then((answer) => answer.threads);
 	}
 
-	/**
-	 * Open a thread: its entries after `since`, then every new one through
-	 * `onEntry`. Resolves once the snapshot has landed.
-	 */
+	/** Resolves once the snapshot has landed; `onEntry` carries what follows. */
 	async open(
 		threadId: string,
 		since = 0,
@@ -109,12 +93,7 @@ export class BrainClient {
 		return { seq: answer.seq, status: answer.status, entries: answer.entries };
 	}
 
-	/**
-	 * Open the thread a chat shows, minting it on first use.
-	 *
-	 * The one call a chat driver makes: it has a chat id, not a thread id, and
-	 * this is where the two become one.
-	 */
+	/** A chat driver has a chat id, not a thread id; this is where the two become one. */
 	async openChat(
 		chatId: string,
 		since = 0,
@@ -142,12 +121,7 @@ export class BrainClient {
 		await this.request({ type: "stop", id: this.nextId(), threadId });
 	}
 
-	/**
-	 * Bring a hand: the brain mints the token, the client starts the machine.
-	 *
-	 * A space is a hand like any other — the brain is told a folder, a name and what
-	 * it may do, and nothing about why.
-	 */
+	/** The brain is told a folder, a name and what it may do — and nothing about why. */
 	async addHand(request: HandRegistration): Promise<{ handId: string; token: string; hubPort: number }> {
 		return await this.request<{ handId: string; token: string; hubPort: number }>({
 			type: "hand_add",
@@ -183,13 +157,7 @@ export class BrainClient {
 		return `c${String(this.seq)}`;
 	}
 
-	/**
-	 * Send one request and wait for its answer.
-	 *
-	 * The hello frame has no `id` the server echoes, so `connect` passes a frame
-	 * without one and the `ready` frame — which is also the answer to hello — is
-	 * matched here by being the first frame of all.
-	 */
+	/** The `ready` frame is also hello's answer, so it is matched by being the first frame of all. */
 	private request<T = unknown>(frame: ClientToBrain): Promise<T> {
 		const socket = this.socket;
 		if (socket === null || this.closed) return Promise.reject(new Error("brain client is not connected"));

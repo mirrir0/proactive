@@ -1,15 +1,7 @@
 /**
- * Hand tools — what a brain sees of its hands.
- *
- * The paper's point is that a hand is `execute(name, input) → string`. These
- * tools are that surface, and nothing more: no transport, no credentials, no
- * knowledge of whether the hand is a laptop, a container or the machine next
- * door. A policy violation comes back as a tool error the model can read and
- * react to, which is what keeps a stuck or refusing hand from becoming a stuck
- * brain.
- *
- * Output is capped and redacted before it enters the context window, so a large
- * build log or a leaked token cannot blow up a turn.
+ * A hand as a brain sees it: `execute(name, input) → string`, nothing about transport or
+ * credentials. A policy violation is a tool error the model can read, so a refusing hand
+ * does not become a stuck brain. Output is capped and redacted before it enters context.
  */
 
 import { Type } from "typebox";
@@ -85,14 +77,7 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 	const handRoot = options.handRoot;
 	const maxChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
 
-	/**
-	 * The hand this task is on.
-	 *
-	 * Pinned when the client said; otherwise the hub picks, and the first answer *becomes*
-	 * the pin. A Worker that is not pinned must not wander: its first `list_dir` on one
-	 * machine and its second `read_file` on another would read two different folders and
-	 * call it one task.
-	 */
+	/** The first answer becomes the pin: a Worker that wandered would read two folders and call it one task. */
 	let settled = pinned;
 
 	const call = async (
@@ -257,19 +242,14 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				"A task runs on one hand and can reach nothing else, so this is the whole list.",
 			parameters: Type.Object({}),
 			async execute(): Promise<AgentToolResult<any>> {
-				// Scoped to this task's own hand. The hub knows every hand the member
-				// has — their laptop, each of their spaces — and a Worker pinned to one
-				// space has no business seeing the others' roots, let alone their names.
+// Scoped to this task's hand: a Worker pinned to one space has no business seeing the others.
 				const hands = (await client.refreshHands()).filter(
 					(hand) => pinned === undefined || hand.endpointId === pinned,
 				);
 				const text = hands.length
 					? hands
 							.map((h) => {
-								// The hand's own policy carries no roots — it enforces them itself,
-								// and what it reports is display only. The task was told where the
-								// folder is; that is what a Worker needs to know, and the name is
-								// what a person calls it.
+// A remote hand reports no roots; the task was told where the folder is, and the name a person calls it.
 								const roots = h.policy.roots.length > 0 ? h.policy.roots : handRoot === undefined ? [] : [handRoot];
 								const name = handName === undefined ? h.endpointId : `“${handName}”`;
 								const cap = h.policy.maxConcurrent ?? 0;

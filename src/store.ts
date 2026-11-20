@@ -1,21 +1,6 @@
 /**
- * Durable state for the daemon (superagent.md §5.1: compute is stateless,
- * session state must persist).
- *
- * Everything the Router knows that must survive a restart lives here:
- *
- *   - **events**      the trigger log. `id` is the primary key, so re-delivery
- *                     of the same event is idempotent (at-least-once input).
- *                     Events left `pending` by a crash are replayed on boot.
- *   - **tasks**       dispatch → running → done/failed/cancelled, with results.
- *   - **workers**     the live worker registry, so a restarted daemon can adopt
- *                     (or fail) workers instead of forgetting them.
- *   - **threads**     threads plus their many-to-many worker subscriptions.
- *   - **objects**     the spilled-object reference graph behind Chain of Recall.
- *
- * One SQLite file, shared with the per-task state that Workers write
- * (`task_state`, see worker.ts). WAL + a busy timeout because several OS
- * processes hold the same file open.
+ * What survives a restart: the trigger log (idempotent by `id`, replayed on boot), tasks, the
+ * worker registry, threads and the spilled objects. One SQLite file in WAL.
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -41,15 +26,7 @@ export interface StoredEvent {
 	error?: string;
 }
 
-/**
- * One line of the Router's scratchpad.
- *
- * `outstanding` is work in flight — a task, a question asked of a person, a
- * deploy being watched. `planned` is what the Router means to do and has not
- * started. The split matters because they are read differently: outstanding work
- * is what a new message has to be reconciled with, planned work is what the Router
- * was in the middle of thinking.
- */
+/** `outstanding` is what a new message is reconciled with; `planned` is what it meant to do. */
 export interface ScratchpadRow {
 	id: string;
 	kind: "outstanding" | "planned";
@@ -357,10 +334,7 @@ export class MirStore {
 
 	// ----- events (trigger log + dedupe) -----
 
-	/**
-	 * Append an event. Returns false when the id was already seen — that is the
-	 * dedupe path, and the caller must not process the event again.
-	 */
+	/** `false` is the dedupe path: the caller must not process the event again. */
 	insertEvent(event: StoredEvent): boolean {
 		const stmt = this.db.prepare(
 			`INSERT OR IGNORE INTO events
@@ -472,16 +446,7 @@ export class MirStore {
 		return rows.map(rowToTask);
 	}
 
-	/**
-	 * Settle the rows a previous process left mid-flight.
-	 *
-	 * `failed` rather than `done`: nobody knows what that work did, and a task that
-	 * says it finished when it was killed is worse than one that says it did not.
-	 * Threads go `idle` so a chat is usable again — a chat stuck `running` shows a
-	 * loader forever and queues every later turn behind work that does not exist.
-	 *
-	 * Returns how many tasks were settled, so the caller can say so once.
-	 */
+	/** `failed`, not `done`: a task that says it finished when it was killed is worse. Threads go `idle`. */
 	settleInterrupted(now = Date.now()): number {
 		const stranded = this.listTasksByStatus("running");
 		for (const task of stranded) {
@@ -585,12 +550,7 @@ export class MirStore {
 		}));
 	}
 
-	/**
-	 * Append one entry and return its sequence.
-	 *
-	 * The bump and the insert are one transaction, so the sequence a writer gets
-	 * back is the one its row carries: two writers cannot both be told `n`.
-	 */
+	/** The bump and the insert are one transaction, so two writers cannot both be told `n`. */
 	appendThreadEntry(threadId: string, at: number, kind: string, payload: string): number {
 		this.db.exec("BEGIN IMMEDIATE");
 		try {
@@ -616,14 +576,7 @@ export class MirStore {
 		}
 	}
 
-	/**
-	 * Entries matching a filter, newest last, plus how many matched in total.
-	 *
-	 * The filter runs in SQL so a search is not "read the last 800 entries and hope":
-	 * `kind` narrows on an indexed column, and `like` narrows the payload before a
-	 * single row leaves the database. A `like` that is too coarse for a caller's
-	 * meaning is the caller's business — it only ever returns a superset.
-	 */
+	/** The filter runs in SQL: `kind` narrows an indexed column, `like` narrows the payload before a row leaves. */
 	searchThreadEntries(
 		threadId: string,
 		options: { kinds?: readonly string[]; like?: string; limit: number },
@@ -652,13 +605,7 @@ export class MirStore {
 		return { rows: rows.reverse(), total };
 	}
 
-	/**
-	 * Rewrite one entry's payload in place.
-	 *
-	 * Only for a card: its entry is a pointer to a task, and the task's state moves. A
-	 * second pointer would be a second card on screen, so the row is updated and the
-	 * sequence — the order a client has already read — is left alone.
-	 */
+	/** Only for a card: a second pointer would be a second card on screen. The sequence is left alone. */
 	updateThreadEntryPayload(threadId: string, seq: number, payload: unknown): void {
 		this.db
 			.prepare(`UPDATE thread_entries SET payload = ? WHERE thread_id = ? AND seq = ?`)
@@ -705,13 +652,7 @@ export class MirStore {
 		return "idle";
 	}
 
-	/**
-	 * The thread a chat shows, minting one the first time the chat is seen.
-	 *
-	 * A chat is a window onto a thread, so the mapping has to live somewhere and
-	 * survive a restart. It lives here, with the thread: the product's chat row
-	 * carries no brain id, which is what keeps the brain replaceable.
-	 */
+	/** A chat's row carries no brain id, which is what keeps the brain replaceable. */
 	/** The chat a thread shows, if it shows one. */
 	chatForThread(threadId: string): string | undefined {
 		const row = this.db.prepare(`SELECT chat_id FROM threads WHERE id = ?`).get(threadId) as
@@ -720,15 +661,7 @@ export class MirStore {
 		return row?.chat_id ?? undefined;
 	}
 
-	/**
-	 * The thread a chat shows, minting it on first use — and, when the chat's own
-	 * name is handed over, holding it.
-	 *
-	 * The name a thread carries is the chat's title as the person sees it, so the
-	 * agent can answer "what is this chat called" without asking anyone. The host
-	 * reads the title from the chat's row, which is the authority; this is the
-	 * brain's copy of it, refreshed whenever the chat is opened.
-	 */
+	/** The brain's copy of the chat's title, refreshed whenever the chat is opened. */
 	threadForChat(chatId: string, mint: () => string, title?: string): string {
 		const row = this.db.prepare(`SELECT id, name FROM threads WHERE chat_id = ?`).get(chatId) as
 			| { id: string; name: string }
@@ -874,16 +807,7 @@ export class MirStore {
 			.run(input.id, input.name, input.kind ?? "remote", input.tokenHash, input.createdAt ?? Date.now());
 	}
 
-	/**
-	 * Forget hands nobody has brought for a while.
-	 *
-	 * A hand is a machine a client runs; the client re-registers it every start, so a
-	 * row whose hand has not connected in `olderThanMs` names a space that is gone or
-	 * a laptop that is not coming back. Revoked rather than deleted: the row is the
-	 * record of a hand that existed, and `mir hands rm` is how a person erases one.
-	 *
-	 * Returns the ids, so the caller can say what it let go.
-	 */
+	/** Revoked, not deleted: the row is the record of a hand that existed. Returns the ids. */
 	revokeStaleEndpoints(olderThanMs: number, now = Date.now()): string[] {
 		const rows = this.db
 			.prepare(`SELECT id FROM endpoints WHERE kind = 'remote' AND revoked_at IS NULL AND last_seen < ?`)

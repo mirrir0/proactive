@@ -1,17 +1,7 @@
 /**
- * HTTP webhook channel.
- *
- * Inbound:  POST /channels/http/events  { text, thread?, from?, reply_to? }
- *           → 202 Accepted, becomes an Event on thread `thread` (default: the
- *           sender-provided id or a fresh thread).
- * Outbound: `respond_http` POSTs { text, thread } back to the event's
- *           `reply_to` URL when one was supplied; otherwise stores the reply in
- *           an in-memory outbox readable at GET /channels/http/outbox.
- *
- * Authentication: set `MIR_HTTP_TOKEN` (shared bearer token) and/or
- * `MIR_HTTP_HMAC_SECRET` (HMAC-SHA256 over `<timestamp>.<body>`, replay window
- * 5 minutes). Requests that fail either check are rejected before their body
- * is even parsed, so a spoofed event never reaches the agent.
+ * Inbound: `POST /channels/http/events` becomes an event. Outbound: `respond_http` posts to
+ * the event's `reply_to`, or into an in-memory outbox. A request that fails the token or
+ * HMAC check is rejected before its body is parsed.
  */
 
 import http from "node:http";

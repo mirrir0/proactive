@@ -1,26 +1,8 @@
 #!/usr/bin/env node
 /**
- * The hand — `mir endpoint`.
- *
- * This is the program that runs on the machine where work actually happens: a
- * laptop, a build box, a container. It is deliberately small and deliberately
- * dumb:
- *
- *   - it holds **no session state**, so it is cattle: kill it, restart it, lose
- *     the network, and the brain just sees a failed tool call;
- *   - it **dials out**, so no inbound port, no firewall change, no static IP;
- *   - it enforces the machine owner's policy (roots, executable allowlist,
- *     timeouts, output caps) and refuses anything else;
- *   - it executes with the machine's own credentials — `git push` works because
- *     the local remote is already configured — while the brain never sees a
- *     token.
- *
- * Usage:
- *   mir endpoint --hub cloud.example.com:4700 --id my-laptop --token <token> \
- *                --root ~/work --allow git,ls,cat,rg,node,pnpm --fs rw
- *
- * Every flag has an environment fallback (MIR_HANDS_*), so it can be installed
- * as a launchd/systemd unit with the token in the environment.
+ * `mir endpoint` — the program that runs where work happens. It holds no session state,
+ * dials out, enforces the machine owner's policy, and uses the machine's own credentials.
+ * Every flag has a `MIR_HANDS_*` fallback, so it installs as a service.
  */
 
 import net from "node:net";
@@ -86,10 +68,7 @@ export class EndpointDaemon {
 		this.secrets.add("MIR_HANDS_TOKEN", options.token);
 	}
 
-	/**
-	 * Initialize the sandbox before anything can be dispatched. A hand that
-	 * cannot enforce its policy refuses to start rather than run unconfined.
-	 */
+	/** A hand that cannot enforce its policy refuses to start rather than run unconfined. */
 	async start(): Promise<void> {
 		if (this.options.policy.sandbox !== "none") {
 			this.sandbox = await createSandbox(
@@ -292,9 +271,6 @@ function safeHostname(): string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 function expandHome(value: string): string {
 	if (value === "~") return homedir();
@@ -331,13 +307,7 @@ function multiFlag(argv: string[], name: string): string[] {
 	return values;
 }
 
-/**
- * Which sandbox a hand runs under.
- *
- * `srt` is the default because it is the one that works everywhere and fences
- * network; `confined` is what a space asks for, because its promise is about what a
- * Worker may *read* and `srt` has no read fence.
- */
+	/** `srt` fences writes and network; `confined` is what a space asks for, because it fences reads too. */
 function sandboxKind(requested: string | undefined, noSandbox: boolean): "none" | "srt" | "confined" {
 	if (noSandbox) return "none";
 	const wanted = (requested ?? "").trim().toLowerCase();

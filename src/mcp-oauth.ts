@@ -1,22 +1,7 @@
 /**
- * OAuth login support for MCP HTTP servers.
- *
- * When an MCP server requires OAuth (401 on first request), we run the full
- * authorization code flow:
- *   1. Discover the authorization server metadata from the MCP server URL
- *   2. Register an OAuth client (or reuse stored credentials)
- *   3. Print an authorization URL for the user to visit in a browser
- *   4. Start a local callback server to receive the authorization code
- *   5. Exchange the code for access/refresh tokens
- *   6. Store tokens durably so future runs don't need re-login
- *
- * Tokens are stored per-server-URL in `~/.local/share/mir/mcp-oauth/<host>.json`.
- *
- * Built on @earendil-works/pi-mcp's OAuth flow:
- *   - McpOAuthProvider implements OAuthClientProvider
- *   - adaptOAuthProvider(provider) -> AuthProvider for StreamableHttpTransport
- *   - OAuthCallbackServer.listen() -> local HTTP callback endpoint
- *   - authorizeMcp(provider, options) -> discovery/register/authorize
+ * The authorization-code flow for an MCP server that answers 401: discover, register, print
+ * a URL, receive the callback, exchange, and store tokens per server URL under
+ * `<data>/mcp-oauth/<host>.json`.
  */
 
 import {
@@ -67,12 +52,7 @@ class FileOAuthStateStore {
 	}
 }
 
-/**
- * Manager for MCP OAuth flows. One instance per Worker process.
- *
- * Creates McpOAuthProvider + AuthProvider per server URL, and runs the
- * interactive authorization flow when a server requires login.
- */
+/** One per Worker process. */
 export class OAuthManager {
 	private providers = new Map<string, McpOAuthProvider>();
 	private adapters = new Map<string, AuthProvider>();
@@ -107,13 +87,7 @@ export class OAuthManager {
 		});
 	}
 
-	/**
-	 * Run the interactive OAuth authorization flow for a server.
-	 * Prints an authorization URL, starts a callback server,
-	 * waits for the user to complete the flow, and stores tokens.
-	 *
-	 * Returns true when authorized, false when the user declined or failed.
-	 */
+	/** Returns false when the person declined or it failed. */
 	async authorize(serverUrl: string): Promise<boolean> {
 		let provider = this.providers.get(serverUrl);
 		if (!provider) {
@@ -209,10 +183,7 @@ export class OAuthManager {
 		}
 	}
 
-	/**
-	 * Ensure the server is authorized. If tokens exist, return the auth provider.
-	 * If not, run the interactive OAuth flow first.
-	 */
+	/** Runs the interactive flow first when there are no tokens. */
 	async ensureAuthorized(serverUrl: string): Promise<AuthProvider> {
 		const adapter = this.getAuthProvider(serverUrl);
 		const provider = this.providers.get(serverUrl)!;
@@ -239,10 +210,7 @@ export function getOAuthManager(): OAuthManager {
 	return oauthManager;
 }
 
-/**
- * A no-op AuthProvider for servers that don't need OAuth.
- * Returns undefined token (no Authorization header).
- */
+/** No Authorization header. */
 export const noAuthProvider: AuthProvider = {
 	async token(): Promise<string | undefined> {
 		return undefined;

@@ -1,22 +1,10 @@
-/**
- * Session seam.
- *
- * Both layers run an LLM session, but the rest of the system must not care
- * whether that session is a real pi `AgentSession` or a scripted double. This
- * module defines the narrow surface the Router and Worker actually use, plus
- * the default implementation backed by `createAgentSession`.
- *
- * Why a seam: the interesting behaviour (batching, reply attribution, event
- * queueing, recovery) is scheduling logic, not model logic. With a factory
- * injected, tests drive that logic deterministically — no provider, no key,
- * no tokens — which is what makes the seven fixes below verifiable.
- */
+/** The narrow session surface the Router and Worker use, so tests can drive it without a provider. */
 
 import { createAgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 /** The subset of `AgentSession` this system relies on. */
 export interface AgentSessionLike {
-	/** Send a prompt. Resolves when the message is accepted or the turn ends (see waitForIdle). */
+	/** Resolves when the message is accepted or the turn ends (see `waitForIdle`). */
 	prompt(text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<void>;
 	/** Resolves once the agent has no queued work left. Optional for doubles. */
 	waitForIdle?(): Promise<void>;
@@ -35,38 +23,17 @@ export interface CreateSessionOptions {
 	sessionManager?: any;
 	thinkingLevel?: string;
 	noTools?: "all" | "builtin";
-	/**
-	 * The tools this session may use, by name. With `noTools: "all"` this is the
-	 * whole surface: an extension the machine happens to have installed cannot add
-	 * a tool to a Worker that was not given it.
-	 */
+	/** With `noTools: "all"` this is the whole surface — no extension can add to it. */
 	tools?: string[];
-	/**
-	 * Where pi reads its global config and extensions from.
-	 *
-	 * A Worker (and the Router) must not inherit the machine's pi extensions: those
-	 * are someone's own tools — `subagent`, `todo`, `AskClaude` — and a Worker that
-	 * has them is a Worker that can do things the assistant never could.
-	 */
+	/** Where pi reads global config and extensions. Not the machine's: those are someone else's tools. */
 	agentDir?: string;
 	/**
-	 * What the session may take skills, extensions and context files from.
-	 *
 	 * Built by `skills.ts`, never left to the default: the default loader scans the
-	 * machine's own pi home, so a brain without one advertises every skill on the
-	 * host it runs on. `agentDir` alone is not enough — it is one more place
-	 * scanned, not the only one.
+	 * machine's pi home, and `agentDir` is one more place scanned, not the only one.
 	 */
 	resourceLoader?: any;
 	customTools?: ToolDefinition[];
-	/**
-	 * The working directory pi tells the model about.
-	 *
-	 * Left to `process.cwd()` it is whatever started the brain — for a brain spawned by
-	 * a host, the host's source tree — and a model that is told a directory will answer
-	 * questions about it. A Router has no filesystem, so it gets an empty directory of
-	 * its own; a Worker gets the hand's root, which is a place it can actually read.
-	 */
+	/** What pi tells the model its working directory is. A model told a directory answers about it. */
 	cwd?: string;
 }
 
@@ -95,7 +62,7 @@ export async function settleSession(session: AgentSessionLike): Promise<void> {
 		await session.waitForIdle();
 		return;
 	}
-	// Fallback: poll isIdle until it settles or a bounded time passes.
+	// Fallback for doubles without `waitForIdle`.
 	const deadline = Date.now() + 30_000;
 	while (session.isIdle === false && Date.now() < deadline) {
 		await new Promise((resolve) => setTimeout(resolve, 10));

@@ -1,16 +1,6 @@
 /**
- * trace/read.ts — a brain's state, opened for reading and nothing else.
- *
- * A trace is an instrument, so it must not be able to break the thing it
- * measures: every statement here is a SELECT, and the file is opened read-only
- * where SQLite allows it (it may refuse a WAL database whose writer is gone, so
- * the open falls back to a normal handle and still only selects).
- *
- * The database is the brain's own (`<stateDir>/mir.sqlite`), which is the only
- * place the flow of a chat is recorded: the thread's entries, the tasks a turn
- * dispatched, and what else the brain was doing while this chat waited. The
- * host's Postgres holds the chat's row and the UI's copy of the messages, and
- * neither is needed to see what the brain did — the brain's log is the trace.
+ * A brain's state, read-only: every statement is a SELECT, and the file is opened read-only
+ * where SQLite allows it. The brain's own log is the trace — the host's copy is not needed.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -84,13 +74,7 @@ export interface StateReader {
 	tasks(): TaskRow[];
 	/** Entries on other threads between two instants: what the brain was busy with. */
 	busyBetween(from: number, to: number, exclude: readonly string[]): BusyWindow;
-	/**
-	 * Entries whose text contains a phrase, newest first.
-	 *
-	 * The way in from a transcript: someone pastes what they saw and no id, and the
-	 * words they saw are in the log. Matching is on the stored payload, so it finds
-	 * what the person said and what they were told, not a summary of either.
-	 */
+	/** The way in from a transcript: someone pastes what they saw, and no id. */
 	search(phrase: string, limit?: number): FoundEntry[];
 	close(): void;
 }
@@ -247,14 +231,7 @@ export function openState(path: string): StateReader {
 	};
 }
 
-/**
- * Where a member's brain keeps its state.
- *
- * Derived rather than stored, so the tool works against a live brain, a
- * developer's `mir serve`, and a state directory copied off a machine. An
- * explicit path may be the database, the state directory, a member's home, or
- * the brains root; the rest is found under it.
- */
+	/** Derived, not stored: the path may be the database, the state dir, a member's home, or the root. */
 export function findState(explicit?: string): string {
 	const isFile = (path: string): boolean => {
 		try {
@@ -316,14 +293,7 @@ export interface BrainContext {
 	readonly identity: { teamId: string; definitionId: string; sessionId: string } | undefined;
 }
 
-/**
- * The brain around the state: the process that writes it, and the identity it
- * runs as on the stack.
- *
- * A trace is about a brain as much as about a chat, and "is this a running
- * brain or a copy of a dead one" changes how a gap in the log reads. Signal 0
- * asks the kernel whether the pid exists and sends nothing.
- */
+	/** Whether this is a running brain or a copy of a dead one changes how a gap reads. */
 export function brainContext(statePath: string): BrainContext {
 	const home = dirname(dirname(statePath));
 	const read = (name: string): string | undefined => {

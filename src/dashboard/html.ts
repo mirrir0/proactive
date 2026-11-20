@@ -1,21 +1,7 @@
 /**
- * html.ts — the dashboard, rendered on the server.
- *
- * **Not a single-page app.** Every view is a URL — `/`, `/threads`,
- * `/threads/<id>`, `/hands`, `/scratchpad`, `/metrics` — and every link is an
- * `<a href>`: a thread can be bookmarked, pasted to somebody, opened in a new tab,
- * and reloaded into the same view. A dashboard you cannot link to is a dashboard
- * you have to describe.
- *
- * The markup is rendered here, on the brain, so what arrives is the page. The
- * script does one thing: keep it current. One `EventSource` swaps the section for
- * its freshly rendered fragment when the state changes, and appends entries when a
- * thread page is open. Nothing navigates without the browser doing it.
- *
- * The look is the product's, not a new one: Between's surfaces and inks, the
- * soft-corner radii, the status fills, the type steps — copied as values so the
- * brain needs no stylesheet dependency. A frame on the ground, the rail inside its
- * left edge, and the content as a rounded panel inset from it.
+ * The dashboard, rendered on the brain: every view is a URL and every link an `<a href>`.
+ * One `EventSource` keeps the page current; nothing navigates without the browser doing it.
+ * The look is the product's, copied as values so the brain needs no stylesheet.
  */
 
 import type { DashboardState } from "./server.ts";
@@ -282,16 +268,7 @@ export function renderSection(options: PageOptions): string {
 	return metricsCharts(state);
 }
 
-/**
- * The metrics page: the six chart forms shadcn ships, drawn from the brain's own
- * numbers.
- *
- * shadcn's charts are Recharts wrappers — a React tree and a bundler — so what is
- * borrowed is the language they encode: the `--chart-1..5` palette, a grid that is
- * horizontal-only and dashed `3 6`, bars with a 4px radius, a 2px line with no
- * dots, an area with a gradient under it. The forms are the same six; the renderer
- * is SVG on the server, so the page is still one document with real links.
- */
+	/** The palette and geometry are shadcn's chart language; the renderer is SVG on the server. */
 function metricsCharts(state: DashboardState): string {
 	const counters = state.metrics.counters;
 	const history = state.history;
@@ -364,14 +341,7 @@ function metricsCharts(state: DashboardState): string {
 	].join("");
 }
 
-/**
- * A thread's workers, on the right.
- *
- * The chat is the main area, because that is what a person follows; the workers
- * are beside it, because that is what the chat set in motion. Clicking one opens
- * its detail in place — a real URL (`?task=…`), so the state of one worker can be
- * sent to somebody, and the chat keeps its scroll while you look.
- */
+	/** A real URL (`?task=…`), so one worker's detail can be sent to somebody. */
 function renderWorkers(options: PageOptions): string {
 	const threadId = options.threadId ?? "";
 	const workers = options.state.tasks.filter((task) => task.threadId === options.threadId);
@@ -417,14 +387,7 @@ function renderWorkers(options: PageOptions): string {
 	</aside>`;
 }
 
-/**
- * A metric chart, opened in a modal.
- *
- * A modal, not a page: the numbers behind it are the ones the card showed, and
- * leaving the page to read an explanation loses the place. It is still a URL —
- * `/metrics/<id>` — so it can be linked, reloaded and closed with the browser's
- * back button, and the close control is a link home rather than a script.
- */
+	/** A modal, not a page: the numbers behind it are the ones the card showed. Still a URL. */
 function renderChartModal(options: PageOptions, id: ChartId): string {
 	const copy = CHART_COPY[id];
 	const chart = (renderSection({ ...options, view: "metrics" }).match(

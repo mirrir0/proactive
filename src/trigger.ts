@@ -1,17 +1,7 @@
 /**
- * Event Trigger System (Section 3).
- *
- * Events arrive on Channels. Before the Router sees one it must pass two-stage
- * filtering:
- *   1. Programmatic policies (Fast Path) — deterministic admission checks.
- *   2. Semantic policies (Slow Path) — a model decides whether to act.
- *
- * Then routing: if the Event's Thread already has subscribers, pass it straight
- * to **every** subscriber (fast path). Otherwise cold-start it at the Router.
- *
- * The slow path is deliberately skipped for a subscribed Thread: a follow-up on
- * a PR the agent already owns is by definition interesting, and paying for a
- * model call per comment is exactly the cost §3.1 exists to avoid.
+ * Two-stage filtering before the Router sees an event: programmatic policies, then a cheap
+ * model judgement. A subscribed thread skips both — a follow-up on work the agent already
+ * owns is interesting by definition.
  */
 
 import type { SemanticPolicyConfig, Thread, Trigger, TriggerPolicyConfig } from "./types.ts";
@@ -19,8 +9,6 @@ import type { ChannelKind } from "./channels/types.ts";
 import { ThreadManager } from "./thread.ts";
 import { ADMIT_ALL_JUDGE, type SemanticJudge } from "./policy.ts";
 import { log } from "./telemetry.ts";
-
-// ---------- Stage 1: Programmatic policies (Fast Path) ----------
 
 export type KindPolicy = "ignore" | "candidate" | "respond_only";
 
@@ -74,15 +62,9 @@ export function programmaticFilter(
 	return { pass: true };
 }
 
-// ---------- Router ----------
-
 export interface RouteResult {
 	thread: Thread;
-	/**
-	 * Where this trigger must go. Multiple entries = fast-path fan-out to every
-	 * subscribed Worker. `"router"` = needs a Router decision (cold start).
-	 * An empty list means filtered out.
-	 */
+	/** Several entries = fan-out to every subscriber; `"router"` = a decision; empty = filtered out. */
 	targets: Array<"router" | `worker:${string}`>;
 	reason?: string;
 	/** Which stage made the decision (useful for metrics/abuse analysis). */

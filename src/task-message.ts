@@ -1,18 +1,8 @@
 /**
- * task-message.ts — what a Worker is told when it starts.
+ * A task as a value, rendered as the message that starts a Worker.
  *
- * A task is a value, not a sentence a model composes. The Router fills a
- * `TaskSpec` (`title` for the row, `description` for the person, `instructions`
- * for the Worker), and this module is the only thing that turns one into a
- * message. That is what makes the shape testable without a model: a brief that
- * puts the person's line where the Worker's brief belongs is a bug in one
- * function, not a thing to notice in a transcript.
- *
- * What is *not* here any more is the procedure. How to use a hand, when to reach
- * for a connected service, how to end a task — those are skills the Worker reads
- * (`skills/`), advertised in its system prompt with a description that says when
- * each applies. This message carries only what is specific to *this* task: what
- * it is, what it is for, the brief, and what it is allowed to touch.
+ * The only thing that turns a `TaskSpec` into text, so a wrong brief is a bug in one
+ * function rather than something to spot in a transcript.
  */
 
 import type { WorkerCapabilities } from "./security.ts";
@@ -20,57 +10,36 @@ import type { WorkerCapabilities } from "./security.ts";
 /** The part of a `WorkerSpec` that decides what the Worker reads. */
 export interface TaskSpec {
 	taskId: string;
-	/** The row: what this is, in a few words. */
+	/** The row. */
 	title: string;
-	/** The person's line: what this is for, as they would say it. */
+	/** What the person asked for, in their words. */
 	description: string;
 	/** The brief: paths, constraints, what a good answer looks like. */
 	instructions?: string;
 	capabilities: WorkerCapabilities;
-	/** The hand this task is pinned to, when it is pinned to one. */
 	endpointId?: string;
-	/** Where that hand keeps its files, when it keeps them anywhere. */
+	/** Where the hand's files start, when it says. */
 	handRoot?: string;
-	/** What the hand is called, when it says. */
 	handName?: string;
-	/** Whether this Worker runs with a hand at all. */
 	hasHands: boolean;
 }
 
-/**
- * The message that starts a task.
- *
- * Deliberately short: the Worker's system prompt already carries its role, its
- * skills and its invariants, so repeating them here would be a second copy that
- * drifts. What a Worker cannot get from anywhere else is which task it is on.
- */
+/** Short on purpose: role, skills and invariants live in the system prompt. */
 export function taskMessage(spec: TaskSpec): string {
 	const lines = [
 		`Task: ${spec.title}`,
 		"",
-		// Two parts, because they answer different questions: what this is for (the
-		// line the person sees) and what to do about it (the brief).
 		...(spec.instructions === undefined
 			? [`Description: ${spec.description}`]
 			: [`What this is for: ${spec.description}`, "", spec.instructions]),
 		"",
-		// What this process may do *by itself*. It is deliberately not called "your
-		// capabilities": a Worker read `"fs":"none"` and told the person "filesystem
-		// access is disabled for this task", when the filesystem it needed was the
-		// hand's and was right there. The environment is the hand's job; this is only
-		// what runs here.
 		`In this process: ${describeOwnCapabilities(spec.capabilities)}.`,
 	];
 	if (spec.hasHands) {
-		// Said before the hand, so the sentence above cannot be read as "no files".
 		lines.push(
 			"Your files are not here: they are on the hand, and its tools are how you reach them. That is normal, not a limitation.",
 		);
-		// Where the work happens, and which machine — the `hands` skill says how to
-		// use it. A Worker told neither will run commands in its own process and
-		// report files that were never touched.
-		// A name, or nothing: an id is machinery, and a Worker that reads one repeats it to a
-		// person — "the current space (hand space:01M7K4Q…)" is what that looks like.
+		// A name, never an id: a Worker repeats to a person whatever it was handed.
 		const label =
 			spec.handName !== undefined
 				? `“${spec.handName}”`
@@ -78,9 +47,6 @@ export function taskMessage(spec: TaskSpec): string {
 					? "the hand this task was assigned"
 					: "whichever hand the hub picks (call `list_hands` to see it)";
 		lines.push(`Execution happens on a hand (see the \`hands\` skill). You are on: ${label}.`);
-		// The folder the hand is rooted at is where "here" is. It is the hand's own
-		// policy, so this is true of any hand — a space, a repo, a build box — and a
-		// Worker that is not told will look for the file in a connected service.
 		if (spec.handRoot !== undefined) {
 			lines.push(`Its files start at: ${spec.handRoot}. Relative paths begin there.`);
 		}
@@ -90,20 +56,12 @@ export function taskMessage(spec: TaskSpec): string {
 		);
 	}
 	lines.push(
-		// The one control fact that is not a skill: an event that is not this task's
-		// is released, not answered. Answering it would put this Worker's words into
-		// a conversation it is not part of.
 		"If a follow-up message arrives that is not part of this task, call release_event instead of answering it.",
 	);
 	return lines.join("\n");
 }
 
-/**
- * What the Worker's own process may do, in words.
- *
- * Not JSON: a model that is shown `{"fs":"none"}` reports it to a person as "filesystem
- * access is disabled", which is true of the process and false of the work.
- */
+/** In words, not JSON: `{"fs":"none"}` gets reported to a person as "no filesystem access". */
 function describeOwnCapabilities(capabilities: WorkerCapabilities): string {
 	const parts = [
 		capabilities.mcp ? "connected services are available" : "no connected services",

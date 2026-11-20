@@ -1,28 +1,6 @@
 /**
- * The sandbox a hand runs its work inside.
- *
- * Enforcement is delegated to the Anthropic Sandbox Runtime (`srt`), which wraps
- * the whole process tree with the OS's own primitives — seatbelt on macOS,
- * bubblewrap on Linux, a WFP egress fence on Windows — plus host-side HTTP and
- * SOCKS proxies for network allowlisting. That is a better boundary than this
- * project could build for itself, and it covers the two axes a command
- * allowlist cannot:
- *
- *   - **paths** — the process may only write inside the hand's roots, and may
- *     not read credential material such as `~/.ssh` or `~/.aws`;
- *   - **network** — outbound traffic is denied unless the destination matches
- *     `network.allowedDomains`, so an injected instruction cannot exfiltrate
- *     what it just read.
- *
- * Two invariants this module exists to keep:
- *
- *   1. **No silent downgrade.** If the sandbox is requested and cannot be
- *      provided (unsupported platform, missing `bwrap`, a config `srt` refuses),
- *      construction throws. A boundary the operator believes in is worse than
- *      one they know is missing.
- *   2. **The sandbox is not a policy bypass.** `srt` wraps a *command string*,
- *      so the argv we were given is shell-quoted element by element before it
- *      is embedded. No argument can become a second command.
+ * `srt` (seatbelt, bubblewrap, WFP) for writes and network, or `confined` for a fence that
+ * also restricts reads. A sandbox that cannot be provided throws; argv is shell-quoted.
  */
 
 import fs from "node:fs";
@@ -55,26 +33,14 @@ export interface SandboxWrapper {
 	dispose(): Promise<void>;
 }
 
-/**
- * Quote one argv element for POSIX `sh`.
- *
- * `srt` takes a command *string* and runs it through a shell, so this is the
- * only thing standing between a model-supplied argument and the host shell.
- * Every element is single-quoted; a literal quote becomes `'\''`.
- */
+	/** Every element single-quoted; a literal quote becomes `'\''`. This is what stops a second command. */
 export function shellQuote(argv: string[]): string {
 	return argv
 		.map((arg) => `'${String(arg).replace(/'/g, `'\\''`)}'`)
 		.join(" ");
 }
 
-/**
- * Map a hand policy onto an `srt` configuration.
- *
- * Reads are open by default (a dev machine is useless otherwise) and narrowed by
- * `denyReadPaths`. Writes are allow-only: the hand's roots plus `srt`'s own
- * defaults for temp/scratch. Network is allow-only and empty by default.
- */
+	/** Reads are open and narrowed by `denyReadPaths`; writes and network are allow-only. */
 export function buildSandboxConfig(policy: HandPolicy): SandboxRuntimeConfig {
 	const allowWrite = [...new Set([...policy.roots, ...getDefaultWritePaths()])];
 	return {
@@ -109,12 +75,7 @@ export interface SrtSandboxOptions {
 	signal?: AbortSignal;
 }
 
-/**
- * Build a sandbox for one hand. Throws when the sandbox cannot be enforced.
- *
- * `srt` is a process-global session, so a second hand in the same process with a
- * different policy is a configuration error rather than a silent merge.
- */
+	/** `srt` is process-global, so a second hand with another policy is a configuration error. */
 export async function createSrtSandbox(
 	policy: HandPolicy,
 	log: Logger,
@@ -147,9 +108,7 @@ export async function createSrtSandbox(
 	}
 	await initialized.promise;
 
-	// Resolve the shell once, absolutely. `srt` otherwise looks `bash` up in PATH
-	// at wrap time, which is both a startup race and a dependency on the very
-	// environment the sandbox is about to replace.
+// Absolute, once: `srt` otherwise looks `bash` up in the PATH the sandbox is about to replace.
 	const binShell = process.platform === "win32" ? undefined : resolvePosixShell();
 
 	log.info("sandbox initialized", {
@@ -170,10 +129,7 @@ export async function createSrtSandbox(
 		},
 		async wrap(argv, wrapOptions) {
 			const command = shellQuote(argv);
-			// `srt` locates its shell by spawning `which` with a 1s timeout, so a
-			// loaded machine can make a healthy shell look missing. Retry briefly
-			// instead of failing a task for a scheduling artefact; anything that is
-			// not that artefact is surfaced immediately.
+// `srt` looks its shell up with a 1s timeout, so retry briefly rather than fail on a scheduling artefact.
 			let lastError: Error | null = null;
 			for (let attempt = 0; attempt < 4; attempt++) {
 				try {
@@ -216,30 +172,12 @@ export async function createSrtSandbox(
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Confined: reads *and* writes inside the roots
-// ---------------------------------------------------------------------------
+// Confined: reads and writes both stay inside the roots.
 
 /**
- * A sandbox that confines reads, which `srt` does not.
- *
- * `srt` is a write fence: `allowWrite` exists, `allowRead` does not, so a hand's
- * root says where a Worker may *put* things and nothing about what it may look at.
- * That is the right shape for a hand the member configured themselves — it can read
- * its own toolchain — and the wrong shape for a space, where the promise is "this
- * folder and nothing else".
- *
- * So this backend is the OS's own primitive, applied whole:
- *
- *   - **macOS** — `sandbox-exec` with a seatbelt profile that denies by default and
- *     allows reads of the roots plus the system toolchain (binaries, libraries,
- *     locale), writes of the roots plus temp, and no network at all.
- *   - **Linux** — `bwrap` with a read-only bind of the system directories, a
- *     read-write (or read-only, by `fs`) bind of the roots, a tmpfs for `/tmp`, and
- *     `--unshare-net`.
- *
- * It fails closed: no `sandbox-exec`, no `bwrap`, no sandbox. A boundary an operator
- * believes in is worse than one they know is missing.
+ * `srt` has `allowWrite` and no `allowRead`, so it cannot say what a Worker may look at. This
+ * is the OS primitive applied whole — a deny-by-default seatbelt profile, or `bwrap` with
+ * read-only system binds and `--unshare-net`. It fails closed.
  */
 
 /** Directories a process needs to start at all. Read-only; never a member's data. */
@@ -261,9 +199,7 @@ const SYSTEM_READ = [
 	"/Library/Apple",
 	"/private/var/db/dyld",
 	"/dev",
-	// Configuration a tool needs to run at all. Not secrets — `~/.ssh`, `~/.aws` and the
-	// brain's own state stay denied — but `git` refuses to start without its config, and
-	// a Worker that cannot run `git status` reports the sandbox as a broken machine.
+// Tool config, not secrets: `git` refuses to start without it, and keys stay denied.
 	"/etc/gitconfig",
 ] as const;
 
@@ -303,18 +239,7 @@ function realOrSelf(target: string): string {
 	}
 }
 
-/**
- * The seatbelt profile for a policy: deny by default, allow the roots and the OS.
- *
- * Two details that cost an afternoon each if you get them wrong:
- *
- *   - **Ancestors need a read rule of their own.** A process walks `/`, `/Users`,
- *     `/Users/orchid` before it opens `/Users/orchid/space/file`. `subpath` on the
- *     leaf does not cover the walk, and the denial surfaces as `sandbox-exec`
- *     aborting with no message at all.
- *   - **Paths are resolved.** `/tmp/x` is really `/private/tmp/x`, and a profile
- *     written in the first form allows nothing.
- */
+/** Ancestors need a read rule of their own, and paths must be resolved (`/tmp` is `/private/tmp`). */
 export function buildSeatbeltProfile(policy: HandPolicy, capabilities: HandCapabilities): string {
 	const read = new Set<string>(SYSTEM_READ);
 	const write = new Set<string>(["/private/tmp", "/private/var/folders", "/dev"]);
@@ -392,12 +317,7 @@ export interface ConfinedSandboxOptions {
 	readonly bwrap?: string;
 }
 
-/**
- * Build a read-confining sandbox for one hand.
- *
- * Throws when the platform's primitive is missing — the caller reports that as a
- * hand that cannot start, not as a hand that runs unconfined.
- */
+	/** Throws when the primitive is missing: a hand that cannot start, not one that runs unconfined. */
 export function createConfinedSandbox(
 	policy: HandPolicy,
 	capabilities: HandCapabilities,

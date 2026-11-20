@@ -1,19 +1,7 @@
 /**
- * Semantic admission policy — the Slow Path of §3.1's two-stage filter.
- *
- * Programmatic policies (trigger.ts) drop the obvious noise for free. What is
- * left is genuinely ambiguous: a message that *might* be a work request. Asking
- * the Router to judge that is expensive, because the Router's context is large
- * and its answer drives a whole turn.
- *
- * So the judgement is a small, separate, cheap model call with a strict output
- * contract: `{"act": boolean, "reason": string}`. Policies are written in
- * natural language, which is the point — a human can add or disable one without
- * touching code.
- *
- * Failure policy is explicit: on a judge error the event is **admitted**
- * (fail-open) by default, because dropping a real request is worse than paying
- * for one extra Router turn. Set `failClosed` to invert that.
+ * The slow path: a small, cheap model call with a strict output contract, for the events the
+ * programmatic policies could not decide. Policies are prose, so a person can add one
+ * without touching code. A judge error admits the event (fail-open) unless `failClosed`.
  */
 
 import type { SemanticPolicyConfig } from "./types.ts";

@@ -1,15 +1,6 @@
 /**
- * SuperAgent — top-level composition.
- *
- * Wires together:
- *   - Channels (terminal, HTTP webhook, file queue) — event sources + response tools
- *   - Router layer (long-lived, replies via channel tools, dispatches tasks)
- *   - Worker layer (one pm2 process per task, ADR 0001)
- *   - Trigger system (two-stage filtering, threads, pass-through fan-out)
- *   - Durable state (trigger log + tasks + workers + threads + recall objects)
- *   - Control channel (daemon↔worker IPC)
- *   - Watchdog (independent control loop with its own agent session)
- *   - Telemetry (structured logs + Prometheus metrics)
+ * Top-level composition: channels, Router, Workers (ADR 0001), the trigger system,
+ * durable state, the control channel, the watchdog and telemetry.
  */
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -84,11 +75,7 @@ export class SuperAgent {
 	private handsHub: HandsHub | null = null;
 	private handsServer: HandsServer | null = null;
 	private apiServer: BrainServer | null = null;
-	/**
-	 * The product's own channel, when the client API is on. It is how a reply
-	 * reaches a chat: the Router answers through it, and its `deliver` writes the
-	 * answer into that chat's thread.
-	 */
+	/** Its `deliver` writes the answer into the chat's thread. */
 	private anomalousChannel: AnomalousChannel | null = null;
 	private readonly threadLog: ThreadLog;
 	/** What the Router remembers about each conversation, in git. */
@@ -203,11 +190,7 @@ export class SuperAgent {
 	}
 
 	async start(): Promise<void> {
-		// What the previous life left. A daemon that is killed — or crashes — leaves its
-		// task rows `running` and its chat threads `running`, and nothing else ever
-		// settles them: the chat shows a loader forever, and the next turn queues
-		// behind work that does not exist. Started is not running, and a row that says
-		// running when nothing runs is a lie the whole UI repeats.
+// A killed daemon leaves rows `running` and nothing settles them: started is not running.
 		const stale = this.store.revokeStaleEndpoints(this.config.hands.staleAfterMs);
 		if (stale.length > 0) log.info("hands nobody brought in a while were revoked", { hands: stale });
 		const settled = this.store.settleInterrupted();
@@ -347,9 +330,7 @@ export class SuperAgent {
 			await this.apiServer.start();
 		}
 
-		// MCP changes, from whichever source this brain has. With a stack, the
-		// member's connected services are fetched and polled (mcp-servers.ts) and
-		// the file is not read at all; without one, the file watcher is the source.
+// With a stack the servers are fetched and polled; without one, the file watcher is the source.
 		if (this.config.mcpServers !== undefined) {
 			// Ask before the Router exists: the first Worker spawned is given this
 			// answer, and a Worker that booted with nothing would keep nothing.
@@ -365,9 +346,7 @@ export class SuperAgent {
 			this.mcpWatcher.start();
 		}
 
-		// The product's channel comes before the Router, because the Router builds
-		// its `respond_anomalous` tool from it. Its delivery writes into the thread
-		// log, which is what a watching client reads — no reverse socket needed.
+// Before the Router, because the Router builds `respond_anomalous` from it.
 		if (this.config.api.socketPath !== "") {
 			this.anomalousChannel = new AnomalousChannel({
 				deliver: (target, text) => {
@@ -395,9 +374,7 @@ export class SuperAgent {
 			});
 		}
 
-		// The card, served as an MCP App: a client fetches `ui://mir/work` and the
-		// view asks `work_status`. Only when a port is configured, and never without
-		// a token — the same rule as the client API.
+// Only with a port, and never without a token — the same rule as the client API.
 		if (this.config.mcpApp.port > 0) {
 			if (this.config.mcpApp.token === "") {
 				log.warn("mcp app server not started: no token", { hint: "set MIR_API_TOKEN" });
@@ -450,9 +427,7 @@ export class SuperAgent {
 			hands: this.handsHub
 				? {
 						socketPath: this.handsSocketPath(),
-						// The merged view: the hub's status, with the roots the client told
-						// us about. A remote hand reports no roots of its own — it enforces
-						// its own policy — and without this the brief has no folder in it.
+// The hub's status plus the client's roots: a remote hand reports none of its own.
 						listHands: () => this.handsWithRoots(),
 					}
 				: undefined,
@@ -461,9 +436,7 @@ export class SuperAgent {
 			journal: this.journal,
 			publishEntry: (threadId, entry) => {
 				this.apiServer?.publish(threadId, entry);
-				// A dashboard following this thread gets the entry now, not at the
-				// next tick: it is a log pane, and a log pane that lags is a log pane
-				// somebody refreshes.
+// Now, not at the next tick: a log pane that lags is a log pane somebody refreshes.
 				this.dashboard?.publish(threadId, entry);
 			},
 			onOrphanedWorker: (workerId, taskId) => {
@@ -515,9 +488,7 @@ export class SuperAgent {
 			}
 		}
 
-		// Say where this daemon is, so a client attaches to *this* mir instead of
-		// starting a second one. Written once the socket and the dashboard are up: a
-		// record that arrives before the listener is a record that lies.
+// Written once the listeners are up: a record that arrives first is a record that lies.
 		if (this.config.api.socketPath !== "") {
 			writeInstance(this.config.paths, {
 				socket: this.config.api.socketPath,
@@ -577,12 +548,7 @@ export class SuperAgent {
 		}
 	}
 
-	/**
-	 * Merge one worker's MCP catalog report into the daemon cache. Each report is
-	 * authoritative for the servers it covers: stale entries for those servers are
-	 * dropped first, then the reported tools are inserted. Servers not present in
-	 * the report are left untouched (the watcher prunes removed/changed servers).
-	 */
+	/** Authoritative for the servers it covers; servers absent from it are left alone. */
 	private mergeMcpCatalog(report: { servers: McpServerReport[]; tools: McpCatalogEntry[] }): void {
 		for (const s of report.servers) {
 			for (const [name, entry] of this.mcpCatalog) {
@@ -773,10 +739,7 @@ export class SuperAgent {
 	set onTurnComplete(cb: (() => void) | null) {
 		this._onTurnComplete = cb;
 	}
-	/**
-	 * One task, as the card shows it — read from the router's live map, so a view
-	 * always answers with the state now. That is what makes a reload correct.
-	 */
+	/** Read from the live map, so a view always answers with the state now. */
 	private cardData(taskId: string) {
 		const task = this.router?.listTasks().find((candidate) => candidate.id === taskId);
 		if (task === undefined) return undefined;
@@ -792,14 +755,7 @@ export class SuperAgent {
 		};
 	}
 
-	/**
-	 * What the dashboard draws.
-	 *
-	 * Assembled from the readers the brain already has — the thread log, the
-	 * router's tasks, the scratchpad, the hub's hands, the metric registry — so the
-	 * page cannot disagree with the brain about what is true. `tasks` is reversed so
-	 * a person sees the newest work first.
-	 */
+	/** Assembled from the readers the brain already has, so the page cannot disagree with it. */
 	private dashboardState() {
 		const snapshot = metrics.snapshot();
 		return {
@@ -878,25 +834,13 @@ export class SuperAgent {
 		return this.handsHub;
 	}
 
-	/**
-	 * What the client API can see and do.
-	 *
-	 * `say` is the only write a client has: it becomes a Trigger on the thread,
-	 * exactly as a message from any other channel would, so the Router cannot
-	 * tell a person in the product from a person in a terminal — which is the
-	 * property that makes the product one more place to talk to the same agent.
-	 */
+	/** `say` is the only write: it becomes a Trigger, exactly as any other channel's message would. */
 	/** Every channel this daemon drives, the product's included when its API is on. */
 	private channels(): Channel[] {
 		return this.anomalousChannel === null ? this.deps.channels : [...this.deps.channels, this.anomalousChannel];
 	}
 
-	/**
-	 * The hands as this brain should describe them: the hub's status, and the roots the
-	 * client named when it brought the hand. A remote hand's own policy is display
-	 * only, and a hand that reports no roots leaves a Worker with no idea where "here"
-	 * is — which is how a Worker came to answer with the brain's directory.
-	 */
+	/** The hub's status plus the roots the client named: a remote hand's own policy is display only. */
 	private handsWithRoots(): HandStatus[] {
 		return (this.handsHub?.listHands() ?? []).map((hand) => {
 			const roots = this.handRoots.get(hand.endpointId);
@@ -910,10 +854,7 @@ export class SuperAgent {
 		return {
 			listThreads: (filter) => {
 				const summaries = this.threadLog.summaries(filter?.limit ?? 100).map((thread) => {
-					// Where a thread sits in a tree is the tasks' business, not the log's: a
-					// check's work thread is a child of the work thread of the task that
-					// asked for it. A client draws the rail from this, so it is computed
-					// here rather than left for each client to guess.
+// A check's work thread is a child of its parent's work thread; a client draws the rail from it.
 					const task = this.router?.listTasks().find((candidate) => candidate.workThreadId === thread.id);
 					const parentTask =
 						task?.parentTaskId === undefined ? undefined : this.router?.getTask(task.parentTaskId);
@@ -942,9 +883,7 @@ export class SuperAgent {
 			},
 			say: (threadId, content, hand) => {
 				const eventId = `api-${crypto.randomUUID()}`;
-				// A thread that shows a chat answers into that chat; the channel is
-				// what knows how. A thread with no chat is a work thread, and its
-				// message is a plain trigger.
+// A thread with no chat is a work thread, and its message is a plain trigger.
 				const chatId = this.threadLog.chatOf(threadId);
 				if (this.anomalousChannel !== null && chatId !== undefined) {
 					this.anomalousChannel.submit({
@@ -974,21 +913,10 @@ export class SuperAgent {
 					.catch((err: unknown) => log.warn("could not stop a thread", { thread: threadId, error: (err as Error).message }));
 			},
 			hands: () => this.handsWithRoots(),
-			/**
-			 * A hand the client brought.
-			 *
-			 * The brain mints the token because the brain owns the store — a client
-			 * cannot write that row and should not have to. What the hand may do is the
-			 * hand's own policy; what is recorded here is only its name and that it is
-			 * expected. Nothing about *why* the client wants a hand (a space, a repo, a
-			 * build box) reaches this method.
-			 */
+			/** The brain owns the store, so it mints the token. What the hand may do is the hand's own policy. */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
-				// Where the hand's files start. A remote hand's own policy is a placeholder on
-				// this side — it enforces its own — so the roots the client names here are the
-				// only ones the brain can tell a Worker about. Without them a Worker is told
-				// "you are on: the hand" and no folder, and it looks for one in its own cwd.
+// The client's roots are the only ones the brain can tell a Worker about: a remote hand reports none.
 				if (request.roots.length > 0) this.handRoots.set(request.handId, [...request.roots]);
 				this.store.createEndpoint({
 					id: request.handId,

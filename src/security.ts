@@ -1,47 +1,26 @@
-/**
- * Security seam (superagent.md §8.4).
- *
- * The architecture assumes cloud compute trusts endpoint devices and that
- * credentials on an endpoint can enter the model's context. Both assumptions
- * are wrong by default, so this module provides the three controls the system
- * needs to be deployable:
- *
- *   1. **Redaction** — every secret value the process knows about is scrubbed
- *      from logs, model prompts and tool results. A secret that is used is
- *      never a secret that is read.
- *   2. **Channel authentication** — inbound events are only accepted from
- *      callers holding a shared token and/or a valid HMAC signature, so the
- *      event stream (which drives the agent) cannot be spoofed.
- *   3. **Capability gating** — a Worker's tool surface is a policy decision,
- *      not an accident of what the process happens to import.
- *
- * Nothing here imports agent code, so it is safe to use from every layer.
- */
+/** Redaction, channel authentication and capability gating. Nothing here imports agent code. */
 
 import crypto from "node:crypto";
 
-// ---------------------------------------------------------------------------
-// 1. Secret registry + redaction
-// ---------------------------------------------------------------------------
 
-/** Values shorter than this are not redacted — they would mangle ordinary text. */
+/** Shorter values would mangle ordinary text. */
 const MIN_SECRET_LENGTH = 8;
 
-/** Env var names that are treated as secrets when discovered from the process. */
+/** Suffixes that make an env var a secret. */
 const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|AUTH)/i;
 
 export class SecretRegistry {
-	/** value → human name, used in the redaction marker. */
+/** value → name, for the marker. */
 	private readonly byValue = new Map<string, string>();
 
-	/** Register a known secret value (idempotent). */
+/** Idempotent. */
 	add(name: string, value: string | undefined | null): void {
 		if (!value || value.length < MIN_SECRET_LENGTH) return;
 		if (this.byValue.has(value)) return;
 		this.byValue.set(value, name);
 	}
 
-	/** Discover secrets from an env map (defaults to `process.env`). */
+/** Defaults to `process.env`. */
 	addFromEnv(env: NodeJS.ProcessEnv = process.env): void {
 		for (const [name, value] of Object.entries(env)) {
 			if (!SECRET_NAME_RE.test(name)) continue;
@@ -58,10 +37,7 @@ export class SecretRegistry {
 		return this.byValue.has(value);
 	}
 
-	/**
-	 * Replace every known secret in `text` with `«redacted:NAME»`.
-	 * Longest-first so a secret that contains another secret wins.
-	 */
+/** Longest-first, so a secret that contains another secret wins. */
 	redact(text: string): string {
 		if (!text || this.byValue.size === 0) return text;
 		let out = text;
@@ -74,21 +50,15 @@ export class SecretRegistry {
 	}
 }
 
-/** Process-wide registry. Populated at daemon/worker startup. */
+/** Populated at startup. */
 export const secrets = new SecretRegistry();
 
-/** Convenience wrapper around the process-wide registry. */
+/** Over the process-wide registry. */
 export function redactSecrets(text: string): string {
 	return secrets.redact(text);
 }
 
-/**
- * Resolve `${env:NAME}` placeholders in a config object at use time.
- *
- * MCP configs live on disk and are often committed; this lets a config carry
- * `"GITHUB_TOKEN": "${env:GITHUB_TOKEN}"` while the value only exists in the
- * environment. Unresolved placeholders are dropped (never passed literally).
- */
+	/** Resolved at use time, so the file holds no key. */
 export function resolveSecretRefs<T>(value: T): T {
 	const walk = (node: unknown): unknown => {
 		if (typeof node === "string") {
@@ -106,19 +76,16 @@ export function resolveSecretRefs<T>(value: T): T {
 	return walk(value) as T;
 }
 
-// ---------------------------------------------------------------------------
-// 2. Channel authentication
-// ---------------------------------------------------------------------------
 
 export interface ChannelAuthOptions {
-	/** Shared bearer token expected in `tokenHeader`. Empty/undefined disables token auth. */
+/** Empty disables token auth. */
 	token?: string;
 	tokenHeader?: string;
-	/** HMAC-SHA256 secret over `<timestamp>.<rawBody>`. Empty/undefined disables signature auth. */
+/** Empty disables signature auth. */
 	hmacSecret?: string;
 	signatureHeader?: string;
 	timestampHeader?: string;
-	/** Reject signatures older/newer than this (replay window). Default 5 minutes. */
+/** Replay window. Default 5 minutes. */
 	maxSkewMs?: number;
 }
 
@@ -134,20 +101,13 @@ function safeEqual(a: string, b: string): boolean {
 	return crypto.timingSafeEqual(ab, bb);
 }
 
-/** Compute the signature value a caller should send. Exported for tests and clients. */
+/** Exported for tests and clients. */
 export function signChannelBody(secret: string, timestamp: string, rawBody: string): string {
 	const digest = crypto.createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
 	return `sha256=${digest}`;
 }
 
-/**
- * Verify an inbound channel request.
- *
- * Both checks are optional and independent: configure a token for simple
- * shared-secret deployments, an HMAC for anything reachable by third parties,
- * or both. When neither is configured the request is allowed — but the daemon
- * logs a warning at startup so an unauthenticated public bind is never silent.
- */
+	/** Both checks are optional and independent; a configured one that fails is a refusal. */
 export function verifyChannelRequest(
 	options: ChannelAuthOptions,
 	headers: Record<string, string | string[] | undefined>,
@@ -186,16 +146,13 @@ export function authConfigured(options: ChannelAuthOptions): boolean {
 	return Boolean(options.token || options.hmacSecret);
 }
 
-// ---------------------------------------------------------------------------
-// 3. Worker capability gating
-// ---------------------------------------------------------------------------
 
 export type FsCapability = "none" | "ro" | "rw";
 
 export interface WorkerCapabilities {
-	/** Outbound network from codemode (`fetch`). */
+	/** `fetch` in codemode. */
 	net: boolean;
-	/** Filesystem access from codemode (`readFile`/`writeFile`). */
+	/** `readFile`/`writeFile` in codemode. */
 	fs: FsCapability;
 	/** Whether MCP servers are connected at all. */
 	mcp: boolean;
@@ -203,14 +160,7 @@ export interface WorkerCapabilities {
 	codemode: boolean;
 }
 
-/**
- * What a Worker may do in its own process, when nothing says otherwise.
- *
- * `fs: "none"` and `net: false` because the Worker's environment is a hand: a hand
- * has roots, a policy and a sandbox, and the Worker process has none of those. The
- * two that stay on are the ones that are not disk or egress — connected services and
- * codemode's pure computation.
- */
+	/** `fs: none`, `net: false`: a Worker's environment is a hand. Connected services and pure computation stay on. */
 export const DEFAULT_WORKER_CAPABILITIES: WorkerCapabilities = {
 	net: false,
 	fs: "none",
@@ -267,10 +217,7 @@ export function matchToolName(pattern: string, name: string): boolean {
 	return re.test(name);
 }
 
-/**
- * Apply an allow/deny policy to a tool set.
- * Deny wins; a non-empty allow list means "only these".
- */
+/** Deny wins; a non-empty allow list means "only these". */
 export function filterToolNames(
 	names: string[],
 	policy: { allow?: string[]; deny?: string[] },

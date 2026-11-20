@@ -1,28 +1,7 @@
 /**
- * Router Layer (Section 2.1).
- *
- * Long-lived global routing layer. It receives every Event (via Channels) and
- * every Worker conclusion. It does NOT execute tasks and it does NOT write raw
- * text to any channel: it answers by calling a Channel's response tool
- * (`respond_<channel>`) and dispatches by calling `dispatch_task`.
- *
- * Scheduling model (this is where the correctness of the layer lives):
- *
- *   - One **serialized inbox**. Triggers, worker conclusions, worker exits,
- *     recovery notices and system signals all enter the same queue, and exactly
- *     one turn runs at a time. That removes the old "prompt while streaming
- *     returns immediately, so the reply check runs against a half-finished
- *     turn" bug: a turn's reply attribution is only evaluated after
- *     `waitForIdle()`.
- *   - **Batching as a consequence of a busy turn** (§2.1), not a trailing
- *     debounce. When idle, a fixed `batchWindowMs` coalesces the first arrivals;
- *     the timer is never reset by later arrivals, so a steady event stream
- *     cannot starve the Router. While a turn runs, everything that piles up is
- *     folded into the next turn.
- *   - **Durable** task/worker/thread state and a durable trigger log, so a
- *     restart does not erase what the agent was doing (item 2).
- *   - **Chain of Recall**: long payloads are spilled to the store and inlined as
- *     summaries plus ids, with a `recall` tool to hop back to them (item 4).
+ * Every event and every Worker conclusion arrives here, one turn at a time. It never executes
+ * a task and never writes raw text: it answers through `respond_<channel>` and dispatches
+ * through `dispatch_task`.
  */
 
 import {
@@ -52,12 +31,7 @@ import { cardUriFor } from "./mcp-app/card.ts";
 import type { ScratchpadRow } from "./store.ts";
 import { newThreadId, type NewThreadEntry, type ThreadEntry, type ThreadLog } from "./threadlog.ts";
 
-/**
- * How long a worker's output is buffered before it becomes a log entry.
- *
- * Short enough that a person watching a work thread sees it move; long enough
- * that a streaming reply is a paragraph, not a line per token.
- */
+/** Long enough for a paragraph, short enough that a watcher sees the work move. */
 const DELTA_FLUSH_MS = 750;
 
 export interface RouterControl {
@@ -90,23 +64,13 @@ export interface RouterDependencies {
 	sessionFactory?: SessionFactory;
 	/** Hands: where execution happens, and the socket a Worker uses to reach it. */
 	hands?: { socketPath: string; listHands: () => HandStatus[] };
-	/**
-	 * The MCP servers this member may reach, as the stack serves them. A Worker
-	 * spawned now is given the current answer; a change reaches the Workers
-	 * already running through the daemon's `mcp_changed` broadcast.
-	 */
+	/** Served as a config, never as a proxy over the socket (ADR 0006). */
 	mcpServers?: { current: () => McpConfig };
-	/**
-	 * The durable thread log. Optional so a test or a minimal deployment can run
-	 * the Router without one; every append is skipped when it is absent.
-	 */
+	/** Optional, so a test or a minimal deployment runs without one. */
 	threadLog?: ThreadLog;
 	/** Called with each entry after it is stored, so a watching client sees it live. */
 	publishEntry?: (threadId: string, entry: ThreadEntry) => void;
-	/**
-	 * The Router's journal: what it remembers about a conversation, in a git repo so
-	 * a post-mortem can read what it believed at the time.
-	 */
+	/** In a git repo, so a post-mortem can read what it believed at the time. */
 	journal?: Journal;
 }
 
@@ -124,13 +88,7 @@ export interface TaskInput {
 	fast?: boolean;
 	/** Pin the task to one hand; omitted = the hub picks the least-loaded capable one. */
 	endpointId?: string;
-	/**
-	 * The task that asked for this one.
-	 *
-	 * A child's conclusion is the return value of its parent's tool call, so it is
-	 * never pushed to a channel and never gets a card: the parent's card already
-	 * shows the work, and a person does not need a second one for a check.
-	 */
+	/** A child's conclusion is its parent's tool result, so it never gets a card of its own. */
 	parentTaskId?: string;
 }
 
@@ -183,20 +141,10 @@ interface TurnState {
 	dispatches: string[];
 	/** Stops asked for during this turn (the `stop_task` tool counts one). */
 	stops: number;
-	/**
-	 * Threads the person stopped while this turn was running. A turn mid-flight
-	 * can still dispatch a moment later; a stop is "do not do this", not only
-	 * "end the turn".
-	 */
+	/** A dispatch into one of them is refused. */
 	stoppedThreads: Set<string>;
 	captured: string;
-	/**
-	 * The thread this turn is answering, when its batch is about one.
-	 *
-	 * A reply tool may name a thread, and usually does not: a chat's turn has one
-	 * thread in front of it. This is the fallback, so the log records the reply
-	 * on the thread it answered rather than nowhere.
-	 */
+	/** The fallback address for a reply that names none. */
 	originThreadId?: string;
 	/** The channel and event the turn is answering, so a dispatch can answer there too. */
 	originChannelId?: string;
@@ -241,14 +189,7 @@ function emptyTurn(
 	};
 }
 
-/**
- * Whether a task is small enough for the lightweight model.
- *
- * The Router used to be asked this, which made a cost decision one more thing to
- * get right before dispatching. It is a cost knob, not a correctness one: a
- * wrong guess spends tokens, it does not change the answer, so a plain rule is
- * better than another judgement call in the turn.
- */
+	/** A cost knob, not a correctness one: a wrong guess spends tokens, not answers. */
 function isTrivial(description: string): boolean {
 	return (
 		description.length <= 240 &&
@@ -256,14 +197,7 @@ function isTrivial(description: string): boolean {
 	);
 }
 
-/**
- * Whether a chat is still called what the stack mints it as.
- *
- * A new chat's row says "Chat" and its thread is named after its id, so a member's
- * list is a column of identical rows they cannot tell apart. The agent is told to
- * name its chat and does; this is what the Router checks, so "named" is a fact
- * about the chat rather than a hope about the model.
- */
+	/** What the Router checks, so "named" is a fact about the chat, not a hope about the model. */
 function isPlaceholderChatName(name: string | undefined, chatId: string): boolean {
 	const trimmed = (name ?? "").trim();
 	return trimmed === "" || trimmed === chatId || trimmed.toLowerCase() === "chat";
@@ -272,13 +206,7 @@ function isPlaceholderChatName(name: string | undefined, chatId: string): boolea
 /** How long a derived name may be: a title someone can scan in a list, not a sentence. */
 const DERIVED_TITLE_MAX = 48;
 
-/**
- * A chat's name taken from what the turn did, when the agent left the placeholder.
- *
- * Not a summary: the first words of a title the agent already wrote for the work
- * ("List active Linear projects"), or, failing that, the person's own opening
- * words. Cut at a word boundary, because a title broken mid-word reads as a bug.
- */
+	/** The first words of a title the work already has, cut at a word boundary. */
 function derivedChatTitle(source: string): string | undefined {
 	const flat = source.replace(/\s+/g, " ").trim();
 	if (flat === "") return undefined;
@@ -297,38 +225,19 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
 
-/**
- * How many log entries to read when rebuilding a chat's conversation for a turn.
- *
- * Larger than the tail, because most entries are not conversation: a turn of tool
- * calls and results can be ten rows, and reading too few would leave the tail
- * half-empty while the log had plenty to show.
- */
+	/** Larger than the tail: most entries are tool calls, not conversation. */
 const CONVERSATION_SCAN = 1200;
 
 /** How much of one line to keep, so a pasted wall of text cannot fill the turn. */
 const CONVERSATION_LINE_CHARS = 600;
 
-/**
- * The tail, as a budget rather than a line count.
- *
- * Forty lines was the whole of a turn's memory and it is about ten exchanges: a
- * decision from the morning is simply gone. The tail now holds a real working
- * set — a hundred-odd lines, or six thousand characters, whichever comes first —
- * and everything older than that belongs in the journal, which is what the turn
- * reads first.
- */
+	/** A budget, not a line count: older than this belongs in the journal, which is read first. */
 const CONVERSATION_TAIL_CHARS = 6000;
 const CONVERSATION_TAIL_LINES = 120;
 /** However tight the budget, a turn always sees this much of the conversation. */
 const CONVERSATION_MIN_LINES = 20;
 
-/**
- * The Router's tools whose effect is already an entry of its own.
- *
- * A dispatch is the card; a stop is the stop line. Their raw tool call is the same
- * fact in machine words, and a chat is read by a person.
- */
+	/** Their raw tool call would be the same fact twice, in machine words. */
 const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["stop_task"]);
 
 /** How many log entries `read_log` will look through. */
@@ -336,15 +245,7 @@ const SUPERSEDED_IN_CHAT: ReadonlySet<string> = new Set<string>(["stop_task"]);
 /** How many lines of each list a turn reads; the rest is one `scratchpad` call away. */
 const SCRATCHPAD_BLOCK_ITEMS = 8;
 
-/**
- * One line of a conversation, as a turn reads it.
- *
- * Not a transcript: the entries that *are* the conversation (what the person said,
- * what the assistant said, a dispatch, a stop, a rename) become a line each, and
- * the machinery — tool calls, tool results, hand calls, status — becomes nothing.
- * A turn does not need to know that a tool ran; it needs to know what was said,
- * because the model's context is not this chat's (one session serves them all).
- */
+	/** What was said becomes a line; tool calls, results, hand calls and status become nothing. */
 /** The words of an entry, whatever kind it is — what `read_log` searches. */
 function entryText(entry: ThreadEntry): string {
 	switch (entry.kind) {
@@ -406,30 +307,11 @@ function conversationLine(entry: ThreadEntry): string | undefined {
 	}
 }
 
-/**
- * The channels a person types into. Their words are conversation, so they belong
- * in the thread's log; a tool's or the watchdog's trigger is machinery, and the
- * log is what a person reads.
- */
+	/** Their words are conversation, so they belong in the turn's window. */
 const PERSON_CHANNELS: ReadonlySet<string> = new Set<string>(["anomalous", "terminal"]);
 
-/**
- * What holds on every turn, whatever a skill says.
- *
- * These are appended to the Router's system prompt rather than restated in each
- * turn's message. Two reasons: a rule that must never be optional cannot compete
- * with the turn's content for attention, and pi's own system prompt describes a
- * coding agent with tools — which this is not — so the conflict is resolved where
- * the framing lives.
- */
-/**
- * What the Router is, in its own words.
- *
- * Replaces pi's "You are a coding assistant running inside pi" preamble, which described a
- * different program: one with a working directory, built-in tools and documentation. The
- * Router has none of those, and a model told it has a working directory answers questions
- * about that directory.
- */
+	/** In the system prompt, not the turn's message: a rule that must never be optional cannot compete for attention. */
+	/** Replaces pi's coding-agent preamble, which describes a program with a working directory. */
 export const ROUTER_PROMPT = [
 	"You are one person's assistant, in a chat with them.",
 	"You have no filesystem, no shell and no working directory: nothing here can read or run anything. What you have is a set of hands — machines with a folder, a policy and a name — and Workers, which use them.",
@@ -445,18 +327,7 @@ export const ROUTER_INVARIANTS: readonly string[] = [
 ];
 
 export class RouterLayer {
-	/**
-	 * One model session per conversation, made on first use and kept warm.
-	 *
-	 * A session carries one transcript. One session for the whole Router meant the
-	 * model's context was every chat interleaved — so what it was told in one chat
-	 * could surface in the answer to another, and the conversation block was doing
-	 * work the session should have done by existing.
-	 *
-	 * Warm, because a session costs a context to build and a chat's next turn usually
-	 * comes soon; capped, because a brain serves every chat its member has and a
-	 * session each, forever, is a leak with a transcript.
-	 */
+	/** A shared session let one chat's context surface in another's answer. Capped, or it is a leak. */
 	private readonly sessions = new Map<string, AgentSessionLike>();
 	private readonly sessionUsedAt = new Map<string, number>();
 	private readonly sessionBusy = new Set<string>();
@@ -470,14 +341,7 @@ export class RouterLayer {
 	private readonly dispatchQueue: Array<{ taskId: string; input: TaskInput }> = [];
 	/** Parents blocked on a check: task id → the answer they are waiting for. */
 	private readonly children = new Map<string, (answer: { ok: boolean; text: string }) => void>();
-	/**
-	 * Workers that have been started and have not said hello yet.
-	 *
-	 * A spawned process is not a running worker: the process manager accepts the
-	 * start, the child dies on its first import, and nothing else happens — which is
-	 * indistinguishable from a task that is quietly working. So each spawn gets a
-	 * deadline, and a worker that misses it fails its task out loud.
-	 */
+	/** A spawned process is not a running worker, so each spawn gets a deadline. */
 	private readonly helloTimers = new Map<string, NodeJS.Timeout>();
 	/** Per-worker output waiting to be written into its thread. */
 	private readonly deltaBuffers = new Map<string, { text: string; timer: NodeJS.Timeout }>();
@@ -487,14 +351,7 @@ export class RouterLayer {
 	private readonly journalCache = new Map<string, string>();
 	private readonly inbox: InboxItem[] = [];
 	private turn: TurnState = emptyTurn();
-	/**
-	 * Set once the turn has said all it is going to say.
-	 *
-	 * A reply is the end of a turn: the person has their answer, or the work has
-	 * started and the card is the acknowledgement. The model does not know that — it
-	 * will keep calling tools while the loop lets it — so the loop is ended here, and
-	 * the refusal it gets for a second reply is not an invitation to try a third.
-	 */
+	/** A reply is the end of a turn; the model does not know that, so the loop is ended here. */
 	private endRequested = false;
 	private drainTimer: NodeJS.Timeout | null = null;
 	private draining = false;
@@ -506,10 +363,7 @@ export class RouterLayer {
 
 	private readonly recorder: ReplyRecorder = {
 		record: (channelId, text, ctx) => {
-			// A turn has one reply. The model that keeps calling the response tool is
-			// talking to itself: it has already said the thing, and every further call
-			// is another bubble in a person's chat — "I'll stop here and wait", four
-			// times, three seconds apart, because the tool it called let it continue.
+// A turn has one reply; a further call is another bubble in a person's chat.
 			if (this.turn.replies.length > 0) {
 				metrics.counter("mir_router_replies_refused_total", 1, { reason: "second" });
 				return {
@@ -518,9 +372,7 @@ export class RouterLayer {
 						"You have already replied in this turn. Nothing more is delivered: stop calling tools and end the turn. The person has your words once.",
 				};
 			}
-			// And a dispatch is its own acknowledgement: the card in the conversation
-			// says what started, in the person's words. A sentence beside it is the same
-			// fact twice, and the second one is always an announcement.
+// A dispatch is its own acknowledgement: the card says what started.
 			if (this.turn.dispatches.length > 0) {
 				metrics.counter("mir_router_replies_refused_total", 1, { reason: "after-dispatch" });
 				return {
@@ -531,11 +383,7 @@ export class RouterLayer {
 			}
 			this.turn.replies.push({ channelId, text, ctx, at: Date.now() });
 			metrics.counter("mir_router_replies_total", 1, { channel: channelId });
-			// The product's channel writes its reply into the chat's thread itself
-			// (channels/anomalous.ts `deliver`), so recording it here as well would
-			// post every answer twice. Every other channel has no such write, and is
-			// logged here — where every delivery passes, so no reply can reach a
-			// person without reaching the log a panel reads.
+// The product's channel writes into the thread itself; logging it here too would post it twice.
 			if (channelId !== "anomalous") {
 				// A reply that names no thread belongs to the one the turn is answering.
 				this.record(ctx.threadId ?? this.turn.originThreadId, { kind: "text", role: "assistant", text });
@@ -544,25 +392,8 @@ export class RouterLayer {
 		},
 	};
 
-	/**
-	 * Record the assistant's own tool call on the conversation's thread.
-	 *
-	 * The chat draws what the assistant *did* from its thread, not from prose: a
-	 * dispatch becomes a card that links to the work, because the call and its
-	 * result are entries there like everything else.
-	 */
-	/**
-	 * The Router's own tool calls, in a chat.
-	 *
-	 * Two of them are not drawn as tool calls, because the conversation already says
-	 * what they did: `dispatch_task` writes the card (the work, its state, its answer)
-	 * and `stop_task` writes the stop. A tool block beside them is the same fact
-	 * twice — a raw call with `{}` arguments next to a card that says the same thing
-	 * in the person's words.
-	 *
-	 * They are still recorded in a *work* thread: that is the record of what happened,
-	 * and a trace reads it.
-	 */
+	/** The chat draws what the assistant did from its thread, not from prose. */
+	/** `dispatch_task` and `stop_task` already leave an entry of their own, so they are not drawn again. */
 	private recordTurnTool(call: { id: string; name: string; args: unknown }): void {
 		if (SUPERSEDED_IN_CHAT.has(call.name) && this.turnInChat()) return;
 		this.record(this.turn.originThreadId, {
@@ -586,14 +417,7 @@ export class RouterLayer {
 	}
 
 	/** Append to a thread's log and tell whoever is watching. Absent log = no-op. */
-	/**
-	 * The thread a task's own work is written to.
-	 *
-	 * Created on first use and remembered on the task, so a retry or a re-adopt writes
-	 * to the same one. A task with no chat (a queue trigger, a schedule) still gets a
-	 * thread: its work is a thing somebody may want to read, and the alternative is
-	 * that it exists only in the process's memory.
-	 */
+	/** Created on first use and remembered, so a retry writes to the same one. */
 	private workThreadFor(task: Task): string | undefined {
 		if (task.workThreadId !== undefined) return task.workThreadId;
 		const threadLog = this.deps.threadLog;
@@ -622,14 +446,7 @@ export class RouterLayer {
 		this.record(threadId, { kind: "status", status: "running" });
 	}
 
-	/**
-	 * A turn ends by saying so.
-	 *
-	 * The chat's client waits for its thread to go idle — that is what ends "thinking"
-	 * and lets the next thing be asked. A turn that dispatched leaves the state to the
-	 * work: its conclusion writes `idle` when the last thing in flight is done, and a
-	 * turn that settled it early would show a spinner for work still running.
-	 */
+	/** A dispatched turn leaves the state to the work, which settles it when the last task ends. */
 	private settleThreadStatus(threadId: string | undefined): void {
 		if (threadId === undefined || threadId === "") return;
 		const threadLog = this.deps.threadLog;
@@ -687,9 +504,7 @@ export class RouterLayer {
 		// and the one pi names in its prompt should not be the host's source tree.
 		const routerCwd = join(deps.config.stateDir, "router");
 		mkdirSync(routerCwd, { recursive: true, mode: 0o700 });
-		// The Router's instructions are skills, not a template literal: the loader
-		// advertises the brain's own set and refuses everything the host machine
-		// happens to have installed.
+// Skills, not a template literal: the loader is allow-listed to the brain's own set.
 		const agentDir = join(deps.config.stateDir, "router-agent");
 		const resourceLoader = await brainResourceLoader({
 			cwd: routerCwd,
@@ -717,12 +532,7 @@ export class RouterLayer {
 		return router;
 	}
 
-	/**
-	 * The session for one conversation, made on first use and kept warm.
-	 *
-	 * Each gets its own transcript, on disk when `sessionDir` is set so a restart can
-	 * resume it, in memory otherwise.
-	 */
+	/** On disk when `sessionDir` is set, in memory otherwise. */
 	private async sessionFor(key: string): Promise<AgentSessionLike> {
 		const held = this.sessions.get(key);
 		if (held !== undefined) {
@@ -834,10 +644,7 @@ export class RouterLayer {
 							"The brief the Worker is told: paths, constraints, what a good answer looks like. Write it for an agent doing the work, not for the person reading the card. Omit when the description already says everything.",
 					}),
 				),
-				// No `thread`, no `reply_to`: the turn already has both, and a model that is
-				// offered an address will fill it in — with an id it read in its own prompt.
-				// One live dispatch was filed under `trigger:api-…` because of exactly that,
-				// and the task's thread was a context object's id.
+// No address: a model offered one fills it in with an id it read in its own prompt.
 				channel: Type.Optional(Type.String({ description: "Channel id the task originated from." })),
 				endpoint: Type.Optional(
 					Type.String({
@@ -859,10 +666,7 @@ export class RouterLayer {
 						...(params.endpoint === undefined ? {} : { endpoint: params.endpoint }),
 					},
 				});
-				// A hand named by the model, or the one the client pinned this conversation
-				// to. A name that is neither is refused here: a task pinned to a hand that
-				// does not exist starts a Worker with no hand, and that Worker answers
-				// "filesystem access is disabled" — a wrong answer shaped like a limitation.
+// A name that resolves to nothing is refused here, not turned into a handless task.
 				const requested = params.endpoint === undefined ? undefined : router.resolveHand(params.endpoint);
 				if (params.endpoint !== undefined && requested === undefined) {
 					const choices = router.handChoices();
@@ -885,19 +689,12 @@ export class RouterLayer {
 					const task = await router.dispatchTask({
 						title: params.title,
 						description: params.description,
-						// A dispatch belongs to the conversation it was made in, unless the
-						// model names another. Without this default a task has no thread,
-						// so its work is written nowhere a person can open and its card
-						// has nothing to link to.
-						// Always the turn's: the dispatch belongs to the conversation it was
-						// made in, and that is the only thread the Router can be sure of.
+// Always the turn's: it is the only thread the Router can be sure of.
 						threadId: router.turn.originThreadId,
 						channelId: params.channel ?? router.turn.originChannelId,
 						replyTo: router.turn.originEventId,
 						fast: isTrivial(params.description),
-						// Where the client said this work belongs wins over the hub's
-						// least-loaded guess: a space is a hand, and only the client knows
-						// which. A model that names one explicitly still wins.
+// The client's pin wins over the hub's least-loaded guess.
 						endpointId: pinned,
 					});
 					router.turn.dispatches.push(task.id);
@@ -941,14 +738,7 @@ export class RouterLayer {
 		});
 	}
 
-	/**
-	 * Add a line to the scratchpad.
-	 *
-	 * The Router's own lists are not derived from `tasks`: it waits on a person's
-	 * answer, on a deploy, on another conversation, and none of those is a task
-	 * row. What a dispatch *does* get is an `outstanding` line written for it, so
-	 * the list cannot drift from reality by the Router forgetting to write it.
-	 */
+	/** A dispatch writes its own `outstanding` line, so the list cannot drift by forgetting. */
 	addScratchpadItem(input: {
 		kind: "outstanding" | "planned";
 		text: string;
@@ -971,14 +761,7 @@ export class RouterLayer {
 		return item;
 	}
 
-	/**
-	 * Show, or refresh, the card for a task.
-	 *
-	 * Appended on each transition that changes what a person would see — started,
-	 * finished, failed, stopped — never on progress: the log is the durable record,
-	 * and the view polls for the rest. Appending rather than editing is the log's
-	 * whole design, and a client renders the last card for a task.
-	 */
+	/** On each transition a person would see, never on progress; the card is rewritten in place. */
 	private recordCard(threadId: string | undefined, taskId: string): void {
 		if (threadId === undefined || threadId === "") return;
 		const task = this.tasks.get(taskId);
@@ -996,9 +779,7 @@ export class RouterLayer {
 			...(task.error === undefined ? {} : { error: task.error }),
 			createdAt: task.createdAt,
 		};
-		// One card per task per thread. The entry is a pointer, and a second pointer to
-		// the same task is a second card on screen: the state it carries is refreshed
-		// in place, and a client that can read the resource asks the app server anyway.
+// One card per task per thread: a second pointer is a second card on screen.
 		const existing = this.deps.threadLog
 			?.entries(threadId)
 			.filter((entry) => entry.kind === "app" && entry.uri === cardUriFor(task.id))
@@ -1031,14 +812,7 @@ export class RouterLayer {
 		if (line !== undefined) this.closeScratchpadItem(line.id, status);
 	}
 
-	/**
-	 * Keep the rendered copy in the journal repository.
-	 *
-	 * The list is the store's; the file is the record. Writing it on every change
-	 * is what makes "what did it think it was doing at 14:02" answerable later, and
-	 * it costs one file write and one commit on a change that happens a few times a
-	 * turn at most.
-	 */
+	/** The list is the store's; the file is the record. */
 	writeScratchpadCopy(): void {
 		const journal = this.deps.journal;
 		if (journal === undefined) return;
@@ -1085,14 +859,7 @@ export class RouterLayer {
 		].join("\n");
 	}
 
-	/**
-	 * Read this conversation's journal before the turn is built.
-	 *
-	 * A file read per turn, not per message: the journal is a few hundred words, and
-	 * a turn already reads the thread log. A failure leaves the cached copy in
-	 * place — a journal that cannot be read is a journal you still have, and losing
-	 * it mid-conversation would be worse than being a turn stale.
-	 */
+	/** A failed read leaves the cached copy: being a turn stale beats losing it. */
 	private async loadJournal(): Promise<void> {
 		const journal = this.deps.journal;
 		const threadId = this.turn.originThreadId;
@@ -1120,15 +887,7 @@ export class RouterLayer {
 		return ["=== Your journal for this conversation ===", text, ""].join("\n");
 	}
 
-	/**
-	 * `journal` — what the Router remembers about this conversation.
-	 *
-	 * Read with no argument, replaced with a note. Replaced, not appended: a
-	 * journal that only grows is a log, and the log is already there. Over the cap
-	 * the write is refused with the instruction to compact, so the summary stays a
-	 * summary and the model — the only thing that knows what mattered — does the
-	 * compacting.
-	 */
+	/** Replaced, not appended: a journal that only grows is a log, and the log exists. Over the cap the write is refused. */
 	private buildJournalTool(): ToolDefinition {
 		const router = this;
 		return defineTool({
@@ -1197,15 +956,7 @@ export class RouterLayer {
 		});
 	}
 
-	/**
-	 * `scratchpad` — the Router's lists, across every conversation.
-	 *
-	 * Two kinds, because they are read differently. `outstanding` is work in
-	 * flight — a task, a question asked of a person, a deploy being watched — and a
-	 * new message has to be reconciled with it. `planned` is what the Router means
-	 * to do and has not started. A dispatch adds an outstanding line by itself, so
-	 * the list cannot drift from reality by forgetting; a conclusion closes it.
-	 */
+	/** `outstanding` is work in flight; `planned` is what it means to do. A dispatch adds the first, a conclusion closes it. */
 	private buildScratchpadTool(): ToolDefinition {
 		const router = this;
 		return defineTool({
@@ -1294,14 +1045,7 @@ export class RouterLayer {
 		});
 	}
 
-	/**
-	 * `read_log` — peek at the log itself.
-	 *
-	 * The turn's window is short by design; this is how a turn goes back further
-	 * than the window, or reads what a Worker actually did, without asking the
-	 * person to repeat themselves. The log is the record: if the journal and the
-	 * log disagree, the log is right.
-	 */
+	/** If the journal and the log disagree, the log is right. */
 	private buildReadLogTool(): ToolDefinition {
 		const router = this;
 		return defineTool({
@@ -1328,9 +1072,7 @@ export class RouterLayer {
 				const limit = Math.max(1, Math.min(400, Math.round(params.limit ?? 60)));
 				const kinds = params.kinds === undefined ? undefined : new Set(params.kinds.split(",").map((kind) => kind.trim()));
 				const query = params.query?.toLowerCase();
-				// The filter runs in SQL, so asking about the end of a long log does not read
-				// the whole of it: `kind` narrows on an indexed column and `query` narrows
-				// the payload before any row is parsed.
+// The filter runs in SQL, so a question about the end of a log does not read the whole of it.
 				const found = threadLog.search(threadId, {
 					...(kinds === undefined ? {} : { kinds: [...kinds] }),
 					...(query === undefined ? {} : { like: query }),
@@ -1364,22 +1106,8 @@ export class RouterLayer {
 		});
 	}
 
-	/**
-	 * Where the hand this task runs on keeps its files, when it keeps them anywhere.
-	 *
-	 * Read from the hand's own policy, not from a naming convention: a hand is a
-	 * machine with roots, and whether those roots are a space, a repo or a home
-	 * directory is the host's word, not the brain's. A brain that recognised
-	 * `space:` prefixes would need a new convention for every place a host invents.
-	 */
-	/**
-	 * The hand a person or a model means, by name or by id.
-	 *
-	 * A name is what a person calls it, and it is what a model repeats. An id is what the
-	 * wire uses. Both are accepted; a word that is neither resolves to nothing, and the
-	 * dispatch refuses it — a task pinned to a hand that does not exist runs with no hand
-	 * at all, which is how a Worker came to answer "filesystem access is disabled".
-	 */
+	/** From the hand's own policy, never a naming convention: only the host knows what a root is. */
+	/** A name is what a person says; an id is what the wire uses. Neither resolving is a refusal. */
 	resolveHand(word: string): string | undefined {
 		const wanted = word.trim().toLowerCase();
 		if (wanted === "") return undefined;
@@ -1408,9 +1136,7 @@ export class RouterLayer {
 
 	private handRootFor(endpointId: string | undefined): string | undefined {
 		if (endpointId === undefined) return undefined;
-		// The hub's own view of a remote hand has no roots (a hand's policy is its own
-		// and is display only here); the host told us where the folder is, and that is
-		// the answer the brief needs.
+// A remote hand reports no roots; the host's word is the answer the brief needs.
 		return this.handFor(endpointId)?.policy.roots[0];
 	}
 
@@ -1468,15 +1194,7 @@ export class RouterLayer {
 		});
 	}
 
-	/**
-	 * Name the chat this turn is answering.
-	 *
-	 * A chat is a conversation, and its name is the one thing about it a person
-	 * sees before they open it — so it is worth the agent's judgement once the
-	 * subject is clear, and worth nothing as a running commentary. Called with no
-	 * title it answers with what the chat is called now, which is how the agent
-	 * can tell a placeholder ("Chat") from a name someone chose.
-	 */
+	/** A name is what a person sees before opening it. With no title, it answers with the current one. */
 	private buildChatTitleTool(): ToolDefinition {
 		const router = this;
 		return defineTool({
@@ -1595,10 +1313,7 @@ export class RouterLayer {
 	// ----- Inbound queue (serialized, batched) -----
 
 	submitTrigger(trigger: Trigger): void {
-		// What a person said is part of the thread, not only what the agent
-		// answered: a chat is a projection of its thread, and a projection cannot
-		// show words that were never written down. Recorded at admission, once, so
-		// a retried trigger does not say the same thing twice.
+// Recorded at admission, once, so a retried trigger does not say it twice.
 		const said = trigger.text.trim();
 		if (said !== "" && PERSON_CHANNELS.has(trigger.channelId) && trigger.threadId !== undefined) {
 			this.record(trigger.threadId, { kind: "text", role: "user", text: said });
@@ -1613,10 +1328,7 @@ export class RouterLayer {
 		this.scheduleDrain();
 	}
 
-	/**
-	 * Coalesce only when idle, with a fixed window from the first arrival.
-	 * The timer is never reset, so a steady stream cannot postpone the turn.
-	 */
+	/** The timer is never reset, so a steady stream cannot postpone the turn. */
 	private scheduleDrain(): void {
 		if (this.disposed || this.draining || this.drainTimer) return;
 		const delay = this.inbox.length === 1 ? Math.max(0, this.config.batchWindowMs) : 0;
@@ -1712,17 +1424,7 @@ export class RouterLayer {
 		}
 	}
 
-	/**
-	 * Name the chat, when the agent did not.
-	 *
-	 * The prompt asks for a name on the first real request and again whenever the
-	 * subject moves, and a model that skips it leaves the member with a chat called
-	 * "Chat" that they cannot find again. Advice is not a mechanism: this runs at
-	 * the end of every turn and gives the chat the name the work already carries.
-	 *
-	 * A work thread is left alone — its name is its task's — and so is a chat the
-	 * agent has named, whatever it called it.
-	 */
+	/** Advice is not a mechanism: this runs at the end of every turn. A work thread is left alone. */
 	private nameChatIfPlaceholder(batch: InboxItem[]): void {
 		const threadId = this.turn.originThreadId;
 		const threadLog = this.deps.threadLog;
@@ -1740,10 +1442,7 @@ export class RouterLayer {
 			}
 		}
 		if (source === undefined) {
-			// Failing that, the person's own opening words — but only when they name
-			// something. "Hey there" is not a title, and a chat called after a greeting
-			// is no easier to find than one called "Chat": a turn with no work and no
-			// subject leaves the name to the agent, who can see there is none.
+// Failing that, the person's opening words — but only when they name something.
 			for (const item of batch) {
 				if (item.kind !== "trigger") continue;
 				const words = item.trigger.text.trim().split(/\s+/).filter((word) => word !== "");
@@ -1839,16 +1538,7 @@ export class RouterLayer {
 		}
 	}
 
-	/**
-	 * Say something in a thread, once.
-	 *
-	 * The product's channel writes its reply into the thread itself (`deliver`), so
-	 * recording it here as well posts every answer twice — which is exactly what a
-	 * doubled conclusion looked like, word for word, twice in one bubble. Every other
-	 * channel has no such write and is logged here: every delivery passes through this
-	 * one method, so no answer reaches a person without reaching the log, and none
-	 * reaches it twice.
-	 */
+	/** The product's channel writes into the thread itself, so logging it here would post it twice. */
 	private async say(
 		threadId: string | undefined,
 		channelId: string | undefined,
@@ -1861,9 +1551,7 @@ export class RouterLayer {
 			return;
 		}
 		if (channel.id === "anomalous") {
-			// The product's channel writes into the thread it is given, with no
-			// resolution: `say` always knows the thread, and a second resolution is how a
-			// conclusion was refused for "no chat to answer" while answering a chat.
+// `say` always knows the thread; resolving again is how a reply lands elsewhere.
 			const deliverTo = (channel as { deliverTo?: (id: string, said: string) => Promise<void> }).deliverTo;
 			if (threadId !== undefined && deliverTo !== undefined) {
 				await deliverTo.call(channel, threadId, text).catch((err: unknown) =>
@@ -1937,9 +1625,7 @@ export class RouterLayer {
 	private buildPrompt(batch: InboxItem[]): string {
 		const lines: string[] = ["=== Inbound (Router turn) ===", ""];
 
-		// Where this conversation's work runs, when the client said. The Router has no
-		// filesystem of its own, so without this it invents a path from its own cwd —
-		// which is the brain's, and is nobody's folder.
+// The Router has no filesystem, so without this it invents a path from the brain's cwd.
 		const hand = this.turn.originHand === undefined ? undefined : this.handFor(this.turn.originHand);
 		if (hand !== undefined) {
 			const where = hand.policy.roots.length > 0 ? ` Its files are at ${hand.policy.roots.join(", ")}.` : "";
@@ -1973,9 +1659,7 @@ export class RouterLayer {
 						this.deps.context.inline({
 							id: objectId,
 							type: "trigger",
-							// No thread id and no event id: the Router does not need them (a
-							// dispatch inherits both), and a model shown an identifier repeats
-							// it to the person — "thread 01M7TTQ…" is machinery in a chat.
+// No ids: a model shown one repeats it to the person.
 							summary: `${t.channelId} from=${t.metadata?.["user"] ?? "unknown"} :: ${t.text}`,
 							relatedIds: related,
 						}),
@@ -2033,23 +1717,13 @@ export class RouterLayer {
 		return lines.join("\n");
 	}
 
-	/**
-	 * The conversation this turn is in, oldest first.
-	 *
-	 * The Router's model session is not this chat's: one session answers every
-	 * conversation, so its own history is a pile of them in arrival order. What
-	 * makes a turn answer *this* chat is the log — the last lines of it, handed
-	 * over as text, ending where the batch begins so the person's own message is
-	 * not said twice.
-	 */
+	/** The session is not this chat's, so the log is what makes a turn answer this conversation. */
 	private conversationBlock(batch: InboxItem[]): string {
 		const threadId = this.originOf(batch)?.threadId;
 		const threadLog = this.deps.threadLog;
 		if (threadLog === undefined || threadId === undefined || threadId === "") return "";
 		const entries = threadLog.entries(threadId, 0, CONVERSATION_SCAN);
-		// This turn's own message was written at admission and is repeated in the
-		// Inbound block, so the history ends where the batch begins: the earliest
-		// entry this batch brought is the last line not shown.
+// The history ends where the batch begins, so the person's message is not said twice.
 		const incoming = new Set(
 			batch.flatMap((item) => (item.kind === "trigger" ? [item.trigger.text.trim()] : [])),
 		);
@@ -2064,9 +1738,7 @@ export class RouterLayer {
 			if (line !== undefined) lines.push(line);
 		}
 		if (lines.length === 0) return "";
-		// A budget, not a count: a hundred-odd lines or six thousand characters,
-		// whichever comes first, but never fewer than a turn needs to follow the
-		// thread. The tail is the working set; the journal is the memory.
+// A budget, not a count: the tail is the working set, the journal is the memory.
 		const kept: string[] = [];
 		let chars = 0;
 		for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -2135,9 +1807,7 @@ export class RouterLayer {
 		return [
 			"=== How to act ===",
 			`Your tools: ${channelTools} (say something to the person), dispatch_task (start work), stop_task, list_workers, list_tasks, list_hands, chat_title (read or set this chat's name), recall (read spilled context by id), use_skill (read one of your skills).`,
-			// The procedure is a skill, and the skill is the only copy of it. A rule
-			// stated twice drifts; a rule stated once, in a file with a description
-			// that says when it applies, is loaded when it matters.
+// The skill is the only copy: a rule stated twice drifts.
 			"You do not do work yourself: a Worker does. Read the `dispatch` skill before you act on a request — it holds the five things you answer yourself, and why everything else is a dispatch. Read `chat-title` before you end a turn.",
 			"If you need context that is not in this turn, call recall with an id or a query rather than guessing.",
 			"",
@@ -2145,11 +1815,7 @@ export class RouterLayer {
 		].join("\n");
 	}
 
-	/**
-	 * Whether `entry` is word for word the last thing said in this thread. Status
-	 * entries between the two do not count: a delivery writes its text and then
-	 * its state, and a restatement may land after either.
-	 */
+	/** Only the same speaker counts: a person echoing the agent is not a repeat. */
 	private repeatsLast(threadLog: ThreadLog, threadId: string, entry: { role: string; text: string }): boolean {
 		try {
 			const all = threadLog.entries(threadId, 0);
@@ -2200,16 +1866,10 @@ export class RouterLayer {
 		this.tasks.set(id, full);
 		this.deps.store.upsertTask(full);
 
-		// The work's own thread, minted now rather than when the Worker starts. The card
-		// in the chat is a pointer to it, and a pointer made before the thread exists
-		// points at the chat — so clicking the work opened the conversation it came
-		// from, which reads as "the card goes to the router's thread".
+// Minted by the dispatch, not by the Worker's start: a card made before it points at the chat.
 		if (input.parentTaskId === undefined) this.workThreadFor(full);
 
-		// A check a Worker asked for. Its parent's card is the acknowledgement and its
-		// answer is a tool result, so nothing here is said to a person: no scratchpad
-		// line, no status entry, no card. A person watching would see a second card for
-		// work they did not ask for.
+// A check says nothing to a person: its answer is its parent's tool result.
 		if (input.parentTaskId !== undefined) {
 			metrics.counter("mir_tasks_nested_total");
 			if (atCapacity) {
@@ -2220,9 +1880,7 @@ export class RouterLayer {
 			return full;
 		}
 
-		// The list of what is in flight is written by the dispatch, not by the
-		// Router remembering to write it. That is the difference between a list that
-		// can drift and one that cannot.
+// The dispatch writes its own line, so the list cannot drift by forgetting.
 		this.addScratchpadItem({
 			kind: "outstanding",
 			text: `${input.title}${input.endpointId === undefined ? "" : ` — on ${input.endpointId}`}`,
@@ -2261,13 +1919,7 @@ export class RouterLayer {
 		return full;
 	}
 
-	/**
-	 * Ask for a task of its own: a Worker's check.
-	 *
-	 * The Worker blocks on the answer — the conclusion is this call's result — and the
-	 * child runs on the same hand, so a check inside a space reads the same folder its
-	 * parent does. Depth stops at one level: the child's tool list has no dispatch.
-	 */
+	/** The child runs on the same hand, and its conclusion is this call's result. Depth stops at one. */
 	async dispatchChildTask(
 		parentTaskId: string,
 		input: { title: string; description: string; instructions?: string },
@@ -2307,13 +1959,7 @@ export class RouterLayer {
 		return rec === undefined ? undefined : this.tasks.get(rec.taskId);
 	}
 
-	/**
-	 * Pass one agent's words to another.
-	 *
-	 * `to` is `"parent"` or a task id. The daemon decides who that is, because only it
-	 * knows the whole tree: a Worker cannot address a task it was not given, and a
-	 * message that names an unrelated task is refused rather than delivered.
-	 */
+	/** Only the daemon knows the whole tree, so a message naming an unrelated task is refused. */
 	routeMessage(fromWorkerId: string, to: string, text: string): { ok: boolean; error?: string } {
 		const from = this.taskForWorker(fromWorkerId);
 		if (from === undefined) return { ok: false, error: "this worker has no task" };
@@ -2365,14 +2011,7 @@ export class RouterLayer {
 		task.status = "running";
 		task.updatedAt = now;
 		this.pendingSpawns++;
-		// The Worker's own thread. Its narration — "I'll check the subdirectories",
-		// every tool call, every hand call — is how the work was done, not what the
-		// person asked for. It belongs somewhere a person can look *if they want to*,
-		// which is a thread of its own; the chat gets the card and the answer.
-		//
-		// Before this, a task dispatched from a chat wrote the Worker's monologue into
-		// the chat itself, so a person read "I'll stop here and wait for the search"
-		// eleven times in their conversation.
+// The Worker's narration is how the work was done; the chat gets the card and the answer.
 		const workThread = this.workThreadFor(task);
 		this.workers.set(workerId, {
 			workerId,
@@ -2506,14 +2145,7 @@ export class RouterLayer {
 		this.persistWorker(workerId);
 	}
 
-	/**
-	 * What a Worker did, recorded where the work is.
-	 *
-	 * The thread is the audit trail: a tool call and its result are two entries, so
-	 * a reader can tell "still running" from "we lost it", and a `use_skill` call is
-	 * how a skill's load shows up. `workerId` is on the entry because a thread can
-	 * have more than one worker in it, and the panel filters by it.
-	 */
+	/** A call and its result are two entries, so a reader can tell "still running" from "lost". */
 	handleWorkerToolCall(workerId: string, toolCallId: string, toolName: string, args?: unknown): void {
 		const rec = this.workers.get(workerId);
 		for (const threadId of rec?.threadIds ?? []) {
@@ -2529,9 +2161,7 @@ export class RouterLayer {
 
 	handleWorkerToolResult(workerId: string, toolCallId: string, isError: boolean, result?: unknown): void {
 		const rec = this.workers.get(workerId);
-		// Which machine did the work. A hand tool's result says which hand answered, and
-		// a thread that does not record it shows "Machines: none" for work that plainly
-		// ran somewhere — the panel's question is "where", and only this answers it.
+// Which machine answered, so a thread does not show "Machines: none" for work that ran.
 		const hand = handOfResult(result);
 		for (const threadId of rec?.threadIds ?? []) {
 			if (hand !== undefined) {
@@ -2554,14 +2184,7 @@ export class RouterLayer {
 	}
 
 	/** A Worker reported a conclusion. Queue it for the Router to relay. */
-	/**
-	 * A worker's streaming output, coalesced into the work thread's log.
-	 *
-	 * Deltas arrive many per second; appending each one would make the log a
-	 * transcript of keystrokes and the panel unreadable. They are buffered per
-	 * worker and flushed on a short timer (and on the worker's conclusion or
-	 * exit), so the log carries what was said rather than how it was typed.
-	 */
+	/** Buffered per worker and flushed on a timer, so the log says what was said, not how it was typed. */
 	handleWorkerDelta(workerId: string, text: string): void {
 		if (this.deps.threadLog === undefined) return;
 		const rec = this.workers.get(workerId);
@@ -2597,18 +2220,13 @@ export class RouterLayer {
 		for (const threadId of rec.threadIds) {
 			this.record(threadId, { kind: "text", role: "assistant", text: buffered.text, workerId });
 		}
-		// What has already been said, so the conclusion is not said again. The stream
-		// and the conclusion are the same words: the model streams its answer and then
-		// reports it, and a person read it twice, word for word, in one thread.
+// Only what was written counts: an unflushed buffer is not an answer.
 		const streamed = this.streamedByWorker.get(workerId) ?? "";
 		this.streamedByWorker.set(workerId, streamed + buffered.text);
 	}
 
 	async handleWorkerConclusion(workerId: string, text: string): Promise<void> {
-		// Whatever the worker was mid-sentence on: if the conclusion contains it, it
-		// is the same words arriving twice — the streamed prefix and the finished
-		// sentence — so the buffer is dropped rather than flushed. Anything earlier
-		// was already written by the delta timer.
+// A buffer the conclusion already contains is the same words twice, so it is dropped.
 		const pending = this.takeWorkerDelta(workerId);
 		if (pending !== "" && !text.includes(pending.trim())) {
 			const rec = this.workers.get(workerId);
@@ -2621,13 +2239,7 @@ export class RouterLayer {
 			log.warn("conclusion from unknown worker", { worker: workerId });
 			return;
 		}
-		// The conclusion is the last assistant message after the last tool call, and a
-		// Worker that streamed it has already said it. Recording it again is the same
-		// words twice in one thread, which is what "the answer came out doubled" looked
-		// like. What is always recorded is that the worker finished.
-		// Only what was *written* counts: an unflushed buffer was dropped above when the
-		// conclusion already contains it, so the conclusion is the first time these words
-		// reach the log and it must be written.
+// A Worker that streamed its answer has said it; what is always recorded is that it finished.
 		const streamed = this.streamedByWorker.get(workerId) ?? "";
 		const alreadySaid = streamed.replace(/\s+/g, " ").includes(text.replace(/\s+/g, " ").trim());
 		this.streamedByWorker.delete(workerId);
@@ -2637,9 +2249,7 @@ export class RouterLayer {
 		this.persistWorker(workerId);
 
 		const task = this.tasks.get(rec.taskId);
-		// A check's conclusion is the return value of the tool call that asked for it.
-		// It is not pushed to a channel and does not start a Router turn: the Worker
-		// that asked is blocked on the answer, and gets it as a tool result.
+// A check's conclusion is its parent's tool result, not a message to a person.
 		if (task?.parentTaskId !== undefined) {
 			task.status = "done";
 			task.result = text;
@@ -2649,16 +2259,12 @@ export class RouterLayer {
 			this.settleChild(task.id, { ok: true, text: redactSecrets(text) });
 			return;
 		}
-		// A conclusion that lands in a *chat* is the answer, and it is delivered
-		// there directly; a thread with no chat is work being done for someone who
-		// will be told through a channel, and it keeps its own "done" marker.
+// In a chat it is the answer and is delivered there; elsewhere it is a "done" marker.
 		const reportThread = task?.threadId;
 		const reportIsChat =
 			reportThread !== undefined && reportThread !== "" && this.deps.threadLog?.chatOf(reportThread) !== undefined;
 
-		// The work thread's own record: what the worker said, then that it ended.
-		// A client watching the thread sees the answer without waiting for the
-		// Router to pass it on to a channel.
+// The work thread's own record: what it said, then that it ended.
 		for (const threadId of rec.threadIds) {
 			if (reportIsChat && threadId === reportThread) continue;
 			if (!alreadySaid) this.record(threadId, { kind: "text", role: "assistant", text, workerId });
@@ -2685,20 +2291,13 @@ export class RouterLayer {
 			});
 		}
 
-		// The conclusion is the answer, so it goes to the conversation now — not when
-		// a model next gets a turn. A turn on a slow provider is a minute or more, and
-		// a model asked to relay an answer it was handed says it twice: once in the
-		// worker's words and once in its own.
+// Now, not on a later turn: a model asked to relay an answer says it twice.
 		if (reportIsChat && reportThread !== undefined) {
-			// The answer, once. The product's channel writes its reply into the thread
-			// itself; every other channel is logged here — saying it both ways is how a
-			// conclusion came out twice, word for word.
+// Once: the product's channel writes into the thread, every other channel is logged here.
 			await this.say(reportThread, task?.channelId, redactSecrets(text), {
 				...(task?.replyTo === undefined ? {} : { eventId: task.replyTo }),
 			});
-			// And the turn that the dispatch opened is over: without this the chat
-			// keeps its thinking loader up, because nothing else closes a turn no
-			// model run opened.
+// The turn the dispatch opened is over, or the chat keeps its loader up.
 			this.record(reportThread, { kind: "status", status: "idle", note: "the worker finished" });
 			metrics.counter("mir_conclusions_delivered_direct_total");
 			return;
@@ -2794,9 +2393,7 @@ export class RouterLayer {
 			this.deps.store.upsertTask(task);
 			metrics.counter("mir_tasks_completed_total", 1, { status: "failed", fast: String(Boolean(task.fast)) });
 			this.closeScratchpadForTask(task.id, "dropped");
-			// Silence is not a state a person can see. The thread says the work
-			// failed, in the words the log has, and the card says the same — so a chat
-			// that was waiting on this stops waiting and says why.
+// Silence is not a state a person can see: the thread and the card say it failed.
 			this.record(task.threadId, { kind: "status", status: "failed", note: reason });
 			this.recordCard(task.threadId, task.id);
 			const channel = this.deps.channels.find((candidate) => candidate.id === task.channelId);
@@ -2844,18 +2441,8 @@ export class RouterLayer {
 		return task;
 	}
 
-	/**
-	 * Stop everything running in a thread: every task that is on it, queued or
-	 * working. What a client's Stop reaches, and why it names a thread rather
-	 * than a task: a person watching a thread does not know its task ids.
-	 */
-	/**
-	 * The person pressed stop on a thread.
-	 *
-	 * The turn ends, every task this thread started is stopped, and the thread is
-	 * marked stopped for the turn in flight so a dispatch that arrives after this
-	 * is refused instead of started.
-	 */
+	/** Every task on the thread, queued or running, and the turn in flight. */
+	/** The turn ends, its tasks stop, and a dispatch arriving after this is refused. */
 	async stopThread(threadId: string, reason?: string): Promise<Task[]> {
 		const why = reason ?? "stopped from the thread";
 		this.turn.stoppedThreads.add(threadId);
@@ -2899,11 +2486,7 @@ export class RouterLayer {
 
 	// ----- Restore / recovery -----
 
-	/**
-	 * Hydrate durable state. Workers from a previous daemon generation are dead
-	 * (their control socket is gone), so their tasks are failed with an explicit
-	 * reason and the Router is told — instead of silently forgetting the work.
-	 */
+	/** A worker from a previous generation is dead, so its task fails with a reason rather than being forgotten. */
 	private restore(): void {
 		for (const task of this.deps.store.listTasks()) this.tasks.set(task.id, task);
 		const persisted = this.deps.store.listWorkers();
@@ -3012,11 +2595,7 @@ export class RouterLayer {
 		};
 	}
 
-	/**
-	 * Keep only the newest `keep` tasks in memory. Terminal tasks stay in the
-	 * durable store (and the recall graph), so nothing is lost — the in-memory
-	 * map is a cache, and an unbounded one is §8.1's memory leak.
-	 */
+	/** Terminal tasks stay in the store. */
 	pruneTasks(keep = 500): number {
 		const all = this.listTasks();
 		if (all.length <= keep) return 0;
@@ -3032,13 +2611,7 @@ export class RouterLayer {
 		return removed;
 	}
 
-	/**
-	 * End the turn now.
-	 *
-	 * `abort` is the only lever pi gives for "stop the loop": it cancels the provider
-	 * call and the queued steps, and `runTurn` treats it as a clean end because the
-	 * turn already said what it had to say.
-	 */
+	/** `abort` is the only lever pi gives for "stop the loop"; `runTurn` treats it as a clean end. */
 	private requestTurnEnd(): void {
 		if (this.endRequested) return;
 		this.endRequested = true;

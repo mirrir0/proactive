@@ -10,7 +10,6 @@ import type { ThreadEntry, ThreadStatus, ThreadSummary } from "../threadlog.ts";
 export const BRAIN_API_VERSION = 1;
 
 export interface ThreadFilter {
-	/** Only threads in this state. */
 	status?: ThreadStatus;
 	limit?: number;
 }
@@ -63,17 +62,11 @@ export type ClientToBrain =
 
 /** What a brain can do, so a client renders only what is there. */
 export interface BrainCapabilities {
-	/** The rail a client draws. */
 	threads: { entries: boolean; names: boolean; rename: boolean; stop: boolean };
-	/** How a turn's words arrive. */
 	streaming: "deltas" | "message" | "none";
-	/** Work started from a conversation. */
 	dispatch: { tasks: boolean; cards: boolean };
-	/** Execution environments this brain can reach. */
 	hands: boolean;
-	/** The brain's own memory of a conversation. */
 	journal: boolean;
-	/** Reading a thread's log on demand. */
 	readLog: boolean;
 }
 
@@ -131,7 +124,6 @@ export interface HandRegistration {
 }
 
 export interface BrainHost {
-	/** Every thread, newest activity first. */
 	listThreads(filter?: ThreadFilter): ThreadSummary[];
 	/** Minted on first use, holding the chat's name when the client knows it. */
 	chatThread(chatId: string, title?: string): string;
@@ -139,13 +131,10 @@ export interface BrainHost {
 	entries(threadId: string, since: number): ThreadEntry[];
 	/** The work thread of the task that asked for this one, and how deep. Absent for a chat's own. */
 	threadFacts(threadId: string): { parentThreadId?: string; depth?: number };
-	/** A thread's status right now. */
 	status(threadId: string): ThreadStatus;
 	/** A person said something. `hand` pins the work to one hand; omitted, the hub picks. */
 	say(threadId: string, content: string, hand?: string): void;
-	/** Stop what is running in a thread. */
 	stop(threadId: string): void;
-	/** The hands this brain can reach. */
 	hands(): HandStatus[];
 	/** Accept a hand a client is about to run; the token it must present comes back. */
 	addHand(request: HandRegistration): { handId: string; token: string; hubPort: number };

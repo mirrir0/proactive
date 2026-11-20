@@ -153,7 +153,7 @@ test("a memoized response tool still answers in the turn's thread", async () => 
 	await channel.start(() => {});
 	// Somebody heard from a chat first, so `recent` is not empty and a tool that lost
 	// its context would answer *there* — a reply in another conversation.
-	await channel.submit({ chatId: "another-chat", threadId: "another-thread", text: "hello" });
+	await channel.submit({ chatId: "another-chat", threadId: "another-thread", eventId: "event-1", text: "hello" });
 	const recorder = { record: () => ({ ok: true as const }) };
 	const tool = channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" }));
 	assert.equal(channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" })), tool, "one tool per recorder");

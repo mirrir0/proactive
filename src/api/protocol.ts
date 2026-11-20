@@ -1,20 +1,8 @@
 /**
- * The brain's client API — what a *display* needs, and nothing else.
+ * The brain's client API: what a display needs, and nothing more. A client cannot
+ * dispatch a task or change a policy. A thread is opened, not polled.
  *
- * This is the door the product reaches the brain through. It is deliberately
- * narrower than the brain: a client can list threads, open one, say into it,
- * stop it, and look at the hands. It cannot dispatch a task, change a policy,
- * or read the Router's prompt. Those are the brain's own business, and a client
- * that could reach them would be a second brain.
- *
- * Framing is the hands protocol's (`encodeFrame` / `FrameDecoder`): newline
- * delimited JSON, one frame per line, size-capped. Two links already speak it,
- * and a third that spoke something else would be a second thing to debug.
- *
- * The one asymmetry worth naming: **a thread is opened, not polled.** `open`
- * answers with a snapshot and then the connection carries that thread's entries
- * as they happen, until `close`. A client that reconnects sends the last `seq`
- * it saw, so a missed frame costs one frame, not a resync.
+ * Framing is the hands protocol's — newline-delimited JSON, one frame per line.
  */
 
 import type { HandStatus } from "../hands/protocol.ts";
@@ -33,9 +21,9 @@ export type ClientToBrain =
 	| {
 			type: "hello";
 			v: number;
-			/** Shared bearer token. The brain compares a hash, in constant time. */
+			/** Compared against a hash, in constant time. */
 			token: string;
-			/** Who is connecting, for the log: `anomalous-host`, `thread-panel`, a test. */
+			/** Who is connecting, for the log. */
 			agent: string;
 	  }
 	| { type: "threads"; id: string; filter?: ThreadFilter }
@@ -46,13 +34,7 @@ export type ClientToBrain =
 			/** The last entry the client has; only what is after it is sent. */
 			since?: number;
 	  }
-	/**
-	 * The thread a chat shows, minted on first use, opened like `open`.
-	 *
-	 * A chat driver does not know a thread id — the chat is what it has. This is
-	 * the one request that turns one into the other, and it is idempotent: the
-	 * second turn of the same chat gets the same thread.
-	 */
+	/** The thread a chat shows, minted on first use. Idempotent. */
 	| {
 			type: "chat";
 			id: string;
@@ -62,32 +44,18 @@ export type ClientToBrain =
 			since?: number;
 	  }
 	| { type: "close"; id: string; threadId: string }
-	/**
-	 * A person said something.
-	 *
-	 * `hand` is the client's word on where this thread's work belongs — a space is a
-	 * hand, and the client is the only one who knows which. The brain does not read it
-	 * as a space: it is an endpoint id, and it only ever narrows what a dispatch may
-	 * choose.
-	 */
+	/** A person said something. `hand` only ever narrows what a dispatch may choose. */
 	| { type: "say"; id: string; threadId: string; content: string; hand?: string }
 	| { type: "stop"; id: string; threadId: string }
 	| { type: "hands"; id: string }
-	/**
-	 * Ask the brain to accept a hand the client is about to run.
-	 *
-	 * The brain owns its store, so it owns the token a hand must present — a client
-	 * cannot write that row itself, and should not. This is how a space becomes a
-	 * hand: the client says "there is a machine rooted here, called this", gets a
-	 * token back, and starts it. Nothing in the brain needs to know what a space is.
-	 */
+	/** A hand the client is about to run. The brain mints its token. */
 	| {
 			type: "hand_add";
 			id: string;
 			/** The endpoint id the hand will present. Re-adding an id rotates its token. */
 			handId: string;
 			name?: string;
-			/** What the hand will be allowed to do. Narrower than the hand's own policy, never wider. */
+			/** Narrower than the hand's own policy, never wider. */
 			roots: readonly string[];
 			fs?: "none" | "ro" | "rw";
 			exec?: boolean;
@@ -95,19 +63,13 @@ export type ClientToBrain =
 			git?: boolean;
 	  };
 
-/**
- * What a brain can do, said rather than assumed.
- *
- * The failure this prevents: a client hard-codes "a thread has cards, a card has a
- * stop button, a task runs on a hand", and every other agent has to pretend to be
- * this one. Each field here is something a client may render *if it is there*.
- */
+/** What a brain can do, so a client renders only what is there. */
 export interface BrainCapabilities {
-	/** Threads and their entries: the rail a client draws. */
+	/** The rail a client draws. */
 	threads: { entries: boolean; names: boolean; rename: boolean; stop: boolean };
 	/** How a turn's words arrive. */
 	streaming: "deltas" | "message" | "none";
-	/** Work started from a conversation, and whether it has a card. */
+	/** Work started from a conversation. */
 	dispatch: { tasks: boolean; cards: boolean };
 	/** Execution environments this brain can reach. */
 	hands: boolean;
@@ -191,27 +153,14 @@ export interface BrainHost {
 	threadFacts(threadId: string): { parentThreadId?: string; depth?: number };
 	/** A thread's status right now. */
 	status(threadId: string): ThreadStatus;
-	/**
-	 * A person said something in a thread: the Router hears it.
-	 *
-	 * `hand` pins the work this message starts to one hand — the client's answer to
-	 * "where does this belong". Omitted, the hub picks.
-	 */
+	/** A person said something. `hand` pins the work to one hand; omitted, the hub picks. */
 	say(threadId: string, content: string, hand?: string): void;
 	/** Stop what is running in a thread. */
 	stop(threadId: string): void;
 	/** The hands this brain can reach. */
 	hands(): HandStatus[];
-	/**
-	 * Accept a hand a client is about to run, and answer with the token it must
-	 * present. The brain owns its store; a client cannot write that row, and should
-	 * not have to.
-	 */
+	/** Accept a hand a client is about to run; the token it must present comes back. */
 	addHand(request: HandRegistration): { handId: string; token: string; hubPort: number };
-	/**
-	 * Called when a client opens or closes a thread, so the brain knows which
-	 * threads are being watched. A brain that knows this can keep a Router warm
-	 * for a thread a person is looking at and let the rest idle.
-	 */
+	/** A client opened or closed a thread. A watched thread can keep its Router warm. */
 	watch?(threadId: string, watching: boolean): void;
 }

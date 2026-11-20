@@ -1,21 +1,8 @@
 /**
- * Watchdog (Section 6).
- *
- * An independent control loop that runs outside the main system and is driven
- * by scheduled checks. It does two distinct jobs, in this order:
- *
- *   1. **Deterministic recovery.** Liveness is not a model question. A worker
- *      whose heartbeat is stale, or a Router turn that has been in flight past
- *      its budget, is an infrastructure fault — it is detected and fixed by
- *      code, immediately, without waiting for an inference call.
- *   2. **Judgement.** When something looks wrong but is not mechanical (a worker
- *      alive but unproductive, repeated failures, a growing backlog), the
- *      Watchdog is *itself an agent session* with tools, so it can look at the
- *      system in natural language and act: stop a task, retry it, tighten a
- *      trigger policy, or leave a note for the Router.
- *
- * It keeps its own session file, so a maintainer can ask it later what it saw
- * and why it acted — that is the "explain the anomaly" property from the paper.
+ * An independent control loop. Deterministic recovery first — a stale heartbeat or an
+ * over-budget turn is an infrastructure fault, fixed without an inference call — then
+ * judgement, in its own agent session, for what is not mechanical. It keeps its session
+ * file, so a maintainer can ask it what it saw.
  */
 
 import { SessionManager, defineTool, type AgentToolResult, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -48,10 +35,7 @@ export interface WatchdogSnapshot {
 	recentFailures?: Task[];
 }
 
-/**
- * The slice of the Router the Watchdog acts through. Structural, so the
- * Watchdog is testable without constructing a whole Router.
- */
+/** Structural, so the Watchdog is testable without a whole Router. */
 export interface WatchdogRouter {
 	listWorkers(): WorkerInfo[];
 	listTasks(): Task[];
@@ -81,10 +65,7 @@ export const DEFAULT_WATCHDOG_OPTIONS: WatchdogOptions = {
 	backlogDepth: 50,
 };
 
-/**
- * Pure assessment: turn a snapshot into findings. Kept free of I/O so it is
- * unit-testable with a fabricated clock.
- */
+/** No I/O, so it is unit-testable with a fabricated clock. */
 export function assess(snapshot: WatchdogSnapshot, options: WatchdogOptions): Finding[] {
 	const findings: Finding[] = [];
 	const { now } = snapshot;

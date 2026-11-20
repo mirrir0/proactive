@@ -1,15 +1,7 @@
 /**
- * Hand tools — what a brain sees of its hands.
- *
- * The paper's point is that a hand is `execute(name, input) → string`. These
- * tools are that surface, and nothing more: no transport, no credentials, no
- * knowledge of whether the hand is a laptop, a container or the machine next
- * door. A policy violation comes back as a tool error the model can read and
- * react to, which is what keeps a stuck or refusing hand from becoming a stuck
- * brain.
- *
- * Output is capped and redacted before it enters the context window, so a large
- * build log or a leaked token cannot blow up a turn.
+ * A hand as a brain sees it: `execute(name, input) → string`, nothing about transport or
+ * credentials. A policy violation is a tool error the model can read, so a refusing hand
+ * does not become a stuck brain. Output is capped and redacted before it enters context.
  */
 
 import { Type } from "typebox";
@@ -85,14 +77,7 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 	const handRoot = options.handRoot;
 	const maxChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
 
-	/**
-	 * The hand this task is on.
-	 *
-	 * Pinned when the client said; otherwise the hub picks, and the first answer *becomes*
-	 * the pin. A Worker that is not pinned must not wander: its first `list_dir` on one
-	 * machine and its second `read_file` on another would read two different folders and
-	 * call it one task.
-	 */
+	/** The first answer becomes the pin: a Worker that wandered would read two folders and call it one task. */
 	let settled = pinned;
 
 	const call = async (

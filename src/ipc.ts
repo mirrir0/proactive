@@ -1,21 +1,7 @@
 /**
- * Control channel between the daemon and Worker processes (ADR 0001).
- *
- * A local Unix-domain socket carrying newline-delimited JSON.
- *
- *   worker → daemon:  hello { v, workerId, taskId }, status { status, progress? },
- *                     heartbeat { status, progress? }, conclusion { text },
- *                     delta { text }, mcp_catalog { servers, tools },
- *                     release { eventId, reason }   — "not mine, re-route"
- *                     unsubscribe { threadId, reason } — "stop sending this thread"
- *   daemon → worker:  event { event }, abort { reason? },
- *                     system { kind: "mcp_changed", ... } — signal: hot-reload MCP
- *
- * Workers are pure clients: they connect to the daemon and never listen.
- *
- * The protocol carries a version (`PROTOCOL_VERSION`). ADR 0001 flagged that
- * the control channel is a protocol with its own compatibility surface; a
- * mismatched worker is refused rather than allowed to half-work.
+ * The daemon↔Worker control channel (ADR 0001): a local socket of NDJSON frames. Workers
+ * are pure clients — they connect and never listen — and a mismatched `PROTOCOL_VERSION`
+ * is refused rather than allowed to half-work.
  */
 
 import net from "node:net";
@@ -353,12 +339,7 @@ export class ControlClient {
 		this.send({ type: "unsubscribe", threadId, reason });
 	}
 
-	/**
-	 * Ask the daemon to run a task for this Worker, and wait for its conclusion.
-	 *
-	 * The daemon owns the process manager, so a Worker asks and blocks; the answer
-	 * is the child's conclusion, never a task id to poll.
-	 */
+	/** The daemon owns the process manager; the answer is the child's conclusion, never an id to poll. */
 	dispatchChild(
 		requestId: string,
 		title: string,
@@ -397,10 +378,7 @@ export class ControlClient {
 		}
 	}
 
-	/**
-	 * Flush pending writes before exiting. `socket.end()` is asynchronous, and a
-	 * `process.exit()` immediately after it can truncate the last message.
-	 */
+	/** `socket.end()` is asynchronous: `process.exit()` straight after it truncates the last frame. */
 	async flush(timeoutMs = 1000): Promise<void> {
 		const socket = this.socket;
 		if (!socket || socket.destroyed) return;

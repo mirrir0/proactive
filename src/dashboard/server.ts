@@ -1,16 +1,7 @@
 /**
- * server.ts — the dashboard's own HTTP surface.
- *
- * Four endpoints, and no framework: the page, the state it renders, a stream that
- * tells it when the state changed, and the one action a person takes from here
- * (stop a task). The state is assembled from the brain's own readers, so a
- * dashboard and the brain cannot disagree — and a reload asks for it again rather
- * than trusting what the page last saw.
- *
- * **Auth is the client API's token**, in a query string for the page (a browser
- * cannot send a header for a navigation) and as a bearer for the API calls the
- * page makes. A dashboard that answers anyone who can reach the port is a
- * dashboard that shows a member's work to the network.
+ * The dashboard's HTTP surface, no framework: the page, the state it renders, a stream
+ * that says when it changed, and the one action a person takes here. Auth is the client
+ * API's token — a query string for the page, a bearer for the calls it makes.
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -252,13 +243,7 @@ export class DashboardServer {
 		return a.length === b.length && timingSafeEqual(a, b);
 	}
 
-	/**
-	 * The state, with the samples this server has taken.
-	 *
-	 * The registry is counters and gauges — no history, because a metric with a
-	 * timestamp per point is a time-series database. A line chart needs a window, so
-	 * this keeps the last 60 samples (two minutes at the push interval).
-	 */
+	/** The registry has no history, so the last 60 samples are kept here. */
 	private readonly samples: Array<{ at: number; inFlight: number; threads: number; turns: number }> = [];
 
 	private sample(): DashboardState {
@@ -295,13 +280,7 @@ export class DashboardServer {
 		for (const client of this.clients.keys()) this.send(client, state);
 	}
 
-	/**
-	 * Tell the panes following a thread about the entry that just happened.
-	 *
-	 * Called from the brain's own publish path, so a thread pane is as live as the
-	 * thread log: no polling interval, no "refresh to see more". A client that
-	 * reconnects sends the `since` it has and gets exactly what it missed.
-	 */
+	/** Called from the publish path: a pane is as live as the log, with no polling interval. */
 	publish(threadId: string, entry: { seq: number }): void {
 		metrics.counter("mir_dashboard_entry_pushes_total");
 		for (const [res, client] of this.clients) {

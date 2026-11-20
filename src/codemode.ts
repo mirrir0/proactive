@@ -1,19 +1,7 @@
 /**
- * Codemode tool for workers — uses @earendil-works/pi-codemode's real
- * `InlineCodemodeSandbox` (QuickJS VM) to execute JavaScript code.
- *
- * The script runs in a sandboxed VM. What it can reach is **policy**, not
- * accident: host helpers are injected as sandbox globals only when the
- * Worker's capabilities grant them.
- *
- *   - always:            console, store()/load(), text(), image(), exit()
- *   - capabilities.net   → fetch(url, init?)
- *   - capabilities.fs    → readFile / listDir (ro), writeFile (rw)
- *   - capabilities.mcp   → mcp__<server>__<tool>()
- *
- * File helpers are rooted at the Worker's cwd; a path that resolves outside it
- * is rejected rather than silently clamped. That is what makes `fs: "ro"` and
- * `fs: "none"` mean something.
+ * JavaScript in a QuickJS VM. What it can reach is policy, not accident: `fetch` only
+ * with `net`, file helpers only with `fs` and rooted at the Worker's cwd, `mcp__*` only
+ * with `mcp`.
  */
 
 import { Type } from "typebox";
@@ -36,11 +24,7 @@ export interface CodemodeToolOptions {
 	store?: Map<string, unknown>;
 	/** MCP tools exposed as globals to codemode scripts (snapshot at creation). */
 	mcpTools?: CodemodeTool[];
-	/**
-	 * Live provider for MCP tools. When set, the sandbox is rebuilt whenever the
-	 * set of tool names changes — this is how hot-reloaded MCP servers become
-	 * available to scripts on the next codemode call. Takes precedence over `mcpTools`.
-	 */
+	/** When set, a changed tool set rebuilds the sandbox; it wins over `mcpTools`. */
 	getMcpTools?: () => CodemodeTool[];
 	/** What the script may reach. Defaults to the permissive development set. */
 	capabilities?: WorkerCapabilities;
@@ -182,10 +166,7 @@ export function createCodemodeTool(options: CodemodeToolOptions = {}): ToolDefin
 	const capabilities = options.capabilities ?? DEFAULT_WORKER_CAPABILITIES;
 	const hostGlobals = buildHostGlobals(capabilities, cwd);
 
-	/**
-	 * The sandbox snapshots its globals at construction, so cache it keyed by the
-	 * sorted global-name signature and rebuild when an MCP hot-reload changes the set.
-	 */
+	/** Keyed by the sorted global names, so a hot-reload rebuilds and nothing else does. */
 	let currentSandbox: InlineCodemodeSandbox | null = null;
 	let currentSignature = "";
 	async function sandboxFor(globals: CodemodeTool[]): Promise<InlineCodemodeSandbox> {

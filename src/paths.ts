@@ -1,28 +1,10 @@
 /**
- * paths.ts — where a mir install keeps its files, on the platform it is on.
+ * Where an install keeps its files: XDG on Linux, Apple's layout on macOS, the XDG
+ * shape elsewhere. `MIR_HOME` overrides all of it, and each path has its own variable.
  *
- * One rule, three answers, and the answers are conventions rather than opinions:
- *
- *   - **Linux** follows the XDG Base Directory specification: `~/.config/mir`,
- *     `~/.local/share/mir`, `~/.local/state/mir`, `~/.cache/mir`, and sockets in
- *     `$XDG_RUNTIME_DIR/mir` when the session provides one. Each is overridable by
- *     its own XDG variable, which is what makes mir work under systemd, in a
- *     container with a mounted volume, or in a Flatpak-style sandbox.
- *   - **macOS** follows Apple's file-system guidance: `~/Library/Application
- *     Support/mir` for data and configuration, `~/Library/Logs/mir` for logs,
- *     `~/Library/Caches/mir` for caches. There is no runtime directory on macOS,
- *     so sockets live in `<support>/run`.
- *   - **Anything else** falls back to the XDG shape under the home directory, so a
- *     platform nobody has ported yet still has a place to put things.
- *
- * `MIR_HOME` overrides all of it with one directory — what a container wants, and
- * what a test wants — and the per-path variables (`MIR_STATE_DIR`, `MIR_SOCKET_PATH`,
- * …) still win over everything, because they are what an existing deployment sets.
- *
- * **A unix socket path has a hard limit** — 104 bytes on macOS, 108 on Linux — and
- * going over it fails with `ENAMETOOLONG` at bind time, long after the operator
- * stopped looking. `socketFits()` checks it where the path is made, so the error
- * names the limit and the variable that moves the socket.
+ * A unix socket path has a hard limit (104 bytes on macOS, 108 on Linux) and fails at
+ * bind time, long after anyone stopped looking — `socketFits()` checks it where the path
+ * is made.
  */
 
 import { homedir, platform as hostPlatform } from "node:os";

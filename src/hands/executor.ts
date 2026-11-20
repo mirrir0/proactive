@@ -170,9 +170,7 @@ export class HandExecutor {
 
 		const sandbox = this.options.sandbox;
 		if (policy.sandbox !== "none" && !sandbox) {
-			// A hand that says it is sandboxed and is not must refuse: the difference
-			// between "confined to this folder" and "whatever the account can reach" is
-			// not one to discover later.
+// "Confined to this folder" and "whatever the account can reach" are not the same promise.
 			return {
 				ok: false,
 				error: `sandbox-required: this hand is configured for ${policy.sandbox} execution but no sandbox is initialized`,
@@ -305,9 +303,7 @@ export class HandExecutor {
 			});
 
 			child.on("close", (code, signal) => {
-				// Attribute sandbox denials to this invocation: "EPERM" alone reads as
-				// a bug, "blocked by sandbox: write outside the allowed paths" reads as
-				// policy the model can act on.
+// "blocked by sandbox: write outside the allowed paths" is policy the model can act on; "EPERM" is not.
 				let stderrText = stderr;
 				let violations: Array<{ line: string }> = [];
 				if (sandbox) {
@@ -320,9 +316,7 @@ export class HandExecutor {
 						sandbox.cleanup();
 					}
 				}
-				// Decide "blocked" from what the OS told the child, not from the tap:
-				// an EPERM under a sandbox is a policy denial, and the model must be
-				// able to tell it apart from a bug.
+// An EPERM under a sandbox is a denial, not a bug, and the model must be able to tell them apart.
 				const osDenial =
 					Boolean(sandbox) &&
 					code !== 0 &&
@@ -504,9 +498,7 @@ export class HandExecutor {
 		const raw = await readFile(target);
 		const byteTruncated = raw.byteLength > cap;
 		let content = raw.subarray(0, cap).toString("utf8");
-		// Line paging is what a machine's own read tool offers, so a caller that
-		// asks for a window gets one; a caller that asks for nothing gets the file
-		// as it always did.
+// A caller that asks for a window gets one; a caller that asks for nothing gets the file.
 		let lines: { start: number; end: number; total: number } | undefined;
 		if (input.offset !== undefined || input.limit !== undefined) {
 			// A file that ends in a newline has as many lines as it has newlines,

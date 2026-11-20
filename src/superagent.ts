@@ -190,11 +190,7 @@ export class SuperAgent {
 	}
 
 	async start(): Promise<void> {
-		// What the previous life left. A daemon that is killed — or crashes — leaves its
-		// task rows `running` and its chat threads `running`, and nothing else ever
-		// settles them: the chat shows a loader forever, and the next turn queues
-		// behind work that does not exist. Started is not running, and a row that says
-		// running when nothing runs is a lie the whole UI repeats.
+// A killed daemon leaves rows `running` and nothing settles them: started is not running.
 		const stale = this.store.revokeStaleEndpoints(this.config.hands.staleAfterMs);
 		if (stale.length > 0) log.info("hands nobody brought in a while were revoked", { hands: stale });
 		const settled = this.store.settleInterrupted();
@@ -334,9 +330,7 @@ export class SuperAgent {
 			await this.apiServer.start();
 		}
 
-		// MCP changes, from whichever source this brain has. With a stack, the
-		// member's connected services are fetched and polled (mcp-servers.ts) and
-		// the file is not read at all; without one, the file watcher is the source.
+// With a stack the servers are fetched and polled; without one, the file watcher is the source.
 		if (this.config.mcpServers !== undefined) {
 			// Ask before the Router exists: the first Worker spawned is given this
 			// answer, and a Worker that booted with nothing would keep nothing.
@@ -352,9 +346,7 @@ export class SuperAgent {
 			this.mcpWatcher.start();
 		}
 
-		// The product's channel comes before the Router, because the Router builds
-		// its `respond_anomalous` tool from it. Its delivery writes into the thread
-		// log, which is what a watching client reads — no reverse socket needed.
+// Before the Router, because the Router builds `respond_anomalous` from it.
 		if (this.config.api.socketPath !== "") {
 			this.anomalousChannel = new AnomalousChannel({
 				deliver: (target, text) => {
@@ -382,9 +374,7 @@ export class SuperAgent {
 			});
 		}
 
-		// The card, served as an MCP App: a client fetches `ui://mir/work` and the
-		// view asks `work_status`. Only when a port is configured, and never without
-		// a token — the same rule as the client API.
+// Only with a port, and never without a token — the same rule as the client API.
 		if (this.config.mcpApp.port > 0) {
 			if (this.config.mcpApp.token === "") {
 				log.warn("mcp app server not started: no token", { hint: "set MIR_API_TOKEN" });
@@ -437,9 +427,7 @@ export class SuperAgent {
 			hands: this.handsHub
 				? {
 						socketPath: this.handsSocketPath(),
-						// The merged view: the hub's status, with the roots the client told
-						// us about. A remote hand reports no roots of its own — it enforces
-						// its own policy — and without this the brief has no folder in it.
+// The hub's status plus the client's roots: a remote hand reports none of its own.
 						listHands: () => this.handsWithRoots(),
 					}
 				: undefined,
@@ -448,9 +436,7 @@ export class SuperAgent {
 			journal: this.journal,
 			publishEntry: (threadId, entry) => {
 				this.apiServer?.publish(threadId, entry);
-				// A dashboard following this thread gets the entry now, not at the
-				// next tick: it is a log pane, and a log pane that lags is a log pane
-				// somebody refreshes.
+// Now, not at the next tick: a log pane that lags is a log pane somebody refreshes.
 				this.dashboard?.publish(threadId, entry);
 			},
 			onOrphanedWorker: (workerId, taskId) => {
@@ -502,9 +488,7 @@ export class SuperAgent {
 			}
 		}
 
-		// Say where this daemon is, so a client attaches to *this* mir instead of
-		// starting a second one. Written once the socket and the dashboard are up: a
-		// record that arrives before the listener is a record that lies.
+// Written once the listeners are up: a record that arrives first is a record that lies.
 		if (this.config.api.socketPath !== "") {
 			writeInstance(this.config.paths, {
 				socket: this.config.api.socketPath,
@@ -870,10 +854,7 @@ export class SuperAgent {
 		return {
 			listThreads: (filter) => {
 				const summaries = this.threadLog.summaries(filter?.limit ?? 100).map((thread) => {
-					// Where a thread sits in a tree is the tasks' business, not the log's: a
-					// check's work thread is a child of the work thread of the task that
-					// asked for it. A client draws the rail from this, so it is computed
-					// here rather than left for each client to guess.
+// A check's work thread is a child of its parent's work thread; a client draws the rail from it.
 					const task = this.router?.listTasks().find((candidate) => candidate.workThreadId === thread.id);
 					const parentTask =
 						task?.parentTaskId === undefined ? undefined : this.router?.getTask(task.parentTaskId);
@@ -902,9 +883,7 @@ export class SuperAgent {
 			},
 			say: (threadId, content, hand) => {
 				const eventId = `api-${crypto.randomUUID()}`;
-				// A thread that shows a chat answers into that chat; the channel is
-				// what knows how. A thread with no chat is a work thread, and its
-				// message is a plain trigger.
+// A thread with no chat is a work thread, and its message is a plain trigger.
 				const chatId = this.threadLog.chatOf(threadId);
 				if (this.anomalousChannel !== null && chatId !== undefined) {
 					this.anomalousChannel.submit({
@@ -937,10 +916,7 @@ export class SuperAgent {
 			/** The brain owns the store, so it mints the token. What the hand may do is the hand's own policy. */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
-				// Where the hand's files start. A remote hand's own policy is a placeholder on
-				// this side — it enforces its own — so the roots the client names here are the
-				// only ones the brain can tell a Worker about. Without them a Worker is told
-				// "you are on: the hand" and no folder, and it looks for one in its own cwd.
+// The client's roots are the only ones the brain can tell a Worker about: a remote hand reports none.
 				if (request.roots.length > 0) this.handRoots.set(request.handId, [...request.roots]);
 				this.store.createEndpoint({
 					id: request.handId,

@@ -77,9 +77,7 @@ export function normalizePolicy(partial: Partial<HandPolicy> = {}, base: HandPol
 			allowLocalBinding: merged.network?.allowLocalBinding ?? false,
 			allowUnixSockets: merged.network?.allowUnixSockets ?? [],
 		},
-		// An explicit list replaces the defaults rather than adding to them: an operator
-		// who names what to deny means that, and a hand with nothing denied is a
-		// decision, not an oversight.
+// An explicit list replaces the defaults: a hand with nothing denied is a decision, not an oversight.
 		denyReadPaths: (merged.denyReadPaths ?? []).map((entry) =>
 			entry.startsWith("~/") ? path.join(process.env["HOME"] ?? "", entry.slice(2)) : entry,
 		),
@@ -145,11 +143,7 @@ export function resolveInRoots(roots: string[], p: string, label = "path"): stri
 	if (roots.length === 0) {
 		throw new HandPolicyError("path-outside-roots", `${label}: this hand has no filesystem roots configured`);
 	}
-	// Real paths, both sides. `path.resolve` alone lets a symlink inside a root point
-	// anywhere — `files/link -> /Users/orchid` passes the check and reads the disk — and
-	// the hand's own file tools run in this process, where no OS sandbox is watching.
-	// Resolving the candidate also accepts the root's own aliases: on macOS a temp dir
-	// arrives as `/var/...` and is really `/private/var/...`.
+// Real paths on both sides: `resolve` alone lets a symlink inside a root point anywhere.
 	const real = realRoots(roots);
 	for (let index = 0; index < roots.length; index += 1) {
 		const root = roots[index]!;

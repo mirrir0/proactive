@@ -242,19 +242,14 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				"A task runs on one hand and can reach nothing else, so this is the whole list.",
 			parameters: Type.Object({}),
 			async execute(): Promise<AgentToolResult<any>> {
-				// Scoped to this task's own hand. The hub knows every hand the member
-				// has — their laptop, each of their spaces — and a Worker pinned to one
-				// space has no business seeing the others' roots, let alone their names.
+// Scoped to this task's hand: a Worker pinned to one space has no business seeing the others.
 				const hands = (await client.refreshHands()).filter(
 					(hand) => pinned === undefined || hand.endpointId === pinned,
 				);
 				const text = hands.length
 					? hands
 							.map((h) => {
-								// The hand's own policy carries no roots — it enforces them itself,
-								// and what it reports is display only. The task was told where the
-								// folder is; that is what a Worker needs to know, and the name is
-								// what a person calls it.
+// A remote hand reports no roots; the task was told where the folder is, and the name a person calls it.
 								const roots = h.policy.roots.length > 0 ? h.policy.roots : handRoot === undefined ? [] : [handRoot];
 								const name = handName === undefined ? h.endpointId : `“${handName}”`;
 								const cap = h.policy.maxConcurrent ?? 0;

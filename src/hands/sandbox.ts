@@ -108,9 +108,7 @@ export async function createSrtSandbox(
 	}
 	await initialized.promise;
 
-	// Resolve the shell once, absolutely. `srt` otherwise looks `bash` up in PATH
-	// at wrap time, which is both a startup race and a dependency on the very
-	// environment the sandbox is about to replace.
+// Absolute, once: `srt` otherwise looks `bash` up in the PATH the sandbox is about to replace.
 	const binShell = process.platform === "win32" ? undefined : resolvePosixShell();
 
 	log.info("sandbox initialized", {
@@ -131,10 +129,7 @@ export async function createSrtSandbox(
 		},
 		async wrap(argv, wrapOptions) {
 			const command = shellQuote(argv);
-			// `srt` locates its shell by spawning `which` with a 1s timeout, so a
-			// loaded machine can make a healthy shell look missing. Retry briefly
-			// instead of failing a task for a scheduling artefact; anything that is
-			// not that artefact is surfaced immediately.
+// `srt` looks its shell up with a 1s timeout, so retry briefly rather than fail on a scheduling artefact.
 			let lastError: Error | null = null;
 			for (let attempt = 0; attempt < 4; attempt++) {
 				try {
@@ -177,9 +172,7 @@ export async function createSrtSandbox(
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Confined: reads *and* writes inside the roots
-// ---------------------------------------------------------------------------
+// Confined: reads and writes both stay inside the roots.
 
 /**
  * `srt` has `allowWrite` and no `allowRead`, so it cannot say what a Worker may look at. This
@@ -206,9 +199,7 @@ const SYSTEM_READ = [
 	"/Library/Apple",
 	"/private/var/db/dyld",
 	"/dev",
-	// Configuration a tool needs to run at all. Not secrets — `~/.ssh`, `~/.aws` and the
-	// brain's own state stay denied — but `git` refuses to start without its config, and
-	// a Worker that cannot run `git status` reports the sandbox as a broken machine.
+// Tool config, not secrets: `git` refuses to start without it, and keys stay denied.
 	"/etc/gitconfig",
 ] as const;
 

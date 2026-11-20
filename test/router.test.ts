@@ -582,7 +582,10 @@ test("thread log: a reply is written to the thread it answered, and published li
 		assert.deepEqual(
 			// Both sides of the conversation: the member's words are in the log too,
 			// because a chat is a projection of its thread.
-			entries.map((entry) => (entry.kind === "text" ? `${entry.role}: ${entry.text}` : entry.kind)),
+			// Status entries are the turn's own state, not something anyone said.
+			entries
+				.filter((entry) => entry.kind !== "status")
+				.map((entry) => (entry.kind === "text" ? `${entry.role}: ${entry.text}` : entry.kind)),
 			[`user: ${trigger.text}`, "assistant: the answer"],
 			"the thread holds what was said to it, then what it said",
 		);
@@ -1541,6 +1544,50 @@ test("a dispatch is filed in the turn's thread, and the model is not offered ano
 		assert.equal(properties.includes("thread"), false, "no thread parameter");
 		assert.equal(properties.includes("reply_to"), false, "no reply_to parameter");
 		assert.equal(h.router.listTasks()[0]!.threadId, chat, "filed in the conversation it was made in");
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("the card and the dispatch point at the work's thread, not the chat that asked", async () => {
+	const h = await makeRouter({
+		threadLog: true,
+		script: () => [{ type: "tool", name: "dispatch_task", args: { title: "Read the docs", description: "read them" } }],
+	});
+	try {
+		const chat = h.threadLog!.chatThread("chat-card", "A chat");
+		h.router.submitTrigger({ ...makeTrigger({ text: "read the docs" }), threadId: chat });
+		await waitFor(() => h.router.listTasks().length === 1, 2000, "the dispatch landed");
+		const task = h.router.listTasks()[0]!;
+		const work = task.workThreadId;
+		assert.ok(work !== undefined, "the work has its own thread");
+		assert.notEqual(work, chat, "and it is not the chat");
+
+		// What a client clicks: `details.threadId` on the tool result.
+		const result = h.threadLog!.entries(chat).find((entry) => entry.kind === "tool_result");
+		const details = (result as { result?: { details?: { threadId?: string } } } | undefined)?.result?.details;
+		assert.equal(details?.threadId, work, "the tool result names the work thread");
+
+		// What a client draws: the card's own data.
+		const card = h.threadLog!.entries(chat).find((entry) => entry.kind === "app");
+		assert.equal((card as { data?: { threadId?: string } } | undefined)?.data?.threadId, work);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+test("a turn that only answers still ends the thread's turn", async () => {
+	const h = await makeRouter({ threadLog: true, script: () => [{ type: "text", text: "here is the answer" }] });
+	try {
+		const chat = h.threadLog!.chatThread("chat-quiet", "A chat");
+		h.router.submitTrigger({ ...makeTrigger({ text: "what is the time" }), threadId: chat });
+		await waitFor(() => h.router.listTasks().length === 0 && h.threadLog!.entries(chat).some((e) => e.kind === "text" && e.role === "assistant"), 2000, "the answer");
+		// The client that shows "thinking" reads the thread's status. A turn with no
+		// dispatch has nothing else to write it, so the turn writes it.
+		assert.equal(h.threadLog!.status(chat), "idle", "the thread is idle after the answer");
+		// And it said it was running first, so a panel is not idle while it thinks.
+		const statuses = h.threadLog!.entries(chat).filter((entry) => entry.kind === "status").map((entry) => entry.status);
+		assert.deepEqual(statuses, ["running", "idle"]);
 	} finally {
 		await h.cleanup();
 	}

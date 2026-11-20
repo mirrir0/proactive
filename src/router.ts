@@ -613,6 +613,39 @@ export class RouterLayer {
 		return id;
 	}
 
+	/** Say the thread is being worked on — once, not once per turn. */
+	private markThreadRunning(threadId: string | undefined): void {
+		if (threadId === undefined || threadId === "") return;
+		const threadLog = this.deps.threadLog;
+		if (threadLog === undefined) return;
+		if (threadLog.status(threadId) === "running") return;
+		this.record(threadId, { kind: "status", status: "running" });
+	}
+
+	/**
+	 * A turn ends by saying so.
+	 *
+	 * The chat's client waits for its thread to go idle — that is what ends "thinking"
+	 * and lets the next thing be asked. A turn that dispatched leaves the state to the
+	 * work: its conclusion writes `idle` when the last thing in flight is done, and a
+	 * turn that settled it early would show a spinner for work still running.
+	 */
+	private settleThreadStatus(threadId: string | undefined): void {
+		if (threadId === undefined || threadId === "") return;
+		const threadLog = this.deps.threadLog;
+		if (threadLog === undefined) return;
+		if (this.turn.stoppedThreads.has(threadId)) return;
+		const outstanding = [...this.tasks.values()].some(
+			(task) =>
+				task.threadId === threadId &&
+				(task.status === "running" || task.status === "queued" || task.status === "blocked"),
+		);
+		if (outstanding) return;
+		const status = threadLog.status(threadId);
+		if (status === "idle" || status === "done" || status === "failed" || status === "stopped") return;
+		this.record(threadId, { kind: "status", status: "idle" });
+	}
+
 	private record(threadId: string | undefined, entry: NewThreadEntry): void {
 		const threadLog = this.deps.threadLog;
 		if (threadLog === undefined || threadId === undefined || threadId === "") return;
@@ -872,7 +905,15 @@ export class RouterLayer {
 					// where its work is written and what a click opens.
 					router.recordTurnToolResult(
 						callId,
-						{ details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId } },
+						{
+							details: {
+								taskId: task.id,
+								workerId: task.workerId,
+								status: task.status,
+								// The thread the work is written in — not the one that asked for it.
+								threadId: task.workThreadId ?? task.threadId,
+							},
+						},
 						false,
 						"dispatch_task",
 					);
@@ -948,6 +989,9 @@ export class RouterLayer {
 			description: task.description,
 			status: task.status,
 			...(task.endpointId === undefined ? {} : { endpointId: task.endpointId }),
+			// Where the work is written. A card that names only its task id leaves the
+			// client to guess, and the nearest thread to guess is the one it is drawn in.
+			...(task.workThreadId === undefined ? {} : { threadId: task.workThreadId }),
 			...(task.result === undefined ? {} : { result: task.result }),
 			...(task.error === undefined ? {} : { error: task.error }),
 			createdAt: task.createdAt,
@@ -1397,7 +1441,15 @@ export class RouterLayer {
 					// where its work is written and what a click opens.
 					router.recordTurnToolResult(
 						callId,
-						{ details: { taskId: task.id, workerId: task.workerId, status: task.status, threadId: task.threadId } },
+						{
+							details: {
+								taskId: task.id,
+								workerId: task.workerId,
+								status: task.status,
+								// The thread the work is written in — not the one that asked for it.
+								threadId: task.workThreadId ?? task.threadId,
+							},
+						},
 						false,
 						"stop_task",
 					);
@@ -1601,6 +1653,9 @@ export class RouterLayer {
 		// makes can inherit them: a task with no channel answers nobody.
 		this.turn = emptyTurn(origin?.threadId, origin?.channelId, origin?.id, origin?.hand);
 		this.endRequested = false;
+		// The thread's state is the turn's own: a client that shows "thinking" is reading
+		// this, and a turn that only ends would leave it thinking forever.
+		this.markThreadRunning(this.turn.originThreadId);
 		// The turn's conversation is the one the batch came from: its own session, so
 		// nothing it was told in another chat can reach this answer.
 		const sessionKey = this.turn.originThreadId ?? SESSION_COLD;
@@ -1652,6 +1707,7 @@ export class RouterLayer {
 			// A stopped turn says nothing, and a name is not what the person stopped:
 			// leave it as it is. Any other turn ends with the chat named.
 			if (this.turn.stoppedThreads.size === 0) this.nameChatIfPlaceholder(batch);
+			this.settleThreadStatus(this.turn.originThreadId);
 			this.onTurnDone();
 		}
 	}
@@ -2143,6 +2199,12 @@ export class RouterLayer {
 		};
 		this.tasks.set(id, full);
 		this.deps.store.upsertTask(full);
+
+		// The work's own thread, minted now rather than when the Worker starts. The card
+		// in the chat is a pointer to it, and a pointer made before the thread exists
+		// points at the chat — so clicking the work opened the conversation it came
+		// from, which reads as "the card goes to the router's thread".
+		if (input.parentTaskId === undefined) this.workThreadFor(full);
 
 		// A check a Worker asked for. Its parent's card is the acknowledgement and its
 		// answer is a tool result, so nothing here is said to a person: no scratchpad

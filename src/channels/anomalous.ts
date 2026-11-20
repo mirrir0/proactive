@@ -1,21 +1,9 @@
 /**
- * The Anomalous channel — a chat in the product, as a place the agent is.
+ * A chat in the product, as a place the agent is. Unlike the other channels this one
+ * owns no transport: the host pushes messages in and takes replies back.
  *
- * Every other channel is a transport the daemon owns: a terminal, an HTTP
- * webhook, a queue directory. This one is different in exactly one way: the
- * product owns the socket, so the *host* pushes messages in and receives replies
- * back. The channel is the seam between them, and it holds no transport of its
- * own — `deliver` and the `submit` method are how the host plugs in.
- *
- * **One channel, many chats, and a reply must be addressed.** The Router replies
- * by calling `respond_anomalous`, and a reply that names no chat is resolved the
- * way every channel resolves one: the most recent inbound event. That is right
- * for a single conversation and wrong for a batch that spans two: a Router
- * answering chat B with chat A's last context would post into the wrong
- * conversation, silently. So when more than one chat has been heard from and the
- * reply names none, it is refused with words the model can act on — never
- * guessed. (The same discipline as settle-before-attribution: correctness in
- * scheduling, not in model behaviour.)
+ * A reply must be addressed. When more than one chat has been heard from and the reply
+ * names none, it is refused with words the model can act on — never guessed.
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -23,12 +11,8 @@ import { type Channel, type ChannelEvent, type ReplyContext, type ReplyRecorder,
 import { makeResponseTool } from "./tool.ts";
 
 /**
- * Where a reply goes: the thread it was asked about, or the chat that shows it.
- *
- * A thread is the real target — a chat is a window onto one — so a reply that
- * knows its thread is delivered to that thread, and the brain maps it to a chat
- * when there is one. A reply that knows only a chat (the model named `reply_to`)
- * is delivered to the chat, which the brain maps to its thread.
+ * A thread is the real target — a chat is a window onto one. A reply that knows only a
+ * chat is delivered to the chat, and the brain maps it to the thread.
  */
 export interface ReplyTarget {
 	readonly threadId?: string;
@@ -38,9 +22,9 @@ export interface ReplyTarget {
 export type ChatDelivery = (target: ReplyTarget, text: string) => Promise<void> | void;
 
 export interface AnomalousChannelOptions {
-	/** Deliver a reply into a chat. The host writes the transcript row and the socket frame. */
+	/** The host writes the transcript row and the socket frame. */
 	deliver: ChatDelivery;
-	/** How many recent chats an unaddressed reply is checked against. */
+	/** How many are remembered. */
 	recentChats?: number;
 }
 
@@ -83,20 +67,14 @@ export class AnomalousChannel implements Channel {
 		this.sink = null;
 	}
 
-	/**
-	 * A member's message, from the host.
-	 *
-	 * The chat id is the reply address; the thread id is the chat's thread, which
-	 * the host has already resolved (or left out, letting the Router cold-start
-	 * one). Returns the event it admitted so a caller can correlate.
-	 */
+	/** A member's message from the host: the chat id is the reply address. */
 	submit(input: {
 		chatId: string;
 		text: string;
 		eventId: string;
 		threadId?: string;
 		from?: string;
-		/** Where the client said this work belongs, carried to the dispatch. */
+	/** Carried to the dispatch. */
 		hand?: string;
 	}): ChannelEvent {
 		if (this.sink === null) throw new Error("anomalous channel: not started");
@@ -120,24 +98,15 @@ export class AnomalousChannel implements Channel {
 		await this.options.deliver(this.resolveTarget(ctx), text);
 	}
 
-	/**
-	 * Say something in a thread, with no resolution.
-	 *
-	 * `respond` exists for a model that knows a chat and must be resolved to a thread;
-	 * this exists for a caller that already has the thread — a conclusion, a fallback
-	 * reply, anything the Router decides rather than the model. Resolving again is how
-	 * a conclusion came to be refused for "no chat to answer" when the thread it was
-	 * answering was right there.
-	 */
+	/** For a caller that already has the thread: resolving again is how a reply lands elsewhere. */
 	async deliverTo(threadId: string, text: string): Promise<void> {
 		await this.options.deliver({ threadId }, text);
 	}
 
 	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
-		// `context` is a reader of the turn, not a value: the closure is asked at call
-		// time, so one tool per recorder is right. It must be handed over on the path
-		// that *creates* the tool too — a memoized tool built without it answered into
-		// "the last chat this channel heard from", which is another conversation.
+		// `context` is a reader of the turn, not a value: one tool per recorder is right,
+		// but the path that creates it must be given one — a tool built without it answers
+		// into the last chat this channel heard from.
 		if (recorder === undefined) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (tool === undefined) {
@@ -147,18 +116,10 @@ export class AnomalousChannel implements Channel {
 		return tool;
 	}
 
-	/**
-	 * Where a reply is for.
-	 *
-	 * The thread it was asked about wins, because a thread is the conversation and
-	 * a chat is a window onto one — and it is the address the Router already has
-	 * from the event, without the model naming anything. Then an explicit
-	 * `reply_to` (a chat), then the only chat heard from.
-	 *
-	 * When several chats are in play and the reply names none, the ambiguity is
-	 * refused: a reply posted into the wrong conversation is worse than a turn
-	 * that has to be retried.
-	 */
+/**
+ * The thread it was asked about wins; a chat is the fallback. Unaddressed and more than
+ * one chat heard from is refused rather than guessed.
+ */
 	private resolveTarget(ctx: ReplyContext): ReplyTarget {
 		if (ctx.threadId !== undefined && ctx.threadId !== "") return { threadId: ctx.threadId };
 		if (ctx.replyTo !== undefined && ctx.replyTo !== "") return { chatId: ctx.replyTo };
@@ -177,7 +138,7 @@ export class AnomalousChannel implements Channel {
 		return { chatId: distinct[0]! };
 	}
 
-	/** The last few chats heard from, oldest first, deduped at read time. */
+	/** Oldest first, deduped at read time. */
 	private rememberChat(chatId: string): void {
 		const limit = this.options.recentChats ?? DEFAULT_RECENT_CHATS;
 		const index = this.recent.indexOf(chatId);

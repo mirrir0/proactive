@@ -1,26 +1,9 @@
 /**
- * instance.ts — which mir is running, and how to reach it.
+ * Which mir is running, and how to reach it — `<runtime>/instance.json`, 0600.
  *
- * One daemon, not one per client. A stack that spawns its own brain per member ends
- * up with two brains on one machine, two stores, and a dashboard showing the wrong
- * one — so the daemon says where it is, and a client attaches to *that*.
- *
- * The record lives in the runtime directory (0600, in the user's own directory):
- *
- *     <runtime>/instance.json
- *     { "socket": "…/brain.sock", "token": "…", "pid": 1234,
- *       "startedAt": 1795…, "protocol": 1,
- *       "hands": { "port": 4700 }, "dashboard": { "port": 4788 } }
- *
- * It carries the token because the socket's permission is the token's permission:
- * both are 0600 in the same directory, and a client that can read one can already
- * connect with the other. What it never carries is a *provider* key — that is the
- * daemon's own environment.
- *
- * A stale record is worse than none: it sends a client to a socket nobody is
- * listening on, and the failure reads as "mir is broken" rather than "mir is not
- * running". So `readInstance` checks the pid, and the daemon removes the file on a
- * clean shutdown.
+ * It carries the token because the socket's permissions are the token's: both are 0600
+ * in one directory. It never carries a provider key. A record whose pid is gone is
+ * removed and treated as absent, because a stale record reads as "mir is broken".
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,19 +14,19 @@ import type { MirPaths } from "./paths.ts";
 export interface MirInstance {
 	/** The client API socket. */
 	socket: string;
-	/** The bearer token a client presents. */
+	/** What a client presents. */
 	token: string;
 	pid: number;
 	startedAt: number;
-	/** The API version this daemon speaks. */
+	/** The version this daemon speaks. */
 	protocol: number;
-	/** Where its hands hub listens, when it does. */
+	/** When it listens. */
 	hands?: { port: number };
-	/** Where its dashboard is served, when it is. */
+	/** When it is served. */
 	dashboard?: { port: number };
 }
 
-/** Where the record lives for a given install. */
+	/** The record's path for an install. */
 export function instanceFile(paths: MirPaths): string {
 	return join(paths.runtime, "instance.json");
 }
@@ -53,7 +36,7 @@ export function writeInstance(paths: MirPaths, instance: MirInstance): void {
 	writeFileSync(instanceFile(paths), `${JSON.stringify(instance, null, "\t")}\n`, { mode: 0o600 });
 }
 
-/** Remove it, on a clean shutdown. A crash leaves it; `readInstance` copes. */
+	/** A crash leaves it; `readInstance` copes. */
 export function removeInstance(paths: MirPaths): void {
 	rmSync(instanceFile(paths), { force: true });
 }

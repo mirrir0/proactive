@@ -1,27 +1,9 @@
 /**
- * Thread log — what a thread *is*, as a durable, ordered, addressable record.
+ * A thread as a durable, ordered log of entries (ADR 0002: SQLite is the source of
+ * truth).
  *
- * A thread was a routing label: a stream of Triggers that a Worker subscribes
- * to. That is enough to route, and not enough to show. A client — a chat panel,
- * a thread panel, a document that transcludes one — needs the conversation:
- * what the agent said, what it thought, which tool it called, on which hand, and
- * how it ended.
- *
- * So every thread now keeps an append-only log of entries, sequenced per thread
- * and stored beside everything else (ADR 0002: SQLite is the source of truth,
- * memory is a cache). Two properties matter and both are deliberate:
- *
- *   - **Append-only, with a per-thread `seq`.** A client that reconnects sends
- *     the last `seq` it saw and gets exactly what it missed. There is no
- *     "snapshot plus a guess": `entries(threadId, since)` is the whole protocol.
- *   - **Never rewritten.** An entry is what happened. A tool call's result is a
- *     *second* entry (`tool_result`), not an edit of the first, so a client that
- *     saw the call and not the result can tell the difference between "still
- *     running" and "we lost it".
- *
- * The log is also how the Router's own replies are visible without the Router
- * having to stream: it appends as it goes, and every subscriber reads the same
- * log.
+ * Append-only, with a per-thread `seq`, so a reconnecting client asks for what it
+ * missed. A tool call's result is a second entry, never an edit of the first.
  */
 
 import crypto from "node:crypto";
@@ -31,13 +13,7 @@ import type { Logger } from "./telemetry.ts";
 /** How a thread is doing, as a person would say it. */
 export type ThreadStatus = "running" | "waiting" | "idle" | "done" | "failed" | "stopped";
 
-/**
- * One thing that happened in a thread.
- *
- * `seq` is per thread and strictly increasing; `at` is wall-clock. A client
- * renders by `seq` and shows `at` only as a timestamp, because two entries can
- * share a millisecond and a clock can go backwards.
- */
+/** `seq` orders; `at` is only a timestamp — two entries can share a millisecond. */
 export type ThreadEntry =
 	| {
 			seq: number;
@@ -45,13 +21,7 @@ export type ThreadEntry =
 			kind: "text";
 			role: "assistant" | "user";
 			text: string;
-			/**
-			 * The worker that said it, when a worker did.
-			 *
-			 * The difference a person cares about: the assistant answering them is the
-			 * conversation, and a worker's answer is the work. Without this the two are
-			 * the same entry kind and every chat reads as if the agent did everything.
-			 */
+			/** Set when a worker said it, so the work is not read as the conversation. */
 			workerId?: string;
 	  }
 	| { seq: number; at: number; kind: "thinking"; text: string }
@@ -85,37 +55,16 @@ export type ThreadEntry =
 			workerId?: string;
 	  }
 	| { seq: number; at: number; kind: "status"; status: ThreadStatus; note?: string }
-	/**
-	 * The person pressed stop.
-	 *
-	 * Its own entry rather than a `status`: a stop is something that happened in
-	 * the conversation, and a chat stopped half-way has to say so where the
-	 * person is reading.
-	 */
+	/** Its own entry, not a status: a stop is something that happened, and is read where it happened. */
 	| { seq: number; at: number; kind: "stop"; note?: string }
-	/**
-	 * The chat was renamed.
-	 *
-	 * Not something anyone said, so it is not drawn in the transcript — but it is
-	 * a fact about the conversation, and the log is where a conversation's facts
-	 * live: a client that opens the chat later reads the same name it has now.
-	 */
+	/** Not drawn in the transcript, but a client that opens the chat later reads the same name. */
 	| { seq: number; at: number; kind: "title"; title: string }
-	/**
-	 * Work this thread is showing, as an app the client renders.
-	 *
-	 * Not a card the client has to understand: a pointer. `server` names an MCP
-	 * server the client already knows, `uri` a `ui://` resource on it, and `data`
-	 * what the view needs to draw itself. Which is why an agent with a card of its
-	 * own and an agent with none are the same shape to the client — and why the
-	 * entry carries a task id rather than a snapshot: a client that reloads asks
-	 * the server for the state now, instead of drawing yesterday's.
-	 */
+	/** An id, not a snapshot: a client that reloads asks for the state now. */
 	| {
 			seq: number;
 			at: number;
 			kind: "app";
-			/** The MCP server that serves the view: `mir`, or another agent's name. */
+			/** `mir`, or another agent's name. */
 			server: string;
 			/** The `ui://` resource to render. */
 			uri: string;
@@ -168,20 +117,10 @@ export class ThreadLog {
 		this.retainPerThread = options.retainPerThread ?? 0;
 	}
 
-	/**
-	 * Append one entry, assigning its sequence.
-	 *
-	 * The sequence comes from the store in the same statement that writes the
-	 * entry (`seq = threads.seq + 1`), so two appends racing on one thread cannot
-	 * both take the same number: the log is the authority on order, not the
-	 * process that happened to call first.
-	 */
+	/** The store assigns the sequence in the same statement as the row, so two appends cannot collide. */
 	append(threadId: string, entry: NewThreadEntry): ThreadEntry {
-		// A thread does not say the same thing twice running. A model handed a
-		// conclusion it was told not to restate sometimes restates it, and a
-		// person then reads the same paragraph twice; the second adds nothing, so
-		// it is not written. Statuses between the two do not count, and only the
-		// same speaker repeating itself is a repeat — a person echoing it is not.
+		// A thread does not say the same thing twice running. Only the same speaker
+		// counts: a person echoing the agent is not a repeat.
 		if (entry.kind === "text") {
 			const said = entry as { role: string; text: string };
 			const said_ = this.lastTextEntryOf(threadId, said.role);
@@ -189,12 +128,10 @@ export class ThreadLog {
 			// and nothing new is written.
 			if (said_ !== null && said_.text === said.text) return said_;
 		}
-		// A status entry moves the thread's own state as well as the log: the column a
-		// list reads and the entry a panel reads are one event, written once. Without
-		// this the column only ever went up — a thread was "running" from its first
-		// dispatch until something stopped it, because nothing wrote the idle.
+		// A status entry moves the thread's column as well as the log, so a list and a
+		// panel cannot disagree.
 		if (entry.kind === "status") this.store.setThreadStatus(threadId, entry.status);
-		// And a stop is its own kind, with its own word for it.
+		// A stop is its own kind, with its own word.
 		if (entry.kind === "stop") this.store.setThreadStatus(threadId, "stopped");
 		const at = entry.at ?? Date.now();
 		const seq = this.store.appendThreadEntry(threadId, at, entry.kind, payloadOf(entry));
@@ -224,13 +161,7 @@ export class ThreadLog {
 		});
 	}
 
-	/**
-	 * Entries matching a filter, newest last, and how many matched.
-	 *
-	 * `match` runs on the parsed entry, so a caller's meaning of "contains" is exact;
-	 * the SQL pass only narrows. Nothing here reads the whole log to answer a question
-	 * about the end of it.
-	 */
+	/** `match` runs on the parsed entry; the SQL pass only narrows. */
 	search(
 		threadId: string,
 		options: {
@@ -265,24 +196,13 @@ export class ThreadLog {
 		return this.store.getThreadStatus(threadId);
 	}
 
-	/**
-	 * The thread a chat shows, minting it on first use.
-	 *
-	 * Idempotent and safe to race: two turns of the same chat arriving at once
-	 * get the same id, because the store decides it under one statement.
-	 */
-	/**
-	 * Make a thread that is not a chat's.
-	 *
-	 * A Worker's own work goes somewhere a person can look but is not spoken to: a
-	 * thread with a name and no chat. Idempotent, so a caller can ensure rather than
-	 * check first.
-	 */
+	/** A Worker's own thread: a name, no chat. Idempotent. */
 	ensureThread(threadId: string, name: string, channelId: string): void {
 		if (this.store.getThread(threadId) !== undefined) return;
 		this.store.upsertThread({ id: threadId, name, channelId, subscriberWorkerIds: [], lastEventAt: Date.now() });
 	}
 
+	/** The thread a chat shows, minted on first use. Safe to race: the store decides. */
 	chatThread(chatId: string, title?: string): string {
 		return this.store.threadForChat(chatId, () => newThreadId(), title);
 	}
@@ -292,13 +212,7 @@ export class ThreadLog {
 		return this.store.threadName(threadId);
 	}
 
-	/**
-	 * Rename a thread, and record it.
-	 *
-	 * The name column is what a list reads; the entry is what a chat reads, so the
-	 * two cannot disagree about what this conversation came to be about. Returns
-	 * the entry, which the caller publishes.
-	 */
+	/** The column a list reads and the entry a chat reads cannot disagree. Returns the entry. */
 	rename(threadId: string, title: string): ThreadEntry {
 		this.store.renameThread(threadId, title);
 		return this.append(threadId, { kind: "title", title });
@@ -338,19 +252,10 @@ export function newThreadId(at: number = Date.now()): string {
 	return ulid(at);
 }
 
-// ---------------------------------------------------------------------------
-// ULID
-// ---------------------------------------------------------------------------
 
 const ULID_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/**
- * A Crockford-base32 ULID: 48 bits of time, then 80 bits of randomness.
- *
- * A product that shows a thread as a chip or a mention needs an id it can
- * recognise as one (`ULID_RE` in the anomalous side's markdown tokens). Time
- * first also means ids sort by creation, which is what a thread list wants.
- */
+	/** Time first, so ids sort by creation — and a product can recognise one as an id. */
 export function ulid(at: number = Date.now()): string {
 	let time = "";
 	let remaining = at;

@@ -1,13 +1,4 @@
-/**
- * Super-agent shared types.
- *
- * Mirrors the DeepSeek Harness Super-agent architecture:
- *   - Router layer: global continuity, dispatch, coordination
- *   - Worker layer: isolated task execution (own pm2 process, ADR 0001)
- *   - Triggers: filtered Events that arrived via a Channel
- *   - Threads: event streams routed to subscribed workers
- *   - Inline & Spill + Chain of Recall: context cache management
- */
+/** Shared types: Router, Worker (ADR 0001), Triggers, threads, context. */
 
 import type { ChannelKind } from "./channels/types.ts";
 import type { WorkerCapabilities } from "./security.ts";
@@ -21,7 +12,7 @@ export type ModelProvider = "openrouter";
 /** An Event that passed filtering and now warrants a Router decision. */
 export interface Trigger {
 	id: string;
-	/** Which Channel it came from (response tool is `respond_<channelId>`). */
+	/** The response tool is `respond_<channelId>`. */
 	channelId: string;
 	/** Transport kind, used for programmatic policies. */
 	kind: ChannelKind;
@@ -31,13 +22,7 @@ export interface Trigger {
 	threadId?: string; // undefined => cold start, needs router dispatch
 	replyTo?: string; // opaque reply address within the channel
 	metadata?: Record<string, string>;
-	/**
-	 * The hand this work belongs on, when the client said.
-	 *
-	 * A space is a hand and the client is the only one who knows which; this is that
-	 * word, carried from the `say` frame to the dispatch so the hub cannot pick a
-	 * different folder.
-	 */
+	/** Carried from the `say` frame to the dispatch, so the hub cannot pick another folder. */
 	hand?: string;
 	/** How many Router turns have already tried to handle this trigger. */
 	attempts?: number;
@@ -56,20 +41,10 @@ export interface Task {
 	title: string;
 	/** What the task is for, in the words of the person who asked: what a card shows. */
 	description: string;
-	/**
-	 * The brief handed to the Worker, when it is more than the description.
-	 *
-	 * The description is what this is *for* — a line a person reads on a card. The
-	 * brief is what the Worker is *told*: the paths, the constraints, the shape of
-	 * the answer. One field could not be both, and a card that shows a full prompt
-	 * is a card nobody reads.
-	 */
+	/** The brief for the Worker: paths, constraints, the shape of the answer. */
 	instructions?: string;
 	threadId?: string;
-	/**
-	 * Where this task's own work is written: the Worker's narration, tool calls and
-	 * hand calls. Not the chat — that gets the card and the answer.
-	 */
+	/** The Worker's own log. The chat gets the card and the answer, not the narration. */
 	workThreadId?: string;
 	channelId?: string;
 	replyTo?: string;
@@ -79,17 +54,11 @@ export interface Task {
 	updatedAt: number;
 	result?: string;
 	error?: string;
-	/** True if this task used the fast (lightning) model. */
+	/** It ran on the fast model. */
 	fast?: boolean;
-	/** Hand this task was pinned to, when the Router chose one. */
+	/** The hand this task is pinned to, when one was chosen. */
 	endpointId?: string;
-	/**
-	 * The task that asked for this one, when a Worker fanned out.
-	 *
-	 * A child's conclusion is a return value for its parent's tool call, not a
-	 * message to a person — and a child cannot dispatch further: depth stops at one
-	 * level, as a tool list rather than an instruction.
-	 */
+	/** A child's conclusion is its parent's return value, and a child cannot dispatch further. */
 	parentTaskId?: string;
 	/** 0 for the Router's own dispatch, 1 for a Worker's check. Absent means 0. */
 	depth?: number;
@@ -106,7 +75,7 @@ export interface WorkerInfo {
 	progress?: string;
 }
 
-/** OpenRouter provider-routing preferences (sent verbatim as `provider`). */
+/** Sent verbatim as OpenRouter's `provider`. */
 export interface OpenRouterRouting {
 	only?: string[];
 	order?: string[];
@@ -152,7 +121,7 @@ export interface SemanticFilterConfig {
 	/** Model used for the slow path. Defaults to `fastModelId`. */
 	modelId?: string;
 	policies: SemanticPolicyConfig[];
-	/** Cap on judged events per minute (0 = unlimited). Protects the budget. */
+	/** 0 = unlimited. Protects the budget. */
 	maxJudgementsPerMinute?: number;
 }
 
@@ -169,30 +138,21 @@ export interface WatchdogConfig {
 	maxTurnsPerHour?: number;
 }
 
-/**
- * Hands: the execution environments this daemon can dispatch work to.
- * `local` registers the daemon's own machine so a deployment works out of the
- * box; remote hands dial out and are managed with `mir hands`.
- */
+/** Hands: the execution environments work can be dispatched to. They dial out; `mir hands` manages them. */
 export interface HandsConfig {
 	enabled: boolean;
 	/** Endpoint listener bind address. */
 	host: string;
-	/** Endpoint listener port (0 = no listener; local hand only). */
+	/** 0 = no listener. */
 	port: number;
-	/** Unix socket the brains (Workers) use to reach the hub. */
+	/** Where Workers reach the hub. */
 	socketPath: string;
 	tlsCert?: string;
 	tlsKey?: string;
 	heartbeatMs: number;
 	offlineGraceMs: number;
 	requestTimeoutMs: number;
-	/**
-	 * How long a hand's row survives without the hand connecting.
-	 *
-	 * A client re-registers its hands every start, so silence for a week means the
-	 * space is gone or the machine is not coming back.
-	 */
+	/** A client re-registers its hands on every start, so silence this long means the machine is gone. */
 	staleAfterMs: number;
 }
 
@@ -201,71 +161,49 @@ export interface WorkerToolPolicy {
 	deny?: string[];
 }
 
-/**
- * The brain's client API: where a display connects, and with what token.
- *
- * Off unless a socket is named. When it is on, the brain serves the door
- * described in `src/api/protocol.ts` — threads, entries, say, stop, hands — and
- * nothing else.
- */
+/** Where a display connects. Off unless a socket is named; the frames are in `api/protocol.ts`. */
 export interface BrainApiConfig {
 	/** Unix socket path. Empty = the API is off. */
 	socketPath: string;
-	/** Shared bearer token. A brain with a socket and no token refuses to start. */
+	/** A brain with a socket and no token refuses to start. */
 	token: string;
 }
 
 export interface SuperAgentConfig {
 	modelId: string;
-	/** Fast-model override for fast-task Workers (e.g. nemotron-3.5-lightning). */
+	/** For fast-task Workers. */
 	fastModelId: string;
 	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	sessionDir: string;
-	/** Coalescing window applied only when the Router is idle (never reset mid-batch). */
+	/** Applied only when the Router is idle; never reset mid-batch. */
 	batchWindowMs: number;
-	/** Max triggers folded into one Router prompt (rest are handled next turn). */
+	/** The rest are handled next turn. */
 	maxBatchSize: number;
 	maxConcurrentWorkers: number;
-	/**
-	 * How many checks a Worker may have running at once, across all Workers.
-	 *
-	 * Budgeted apart from top-level workers: a check is cheap and a person is not
-	 * waiting on it directly, but a Worker that fans out twenty of them is one Worker
-	 * holding twenty slots the Router cannot use.
-	 */
+	/** Checks in flight across all Workers. Budgeted apart, so a fan-out cannot starve the Router. */
 	maxNestedWorkers: number;
-	/** Tasks beyond `maxConcurrentWorkers` wait here instead of being rejected. */
+	/** Tasks beyond `maxConcurrentWorkers` wait here rather than being refused. */
 	maxDispatchQueue: number;
 	providerRouting?: OpenRouterRouting;
-	/** Local Unix socket for the daemon↔worker control channel. */
+	/** The daemon↔worker control channel. */
 	socketPath: string;
-	/** The client API a display connects to. Off by default. */
+	/** Off by default. */
 	api: BrainApiConfig & {
-		/**
-		 * The secret a signed member token is verified with.
-		 *
-		 * One daemon, several members: a token names its member and is signed with a
-		 * secret both sides already hold. Empty means a single-member install, where
-		 * `token` is the only way in.
-		 */
+		/** Empty means a single-member install, where `token` is the only way in. */
 		secret?: string;
 		/** The member the static token belongs to. */
 		member?: string;
 	};
-	/** Where this install keeps its files (paths.ts). The instance record lives here. */
+	/** Where this install keeps its files (see `paths.ts`). */
 	paths: MirPaths;
-	/**
-	 * The MCP app server: where a client fetches this brain's views (`ui://mir/work`)
-	 * and calls their tools. Off unless a port is set, and it refuses to start
-	 * without a token.
-	 */
+	/** Where a client fetches this brain's views (`ui://mir/work`). Refuses to start without a token. */
 	mcpApp: { host: string; port: number; token: string };
-	/** The web dashboard: what this brain is doing, for a person. Off by default. */
+	/** What this brain is doing, for a person. Off by default. */
 	dashboard: { host: string; port: number; token: string };
 	/** HTTP webhook channel bind address. */
 	httpHost: string;
 	httpPort: number;
-	/** Shared token / HMAC for the HTTP channel (empty = unauthenticated). */
+	/** Empty = unauthenticated. */
 	httpToken?: string;
 	httpHmacSecret?: string;
 	/** File queue channel directory. */
@@ -276,14 +214,7 @@ export interface SuperAgentConfig {
 	workerIdleExitMs: number;
 	/** Worker heartbeat interval, independent of turn progress. */
 	workerHeartbeatMs: number;
-	/**
-	 * How long a spawned Worker may take to connect before its task fails.
-	 *
-	 * A process manager that accepts a start and then loses the child is the common
-	 * case — pm2's fork entry failing to resolve, a container without the module —
-	 * and it reads exactly like a task that is running and doing nothing. Silence
-	 * is not a state a person can see, so it gets a deadline and a word.
-	 */
+	/** A process manager that accepts a start and loses the child reads exactly like a task doing nothing. */
 	workerHelloTimeoutMs: number;
 	/** Cap on max_tokens per request (avoids OpenRouter reserving the whole context). */
 	maxTokens: number;
@@ -293,10 +224,7 @@ export interface SuperAgentConfig {
 	stateDir: string;
 	/** Path to mcp.config.json for worker MCP server connections. */
 	mcpConfigPath: string;
-	/**
-	 * This member's MCP servers as the stack serves them (`MIR_STACK_URL`). Unset
-	 * means the file is the source, which is how a brain run by hand behaves.
-	 */
+	/** Unset means the file is the source, which is how a brain run by hand behaves. */
 	mcpServers?: McpServers;
 	/** Capabilities granted to Workers (tool surface is a policy decision). */
 	workerCapabilities: WorkerCapabilities;

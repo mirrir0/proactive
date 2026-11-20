@@ -1,15 +1,6 @@
 /**
- * charts.ts — the metrics page's six charts, as SVG, rendered on the server.
- *
- * shadcn's charts are Recharts wrappers: a React tree, a bundler, a client-side
- * runtime. The dashboard is one server-rendered document with real links, so what
- * is borrowed here is the *language* the components encode — the `--chart-1..5`
- * palette, a grid that is horizontal-only and dashed `3 6`, bars with a 4px radius,
- * a 2px line with no dots, an area with a soft gradient under it, ticks with no
- * line and no axis rule. Same six forms, same reading, no client framework.
- *
- * Every chart is a pure function of numbers: no state, no clock, no fetch. That is
- * what makes them testable, and what makes a page a document rather than an app.
+ * The metrics page's charts as SVG on the server: shadcn's chart language (palette, dashed
+ * grid, radii) without a client framework. Every chart is a pure function of numbers.
  */
 
 /** The palette, in the order shadcn's `--chart-1..5` uses. */
@@ -116,13 +107,7 @@ const W = 640;
 const H = 180;
 const PAD = { top: 12, right: 12, bottom: 18, left: 12 };
 
-/**
- * The figure around a chart.
- *
- * No `preserveAspectRatio="none"`: stretching a chart to its container squashes
- * every glyph, circle and bar — text becomes unreadable and a donut becomes an
- * oval. The viewBox scales uniformly instead, and the CSS lets the height follow.
- */
+	/** No `preserveAspectRatio="none"`: stretching squashes glyphs and turns a donut into an oval. */
 function frame(inner: string, title: string, note: string, box: { w: number; h: number } = { w: W, h: H }): string {
 	return `<figure class="chart">
 		<figcaption><span class="charttitle">${escape(title)}</span><span class="chartnote">${escape(note)}</span></figcaption>

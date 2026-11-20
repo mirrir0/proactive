@@ -1,13 +1,7 @@
 /**
- * Daemon entrypoint (`mir-daemon` under pm2).
- *
- * Runs the Router, Watchdog, the control server and every Channel listener.
- * Workers are separate pm2 processes (ADR 0001), spawned on demand.
- *
- * All configuration comes from the environment (see .env.example). Anything
- * security-relevant is logged at startup so an unsafe deployment is never
- * silent: unauthenticated channels, permissive worker capabilities, a public
- * bind address.
+ * The daemon: Router, Watchdog, the control server and every channel listener. Configuration
+ * is the environment, and anything security-relevant is logged at startup so an unsafe
+ * deployment is never silent.
  */
 
 import { homedir } from "node:os";

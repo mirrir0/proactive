@@ -1,16 +1,4 @@
-/**
- * MCP tool catalog — shared types and pure helpers.
- *
- * Used by:
- *   - Workers: their live McpManager builds a catalog from connected servers,
- *     and the `mcp_query` tool searches it.
- *   - The daemon (SuperAgent): keeps a cached catalog merged from worker
- *     `mcp_catalog` reports, used by the Router's `mcp_query` tool.
- *   - The file watcher / McpManager.sync: `diffMcpConfigs` computes which
- *     servers were added/removed/changed between two config snapshots.
- *
- * Nothing in here imports MCP client code, so it is safe to import anywhere.
- */
+/** Shared types and pure helpers for the tool catalog. Nothing here imports MCP client code. */
 
 /** One searchable MCP tool entry. */
 export interface McpCatalogEntry {

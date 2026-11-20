@@ -1,14 +1,6 @@
 /**
- * Builds the per-Channel response tool from a Channel.
- *
- * The Router answers by calling `respond_<channel>`, which is exactly the
- * "responses are tool calls, not free-form text" contract. Each tool's
- * description carries that channel's reply norms so the model tailors length
- * and structure per place.
- *
- * Deliveries are reported to a `ReplyRecorder` owned by the caller (the
- * Router's current turn). That replaces the old process-wide counter, which
- * could not distinguish "this turn replied" from "some earlier turn replied".
+ * The per-channel response tool: a reply is a tool call, never raw text, and its description
+ * carries that channel's norms. Deliveries are reported to the turn's own `ReplyRecorder`.
  */
 
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -23,7 +15,12 @@ export interface ReplyLimit {
 	truncate: boolean;
 }
 
-export function makeResponseTool(channel: Channel, recorder: ReplyRecorder = NOOP_RECORDER) {
+export function makeResponseTool(
+	channel: Channel,
+	recorder: ReplyRecorder = NOOP_RECORDER,
+	/** The turn knows the thread it is answering; without this a reply falls back to the last chat heard. */
+	context?: () => ReplyContext,
+) {
 	return defineTool({
 		name: `respond_${channel.id}`,
 		label: `Respond on ${channel.id}`,
@@ -47,7 +44,11 @@ export function makeResponseTool(channel: Channel, recorder: ReplyRecorder = NOO
 			),
 		}),
 		async execute(_toolCallId, params) {
-			const ctx: ReplyContext = { eventId: params.reply_to, threadId: params.thread };
+			const ctx: ReplyContext = {
+				...(context?.() ?? {}),
+				...(params.reply_to === undefined ? {} : { eventId: params.reply_to }),
+				...(params.thread === undefined ? {} : { threadId: params.thread }),
+			};
 			// Counted before it is delivered: a refused reply must not reach a person
 			// and then be apologised for.
 			const verdict = recorder.record(channel.id, params.text, ctx);

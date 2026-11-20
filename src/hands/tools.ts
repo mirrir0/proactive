@@ -1,15 +1,7 @@
 /**
- * Hand tools — what a brain sees of its hands.
- *
- * The paper's point is that a hand is `execute(name, input) → string`. These
- * tools are that surface, and nothing more: no transport, no credentials, no
- * knowledge of whether the hand is a laptop, a container or the machine next
- * door. A policy violation comes back as a tool error the model can read and
- * react to, which is what keeps a stuck or refusing hand from becoming a stuck
- * brain.
- *
- * Output is capped and redacted before it enters the context window, so a large
- * build log or a leaked token cannot blow up a turn.
+ * A hand as a brain sees it: `execute(name, input) → string`, nothing about transport or
+ * credentials. A policy violation is a tool error the model can read, so a refusing hand
+ * does not become a stuck brain. Output is capped and redacted before it enters context.
  */
 
 import { Type } from "typebox";
@@ -20,6 +12,9 @@ import { redactSecrets } from "../security.ts";
 import { metrics } from "../telemetry.ts";
 
 export interface HandToolsOptions {
+	/** What the task calls its hand, and where that hand's files start. */
+	readonly handName?: string;
+	readonly handRoot?: string;
 	client: HandsClient;
 	/** Pin every call to one hand (the task's assigned endpoint). */
 	endpointId?: string;
@@ -78,14 +73,27 @@ function toToolResult(result: HandCallResult, maxChars?: number): AgentToolResul
 export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 	const { client } = options;
 	const pinned = options.endpointId;
+	const handName = options.handName;
+	const handRoot = options.handRoot;
 	const maxChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
+
+	/** The first answer becomes the pin: a Worker that wandered would read two folders and call it one task. */
+	let settled = pinned;
 
 	const call = async (
 		op: HandOp,
 		input: Record<string, unknown>,
 		timeoutMs?: number,
-	): Promise<HandCallResult> =>
-		client.call({ op, input, endpointId: pinned, timeoutMs }, options.signal === undefined ? {} : { signal: options.signal });
+	): Promise<HandCallResult> => {
+		const result = await client.call(
+			{ op, input, endpointId: settled, timeoutMs },
+			options.signal === undefined ? {} : { signal: options.signal },
+		);
+		if (settled === undefined && result.ok && typeof result.endpointId === "string" && result.endpointId !== "") {
+			settled = result.endpointId;
+		}
+		return result;
+	};
 
 	return [
 		defineTool({
@@ -234,20 +242,21 @@ export function createHandTools(options: HandToolsOptions): ToolDefinition[] {
 				"A task runs on one hand and can reach nothing else, so this is the whole list.",
 			parameters: Type.Object({}),
 			async execute(): Promise<AgentToolResult<any>> {
-				// Scoped to this task's own hand. The hub knows every hand the member
-				// has — their laptop, each of their spaces — and a Worker pinned to one
-				// space has no business seeing the others' roots, let alone their names.
+// Scoped to this task's hand: a Worker pinned to one space has no business seeing the others.
 				const hands = (await client.refreshHands()).filter(
 					(hand) => pinned === undefined || hand.endpointId === pinned,
 				);
 				const text = hands.length
 					? hands
-							.map(
-								(h) =>
-									`${h.endpointId} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}/${h.policy.maxConcurrent}\n  roots: ${h.policy.roots.join(", ") || "(none)"}\n  allow: ${h.policy.allow.join(", ") || "(none)"}`,
-							)
+							.map((h) => {
+// A remote hand reports no roots; the task was told where the folder is, and the name a person calls it.
+								const roots = h.policy.roots.length > 0 ? h.policy.roots : handRoot === undefined ? [] : [handRoot];
+								const name = handName === undefined ? h.endpointId : `“${handName}”`;
+								const cap = h.policy.maxConcurrent ?? 0;
+								return `${name} (${h.kind}${h.connected ? "" : ", offline"}) — exec=${h.capabilities.exec} shell=${h.capabilities.shell} fs=${h.capabilities.fs} git=${h.capabilities.git} running=${h.running}${cap > 0 ? `/${String(cap)}` : ""}\n  files: ${roots.join(", ") || "(none)"}\n  allow: ${h.policy.allow.join(", ") || "(none)"}`;
+							})
 							.join("\n")
-					: "no hands are connected";
+					: "no hand is connected: nothing here can read a file";
 				return { content: [{ type: "text", text }], details: { hands } };
 			},
 		}),

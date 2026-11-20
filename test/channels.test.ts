@@ -125,3 +125,38 @@ test("a conclusion is delivered to its thread without resolving a chat", async (
 	await channel.deliverTo("thread-1", "the answer");
 	assert.deepEqual(delivered, [{ threadId: "thread-1", text: "the answer" }]);
 });
+
+test("a reply with no address goes to the turn's own thread, not the last chat heard", async () => {
+	const delivered: Array<{ threadId?: string; chatId?: string; text: string }> = [];
+	const channel = new AnomalousChannel({
+		deliver: (target, text) => {
+			delivered.push({ ...target, text });
+		},
+	});
+	await channel.start(() => {});
+	// No event ever went through `submit`, so the reply book is empty — which is exactly
+	// the case a turn from the API is in.
+	const tool = channel.responseTool(undefined, () => ({ threadId: "thread-from-turn" }));
+	await (tool as unknown as { execute: (id: string, args: unknown) => Promise<unknown> }).execute("call-1", {
+		text: "the answer",
+	});
+	assert.deepEqual(delivered, [{ threadId: "thread-from-turn", text: "the answer" }]);
+});
+
+test("a memoized response tool still answers in the turn's thread", async () => {
+	const delivered: Array<{ threadId?: string; chatId?: string }> = [];
+	const channel = new AnomalousChannel({
+		deliver: (target) => {
+			delivered.push({ ...target });
+		},
+	});
+	await channel.start(() => {});
+	// Somebody heard from a chat first, so `recent` is not empty and a tool that lost
+	// its context would answer *there* — a reply in another conversation.
+	await channel.submit({ chatId: "another-chat", threadId: "another-thread", eventId: "event-1", text: "hello" });
+	const recorder = { record: () => ({ ok: true as const }) };
+	const tool = channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" }));
+	assert.equal(channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" })), tool, "one tool per recorder");
+	await (tool as unknown as { execute: (id: string, args: unknown) => Promise<unknown> }).execute("call-1", { text: "the answer" });
+	assert.deepEqual(delivered.at(-1), { threadId: "thread-from-turn" }, "the turn's thread, not the last chat heard");
+});

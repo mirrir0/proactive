@@ -1,13 +1,6 @@
 /**
- * mir CLI.
- *
- *   mir serve             run the daemon and its client API (what a display connects to)
- *   mir daemon            run the daemon in the foreground (dev; terminal channel)
- *   mir start|stop        manage mir-daemon under pm2
- *   mir status            tasks + workers, read from the durable store (works offline)
- *   mir recall <query>    search spilled context (tasks, triggers, conclusions)
- *   mir send <text>       POST an event to the HTTP channel
- *   mir metrics           print the metrics snapshot from the metrics endpoint
+ * The CLI: `serve` (daemon + client API), `daemon`, `start|stop`, `status`, `recall`,
+ * `send`, `metrics`, `init`, `paths`, `manifest`, `instance`, `hands`, `endpoint`.
  */
 
 import { loadEnv } from "./env.ts";
@@ -124,12 +117,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	/**
-	 * `mir serve` — the brain as a service: the daemon, plus the door a display
-	 * connects to. The socket and token come from the environment, and a serve
-	 * with no token is refused: a brain that answers anyone who can open a socket
-	 * is not one to leave running.
-	 */
+	/** A serve with no token is refused: a brain that answers anyone who can open a socket is not one to leave running. */
 	if (cmd === "serve") {
 		const socket = process.env.MIR_API_SOCKET ?? join(mirPaths().runtime, "brain.sock");
 		const token = process.env.MIR_API_TOKEN ?? "";
@@ -313,11 +301,7 @@ async function main(): Promise<void> {
 		}
 	}
 
-	/**
-	 * `mir init` — put the files where this platform says they go.
-	 *
-	 * Idempotent: it creates what is missing and keeps a config it finds.
-	 */
+	/** Idempotent: it creates what is missing and keeps a config it finds. */
 	if (cmd === "init") {
 		if (rest.includes("--help") || rest.includes("-h")) {
 			usage();
@@ -371,19 +355,8 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	/**
-	 * `mir manifest` — what a client needs to run this agent.
-	 *
-	 * Shipped as a file and printed from the binary, so a client can read it without
-	 * knowing where mir is installed. It is the whole plug: command, transport,
-	 * placeholders, capabilities and views, with no client-specific knowledge in it.
-	 */
-	/**
-	 * `mir instance` — which daemon is running, and how to reach it.
-	 *
-	 * A client attaches to this instead of starting a second brain: one machine, one
-	 * mir, one store, one dashboard.
-	 */
+	/** The whole plug: command, transport, placeholders, capabilities, views. */
+	/** A client attaches to this rather than starting a second brain. */
 	if (cmd === "instance") {
 		const paths = mirPaths();
 		const found = readInstance(paths);
@@ -433,13 +406,7 @@ function configExists(path: string): boolean {
 	}
 }
 
-/**
- * Write the config an install starts from.
- *
- * It records where things are rather than what they should be: a person looking
- * at this file is asking "where did my data go", and the answer should not be
- * "read the source".
- */
+	/** It records where things are, not what they should be: the reader is asking "where did my data go". */
 function writeConfig(path: string, paths: ReturnType<typeof mirPaths>): string {
 	mkdirSync(dirname(path), { recursive: true });
 	const body = {

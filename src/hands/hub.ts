@@ -1,17 +1,7 @@
 /**
- * Hands hub — the routing core that turns "run this on a machine" into a call.
- *
- * The hub knows nothing about transports: an endpoint connection is anything
- * that can `send` a `HubToEndpoint` message and hand back `EndpointToHub`
- * messages. That is what lets the same code serve a remote laptop over TLS, a
- * container over TCP, and the daemon's own machine in-process — which is exactly
- * the "the harness doesn't know whether the sandbox is a container, a phone, or
- * a Pokémon emulator" property.
- *
- * Failure model: a hand dying is a **tool error**, never a hung brain. Every
- * pending call is rejected when its endpoint disconnects, and every call has a
- * deadline after which the hub cancels and returns an error the model can react
- * to.
+ * Routing: "run this on a machine" becomes a call. The hub knows no transports, which is
+ * what lets one code path serve a laptop over TLS, a container over TCP and the daemon's
+ * own machine in-process. A hand dying is a tool error, never a hung brain.
  */
 
 import crypto from "node:crypto";
@@ -254,7 +244,11 @@ export class HandsHub {
 		const candidates = [...this.endpoints.values()]
 			.filter((connection) => connection.connected)
 			.filter((connection) => handSupports(connection.capabilities, op).ok)
-			.filter((connection) => connection.running < connection.policy.maxConcurrent)
+			// A hand with no cap is always available: the machine decides, not the brain.
+			.filter((connection) => {
+				const cap = connection.policy.maxConcurrent ?? 0;
+				return cap <= 0 || connection.running < cap;
+			})
 			// Least loaded first, then most recently seen; local hands win ties so a
 			// task does not leave the machine for no reason.
 			.sort(

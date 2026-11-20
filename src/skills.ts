@@ -1,27 +1,7 @@
 /**
- * skills.ts — the brain's own instructions, as pi skills.
- *
- * A brain has two kinds of instruction. **Invariants** — never name the machinery,
- * the conclusion is the answer, answer or work but never announce — must hold on
- * every turn, so they belong in the system prompt, where nothing can decline to
- * load them. **Procedures** — how to look for a file, when to reach for a
- * connected service, how to divide a task — only matter when the work matches, so
- * they belong in a skill: advertised by name and description, read when needed.
- *
- * The skills are files at the package root (`skills/<name>/SKILL.md`), which is
- * the layout pi itself discovers. That is deliberate: the same folder is the
- * brain's instruction set and a pi project's skills, so a rule is reviewable in a
- * diff instead of hidden in a template literal.
- *
- * What this module owns is the *allow-list*. A session's default resource loader
- * scans `~/.pi/agent/skills` and `~/.agents/skills` as well as the agent dir, so a
- * brain that does not say otherwise advertises every skill on the machine it
- * happens to run on — measured at 63, none of them the brain's. Every session the
- * brain runs therefore gets a loader whose skills are only the ones under the
- * roots we name: the package's, and the brain's own agent dir (where a member's
- * own would live). One filter, two jobs — the host's machine cannot leak in, and
- * a `SKILL.md` dropped in a member's space folder is not discovered either, even
- * though a Worker's working directory is that folder.
+ * The brain's instructions as pi skills (`skills/<name>/SKILL.md`): invariants in the system
+ * prompt, procedures in a skill. This module owns the allow-list, so the machine's own pi
+ * home cannot leak in.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -32,14 +12,7 @@ import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, defineTool, type Skill } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-/**
- * Where the brain's built-in skills live.
- *
- * `../skills/` resolves to the package root from both the build (`dist/skills.js`)
- * and the source (`src/skills.ts` under tsx), so the folder never has to be copied
- * into an output directory — and an upgrade replaces it, which is what keeps a
- * skill's version honest.
- */
+	/** `../skills/` resolves from both `dist/` and `src/`, so nothing is copied. */
 export const SKILLS_ROOT = fileURLToPath(new URL("../skills/", import.meta.url));
 
 /** The built-ins, as a list a test can hold the folder to. */
@@ -50,24 +23,15 @@ export interface SkillRoots {
 	readonly cwd: string;
 	/** The session's pi home: where a member's own skills would be installed. */
 	readonly agentDir: string;
-	/**
-	 * The invariants, appended to the system prompt.
-	 *
-	 * A rule that must hold on every turn goes here rather than into the turn's own
-	 * message: the system prompt is where the harness's own framing is resolved, and
-	 * a rule restated every turn competes with the turn's content instead of
-	 * governing it.
-	 */
+		/** A rule that must never be optional cannot be restated in each turn's message. */
 	readonly invariants?: readonly string[];
+		/** Replaces pi's coding-agent preamble and its tool, rules and documentation sections. */
+	readonly systemPrompt?: string;
+		/** A Worker's cwd is its hand's root and is true; a Router has none, and any path it sees it may quote. */
+	readonly hideCwd?: boolean;
 }
 
-/**
- * The roots a session may take skills from, realpath'd.
- *
- * Realpath, because on macOS a temp dir is `/var/folders/…` while its real name is
- * `/private/var/folders/…`, and a prefix test against the wrong one silently keeps
- * nothing.
- */
+	/** Realpath: on macOS a temp dir is `/var/…` and its real name `/private/var/…`. */
 function allowedRoots(roots: SkillRoots): string[] {
 	const candidates = [SKILLS_ROOT, join(roots.agentDir, "skills")];
 	return candidates.flatMap((path) => {
@@ -90,15 +54,7 @@ function under(path: string, roots: string[]): boolean {
 	return roots.some((root) => real === root || real.startsWith(root.endsWith("/") ? root : `${root}/`));
 }
 
-/**
- * A resource loader whose skills are exactly the brain's.
- *
- * Extensions are off: the brain's tools are the ones it hands over, and an
- * extension the machine happens to have installed must not add `subagent` or
- * `todo` to a supervisor. Context files are off too — `AGENTS.md` is read from the
- * working directory, which for a Worker is the member's space folder, and a file
- * there must not become instructions.
- */
+	/** Extensions off, and context files off: `AGENTS.md` in a space folder is not instructions. */
 export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultResourceLoader> {
 	const allowed = allowedRoots(roots);
 	const loader = new DefaultResourceLoader({
@@ -110,6 +66,10 @@ export async function brainResourceLoader(roots: SkillRoots): Promise<DefaultRes
 		...(roots.invariants === undefined || roots.invariants.length === 0
 			? {}
 			: { appendSystemPrompt: [...roots.invariants] }),
+		...(roots.systemPrompt === undefined ? {} : { systemPrompt: roots.systemPrompt }),
+		...(roots.hideCwd === true
+			? { systemPromptOverride: (base: string | undefined) => (base ?? "").replace(/<cwd>[\s\S]*?<\/cwd>\n?/, "") }
+			: {}),
 		skillsOverride: (base) => {
 			const skills = base.skills.filter((skill) => under(skill.filePath, allowed));
 			const dropped = base.skills.length - skills.length;
@@ -129,6 +89,25 @@ export async function brainSkills(roots: SkillRoots): Promise<Skill[]> {
 	return loader.getSkills().skills;
 }
 
+	/** pi renders a skills section only when the session has `read` or `bash`, which neither has. */
+export async function skillCatalogue(): Promise<string> {
+	const skills = await Promise.all(
+		SKILL_NAMES.map(async (name) => {
+			const body = await readSkill(name).catch(() => undefined);
+			if (body === undefined) return undefined;
+			const description = /^description:\s*(.+)$/m.exec(body)?.[1]?.trim() ?? "";
+			return `- \`${name}\`: ${description}`;
+		}),
+	);
+	const listed = skills.filter((line): line is string => line !== undefined);
+	if (listed.length === 0) return "";
+	return [
+		"You have skills: procedures for a kind of work, written down so you do not have to remember them.",
+		"Call `use_skill` with a name before doing that kind of work. They are short.",
+		...listed,
+	].join("\n");
+}
+
 /** A skill's body, without the frontmatter the loader already parsed. */
 export function skillBody(markdown: string): string {
 	if (!markdown.startsWith("---")) return markdown.trim();
@@ -137,12 +116,7 @@ export function skillBody(markdown: string): string {
 	return markdown.slice(markdown.indexOf("\n", end + 1) + 1).trim();
 }
 
-/**
- * Read one built-in skill by name.
- *
- * The roots are searched in order, so a member's own skill of the same name would
- * be shadowed by the built-in — the built-in is the one that must hold.
- */
+	/** Searched in order: the built-in is the one that must hold. */
 export async function readSkill(name: string, roots: string[] = [SKILLS_ROOT]): Promise<string> {
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`not a skill name: ${name}`);
 	for (const root of roots) {
@@ -166,15 +140,7 @@ export async function listSkills(roots: string[] = [SKILLS_ROOT]): Promise<strin
 	return [...names].sort();
 }
 
-/**
- * The tool a session uses to read a skill.
- *
- * pi advertises a skill's name, description and path, and the model reads the file.
- * The Router has no file tools by design — it dispatches instead of looking things
- * up — so the one thing it cannot do is follow that path. This is the smallest
- * thing that makes the skills real rather than decorative: a name in, the
- * instructions out.
- */
+	/** The Router has no file tools, so this is what makes a skill reachable at all. */
 export function useSkillTool(roots: string[] = [SKILLS_ROOT]) {
 	return defineTool({
 		name: "use_skill",

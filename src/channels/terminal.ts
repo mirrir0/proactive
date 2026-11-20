@@ -1,13 +1,6 @@
 /**
- * Terminal channel — the daemon's own stdin/stdout.
- *
- * Inbound: lines typed on stdin become Events on the "terminal-main" thread.
- * Outbound: `respond_terminal` prints `mir: <text>` to stdout.
- *
- * stdin is only attached when there is a real TTY (or `MIR_TERMINAL_STDIN=1`).
- * Under pm2 stdin is usually /dev/null or a shared pipe; consuming it there
- * would steal input from whatever else owns it, so the channel stays outbound-
- * only in that case.
+ * The daemon's own stdin and stdout. stdin is attached only for a real TTY: under pm2 it is
+ * usually a shared pipe, and consuming it would steal input from whatever else owns it.
  */
 
 import readline from "node:readline";
@@ -68,11 +61,11 @@ export class TerminalChannel implements Channel {
 		process.stdout.write(`\nmir: ${redactSecrets(text)}\n> `);
 	}
 
-	responseTool(recorder?: ReplyRecorder): ToolDefinition {
-		if (!recorder) return (this.defaultTool ??= makeResponseTool(this));
+	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		if (!recorder) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (!tool) {
-			tool = makeResponseTool(this, recorder);
+			tool = makeResponseTool(this, recorder, context);
 			this.tools.set(recorder, tool);
 		}
 		return tool;

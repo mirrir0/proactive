@@ -92,3 +92,13 @@ test("a confined hand reads its root and nothing else", { skip: process.platform
 
 	await fs.rm(base, { recursive: true, force: true });
 });
+
+test("a hand can read git's config, but not keys", () => {
+	const profile = buildSeatbeltProfile(policy(["/tmp/one"]), rw);
+	const home = process.env["HOME"] ?? "";
+	// `git status` refuses to start without it, and the failure looks like a broken machine.
+	assert.match(profile, new RegExp(`\\(literal "${home}/\\.gitconfig"\\)`));
+	assert.match(profile, /\(subpath "\/etc\/gitconfig"\)/);
+	// Keys stay denied.
+	assert.match(profile, /\(subpath "[^"]*\/\.ssh"\)/);
+});

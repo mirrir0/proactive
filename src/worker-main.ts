@@ -1,19 +1,7 @@
 /**
- * Worker process entrypoint (`mir-worker-<taskId>` under pm2).
- *
- * Boots one WorkerRuntime for the Task named in the spec file, connects to the
- * daemon's control channel, runs the Task, reports the conclusion, then serves
- * follow-up Thread events (queued, never dropped) until idle — then exits.
- *
- * MCP: the daemon watches mcp.config.json and broadcasts a `system` signal
- * (kind `mcp_changed`) when servers are added/removed/changed. On receipt this
- * worker hot-reloads its MCP connections, swaps its `mcp__*` tool set, refreshes
- * the codemode sandbox globals, re-reports its catalog to the daemon, and
- * injects a system message into the session so the model knows what changed.
- *
- * Security: the task spec arrives as a 0600 file path (never inline env), the
- * secret registry is primed from the environment so nothing leaks into logs or
- * prompts, and the tool surface is filtered by the spec's capability policy.
+ * One Task, booted from a 0600 spec file: connect, run, report, then serve follow-up
+ * events until idle. The secret registry is primed from the environment and the tool
+ * surface is filtered by the spec's policy.
  */
 
 import fs from "node:fs";
@@ -70,9 +58,7 @@ async function main(): Promise<void> {
 		};
 	}
 
-	// --- Hands: the execution environment this task runs against ---
-	// The Worker process is a brain: it holds the model loop and the tool surface,
-	// not the filesystem. If a hand is configured, filesystem access moves there.
+// Hands: the Worker holds the model loop and the tool surface, not the filesystem.
 	let handsClient: HandsClient | null = null;
 	let handTools: any[] = [];
 	/** Aborted when the daemon stops this task: the hand tools watch it. */
@@ -95,6 +81,10 @@ async function main(): Promise<void> {
 		handTools = createHandTools({
 			client: handsClient,
 			endpointId: spec.endpointId,
+			// What the task knows about its hand and the hub does not: a remote hand's
+			// own policy carries no roots, and its name is the person's word for it.
+			...(spec.handName === undefined ? {} : { handName: spec.handName }),
+			...(spec.handRoot === undefined ? {} : { handRoot: spec.handRoot }),
 			signal: stopSignal.signal,
 		});
 		if (connected) {
@@ -106,12 +96,7 @@ async function main(): Promise<void> {
 		}
 	}
 
-	// Local codemode keeps pure computation; the environment is the hand's job.
-	//
-	// Not "unless the hub is unreachable": the fallback used to hand codemode the
-	// worker process's own `readFile`/`writeFile`, rooted at the brain's state
-	// directory — a disk the Worker was never given, reachable exactly when the hands
-	// were down. With no hand there is no filesystem, and the tool says so.
+// Local codemode is pure computation only: with no hand there is no filesystem, and the tool says so.
 	const codemodeCapabilities = { ...capabilities, fs: "none" as const };
 
 	// --- MCP + codemode setup (both gated by capabilities) ---
@@ -142,16 +127,11 @@ async function main(): Promise<void> {
 		return defs;
 	};
 
-	// Tool policy: an allow/deny list on top of the capability grants, applied to
-	// everything the worker can call — the hand tools most of all. Filtering only the
-	// MCP and codemode set meant `MIR_WORKER_TOOL_DENY=exec` removed nothing that
-	// mattered: the tools that touch a disk are the hand's, and they went unfiltered.
+// The policy filters everything the Worker can call — the hand tools most of all.
 	const client = new ControlClient(spec.socketPath, spec.workerId, spec.taskId);
 	await client.connect();
 
-	// How a Worker reaches other agents: through the daemon, which owns the tree.
-	// Nothing here names a socket or a process — the daemon decides who `parent` is,
-	// and refuses a task this Worker was not given.
+// Through the daemon, which owns the tree: a task this Worker was not given is refused.
 	const clientChannel = {
 		dispatchChild: (requestId: string, title: string, description: string, instructions?: string) =>
 			client.dispatchChild(requestId, title, description, instructions),
@@ -159,10 +139,7 @@ async function main(): Promise<void> {
 		stopTask: (taskId: string) => client.stopTask(taskId),
 	};
 
-	// The tools for talking to other agents: `message` always, and dispatch/stop only
-	// for a Worker that may fan out. Depth stops at one level here — as a tool list,
-	// not an instruction a model could reason its way around — so a check gets
-	// `message` and nothing to dispatch with.
+// `message` always; dispatch and stop only for a Worker that may fan out — depth stops as a tool list.
 	const agentTools = createAgentTools(clientChannel, {
 		taskId: spec.taskId,
 		canDispatch: (spec.depth ?? 0) === 0,
@@ -206,9 +183,7 @@ async function main(): Promise<void> {
 		},
 	});
 
-	// Worker-side subscription control (release an event, leave a thread).
-	// The runtime appends these to the live session's tool set and refreshes its
-	// registry, so they are callable from the very next turn.
+// Callable from the next turn: the runtime refreshes the session's registry.
 	const threadIds = spec.threadId ? [spec.threadId] : [];
 	worker.addTools(createWorkerControlTools(worker, threadIds));
 
@@ -304,17 +279,13 @@ async function main(): Promise<void> {
 			event.id,
 		);
 	});
-	// Another agent's words, at this Worker's next turn boundary. A message is a note,
-	// not an instruction to drop what it is doing: the runtime queues it behind the
-	// turn in flight.
+// A note, not an instruction to drop what it is doing: queued behind the turn in flight.
 	client.onMessage((from, text) => {
 		armIdle();
 		worker.enqueueFollowUp([`Message from ${from}:`, "", text, "", "Act on it if it changes your task; otherwise report your conclusion as you were going to."].join("\n"));
 	});
 
-	// A stop must land even when the turn is inside a tool: abort the session so
-	// the tool sees it, then exit on a deadline rather than waiting for a turn
-	// that may never finish.
+// Abort the session so the tool sees it, then exit on a deadline rather than waiting.
 	client.onAbort(() => {
 		stopSignal.abort();
 		void worker.abort("stopped by the daemon").catch(() => {});

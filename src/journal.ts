@@ -1,34 +1,10 @@
 /**
- * journal.ts — what the Router remembers about a conversation, kept in git.
+ * What the Router remembers about a conversation, as files in a git repository:
+ * `<data>/journal/threads/<threadId>.md` and `scratchpad.md`.
  *
- * A model's context is not a record. The thread log is: append-only, complete,
- * and unreadable in bulk. Between the two sits the journal — a few hundred words
- * the Router writes *for itself* about one conversation: what this is, what was
- * decided, what is still open, and the pointers (paths, ids) that make the rest
- * findable. It is rewritten rather than appended to, because a journal that only
- * grows is a log and we already have one.
- *
- * **Why a git directory.** A journal is the most tempting thing in the system to
- * trust and the hardest to audit: it is a summary, so being wrong is cheap, and
- * it is written by the thing being judged. Git makes it a record instead of a
- * claim. Every write is a commit, so a post-mortem can ask "what did it believe
- * at 14:02, and what changed after the deploy failed" — a question no log of
- * messages can answer, because the belief was never written down.
- *
- * The layout is deliberately plain:
- *
- *     <data>/journal/
- *       threads/<threadId>.md      one conversation's journal
- *       scratchpad.md              the Router's outstanding and planned work
- *       .git/
- *
- * A file per conversation, so a person can read one with `cat`, a diff is a
- * diff, and nothing needs a database to be inspected later.
- *
- * **Git is best effort.** A brain must run in a container that has no git, so a
- * missing binary turns history off and says so once — the files are still
- * written, still durable, still the same layout. History is a property we want,
- * not a dependency we take.
+ * Rewritten, never appended: a journal that only grows is a log, and the log exists.
+ * Every write is a commit, so "what did it believe at 14:02" is answerable. Git is
+ * best effort — a container without it still gets the files.
  */
 
 import { execFile } from "node:child_process";
@@ -41,15 +17,7 @@ import type { Logger } from "./telemetry.ts";
 
 const run = promisify(execFile);
 
-/**
- * How long a journal may be.
- *
- * Characters, not tokens: the harness does not carry the model's tokenizer, and
- * a 4:1 error in a budget costs nothing. At the cap the write is *refused* with an
- * instruction to compact — so the ceiling is enforced by the harness and the
- * summary is still written by the model, which is the only thing that knows what
- * mattered.
- */
+/** At the cap the write is refused with an instruction to compact, so the model does the compacting. */
 export const JOURNAL_MAX_CHARS = 2400;
 
 export interface JournalStoreOptions {
@@ -84,13 +52,7 @@ export class Journal {
 	/** Set once when git is missing, so the log says it once and not per write. */
 	private historyOff = false;
 	private initialised = false;
-	/**
-	 * Commits run one at a time.
-	 *
-	 * Two writes can land in the same tick — a dispatch writes the scratchpad and
-	 * the turn writes the journal — and git takes a lock on its index: the second
-	 * would fail with "index.lock exists" and be lost. A queue is the whole fix.
-	 */
+	/** Two writes can land in one tick, and git's index takes a lock: the second would be lost. */
 	private commitQueue: Promise<void> = Promise.resolve();
 
 	constructor(options: JournalStoreOptions) {
@@ -119,12 +81,7 @@ export class Journal {
 		}
 	}
 
-	/**
-	 * Replace a conversation's journal.
-	 *
-	 * Returns the reason when the write is refused, so the tool can hand the model
-	 * something it can act on rather than a silent no-op.
-	 */
+	/** Returns the reason when refused, so the tool can say something actionable. */
 	async write(input: JournalWrite): Promise<{ ok: true; chars: number } | { ok: false; reason: string }> {
 		const text = input.text.trim();
 		if (text === "") return { ok: false, reason: "an empty journal says nothing; write what matters or leave it alone" };

@@ -20,10 +20,12 @@ import { test } from "node:test";
 import {
 	SKILL_NAMES,
 	SKILLS_ROOT,
+	brainResourceLoader,
 	brainSkills,
 	listSkills,
 	readSkill,
 	skillBody,
+	skillCatalogue,
 	useSkillTool,
 } from "../src/skills.ts";
 
@@ -133,4 +135,25 @@ test("the frontmatter is stripped wherever it ends", () => {
 
 test("the listed skills are the folder's, sorted", async () => {
 	assert.deepEqual(await listSkills(), [...SKILL_NAMES]);
+});
+
+test("the Router's prompt is its own: no coding-assistant framing, no path, and it lists its skills", async () => {
+	const dir = tempDir("mir-prompt-");
+	const loader = await brainResourceLoader({
+		cwd: dir,
+		agentDir: join(dir, "agent"),
+		invariants: ["an invariant"],
+		systemPrompt: ["You are one person's assistant, in a chat with them.", await skillCatalogue()]
+			.filter((part) => part !== "")
+			.join("\n\n"),
+		hideCwd: true,
+	});
+	const rendered = (await loader.getSystemPrompt()) ?? "";
+	// pi's preamble is gone, and with it the directory it would have named — a Router
+	// has no filesystem, and a path in its prompt is a path it quotes as the person's.
+	assert.equal(/coding assistant running inside pi/.test(rendered), false, "not pi's preamble");
+	assert.equal(rendered.includes(dir), false, "no working directory in the prompt");
+	assert.match(rendered, /You are one person's assistant/, "its own framing");
+	assert.match(rendered, /use_skill/, "and how to read a skill");
+	assert.match(rendered, /`dispatch`/, "the skills listed by name");
 });

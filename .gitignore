@@ -5,7 +5,19 @@ dist/
 *.sqlite-wal
 *.sqlite-shm
 
-# A real .env holds provider keys; .env.example is the one that ships.
+# Secrets never enter the repo. `.env.example` is the one that ships: it names the
+# variables and holds no values. Anything a provider or a tool writes a key into is
+# here by shape, not by name, so a new one is covered without anyone remembering.
 .env
 .env.*
 !.env.example
+.envrc
+.dev.vars
+.npmrc
+.netrc
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json

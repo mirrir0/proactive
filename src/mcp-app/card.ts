@@ -1,28 +1,10 @@
 /**
- * card.ts — the work card, as an MCP App.
+ * The work card, served as a `ui://` resource, so a client that speaks MCP Apps shows any
+ * agent's card without knowing what a dispatch is.
  *
- * The card is the agent's, not the client's. That is the whole point of serving it
- * as a `ui://` resource: a client that knows MCP Apps can show any agent's card
- * without knowing what a dispatch is, and an agent can change its card without a
- * client release.
- *
- * **Up to date, and right after a reload.** Two mechanisms, and the design leans on
- * the one that cannot break:
- *
- *   1. The entry is a *pointer*: `{ server, uri, data: { taskId, … } }`. A client
- *      that reopens the thread renders the last entry for that task, and the view
- *      asks the server for the state now — never a snapshot baked into the entry.
- *      A reload therefore shows the truth, not what was true when the entry was
- *      written.
- *   2. The view polls `work_status` through the host's MCP Apps bridge while it is
- *      on screen, so a running task's progress moves without a new entry. If the
- *      bridge is absent (an older host, or a plain iframe), the poll simply never
- *      answers and the card keeps the state it was rendered with — the durable
- *      path is the entry, and it does not depend on the bridge.
- *
- * The markup is one self-contained document: no build step, no bundled framework,
- * no network beyond the bridge. A card that needs a bundler to exist is a card the
- * agent has to ship a toolchain for.
+ * The entry is a pointer, not a snapshot: a reload asks the server for the state now. The
+ * view polls through the host's bridge when it has one, and the durable path does not
+ * depend on it. One self-contained document: no build step, no network beyond the bridge.
  */
 
 export interface CardData {
@@ -42,14 +24,7 @@ export interface CardData {
 /** The `ui://` URI the card is served at. */
 export const CARD_URI = "ui://mir/work";
 
-/**
- * The card for one task.
- *
- * The task is part of the URI because the URI is what a client stores and re-reads:
- * a thread entry points at *this* card, and a reload fetches it and gets the state
- * now. A view that had to be handed a snapshot by the client would be stale the
- * moment the client's copy was.
- */
+	/** The task is in the URI because the URI is what a client stores and re-reads. */
 export function cardUriFor(taskId: string): string {
 	return `${CARD_URI}?taskId=${encodeURIComponent(taskId)}`;
 }
@@ -64,13 +39,7 @@ export function taskIdFromUri(uri: string): string | undefined {
 /** What a host must declare this view may reach: nothing. It talks to its server. */
 export const CARD_MIME = "text/html;profile=mcp-app";
 
-/**
- * Render the card.
- *
- * Data is injected as JSON in a script tag — escaped so a title containing
- * `</script>` cannot become markup. The rest is CSS: fill and space, no border,
- * because that is how the product looks and a card is not a document.
- */
+	/** Injected as JSON in a script tag, escaped so a title containing `</script>` stays text. */
 export function renderCard(data: CardData): string {
 	const json = JSON.stringify(data).replace(/</g, "\\u003c");
 	return `<!doctype html>

@@ -1,15 +1,6 @@
 /**
- * trace/assemble.ts — one chat's flow, out of the rows a brain kept.
- *
- * A chat's thread records what the person said, what the Router did, and what
- * each dispatch did in its own thread; the tasks table records what was asked
- * for and what came back. This module turns those rows into turns a person
- * would recognise ("they said this, it did that") and into findings — facts,
- * counted, not judgements. The judgement is the reader's job; the instrument's
- * job is to make the facts impossible to miss.
- *
- * Nothing here reads a file or a clock: it takes rows and returns a trace, so a
- * fixture is a test.
+ * One chat's flow, out of the rows a brain kept: turns a person would recognise, and facts
+ * counted rather than judged. No file and no clock, so a fixture is a test.
  */
 
 import type { BrainContext, BusyWindow, EntryRow, TaskRow, ThreadRow } from "./read.ts";
@@ -145,12 +136,7 @@ function textOf(entry: TraceEntry): string | undefined {
 
 const isUserText = (entry: TraceEntry): boolean => entry.kind === "text" && entry.payload.role === "user";
 
-/**
- * A turn's last entry: the brain saying it has nothing more to do for now.
- *
- * A chat's turn closes with "turn finished" or "the worker finished"; a worker's
- * own thread closes when the worker exits, which is its last status.
- */
+	/** "turn finished", "the worker finished", or the worker's last status. */
 function closesTurn(entry: TraceEntry): boolean {
 	if (entry.kind === "stop") return true;
 	if (entry.kind !== "status") return false;
@@ -433,10 +419,7 @@ const STOPWORDS = new Set([
 	"be", "was", "were", "any", "all", "some", "my", "me", "i", "you", "your", "please", "about", "from", "at", "by",
 ]);
 
-/**
- * The words a title is about: no stopwords, and plurals folded, so "vision
- * documents" and "vision document" are the same work said twice.
- */
+	/** No stopwords, plurals folded, so "vision documents" and "vision document" match. */
 const significantWords = (text: string): Set<string> =>
 	new Set(
 		text
@@ -452,14 +435,7 @@ const overlap = (a: Set<string>, b: Set<string>): number => {
 	return shared;
 };
 
-/**
- * What the trace makes impossible to miss.
- *
- * Facts with a code, never a verdict: "four of nine turns did no work" is a
- * measurement, and what to do about it is the reader's. Heuristics that are
- * genuinely guesses — a reply that promised work — are named as such in the
- * text, so a reader knows which lines are counted and which are read.
- */
+	/** Facts with a code, never a verdict; the guesses are named as guesses. */
 export function findingsFor(
 	trace: Trace,
 	busy: AssembleInput["busy"],

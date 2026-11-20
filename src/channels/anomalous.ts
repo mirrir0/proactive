@@ -134,10 +134,14 @@ export class AnomalousChannel implements Channel {
 	}
 
 	responseTool(recorder?: ReplyRecorder, context?: () => ReplyContext): ToolDefinition {
+		// `context` is a reader of the turn, not a value: the closure is asked at call
+		// time, so one tool per recorder is right. It must be handed over on the path
+		// that *creates* the tool too — a memoized tool built without it answered into
+		// "the last chat this channel heard from", which is another conversation.
 		if (recorder === undefined) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (tool === undefined) {
-			tool = makeResponseTool(this, recorder);
+			tool = makeResponseTool(this, recorder, context);
 			this.tools.set(recorder, tool);
 		}
 		return tool;

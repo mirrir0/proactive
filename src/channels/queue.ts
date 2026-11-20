@@ -188,7 +188,7 @@ export class QueueChannel implements Channel {
 		if (!recorder) return (this.defaultTool ??= makeResponseTool(this, recorder, context));
 		let tool = this.tools.get(recorder);
 		if (!tool) {
-			tool = makeResponseTool(this, recorder);
+			tool = makeResponseTool(this, recorder, context);
 			this.tools.set(recorder, tool);
 		}
 		return tool;

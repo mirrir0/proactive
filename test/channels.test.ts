@@ -142,3 +142,21 @@ test("a reply with no address goes to the turn's own thread, not the last chat h
 	});
 	assert.deepEqual(delivered, [{ threadId: "thread-from-turn", text: "the answer" }]);
 });
+
+test("a memoized response tool still answers in the turn's thread", async () => {
+	const delivered: Array<{ threadId?: string; chatId?: string }> = [];
+	const channel = new AnomalousChannel({
+		deliver: (target) => {
+			delivered.push({ ...target });
+		},
+	});
+	await channel.start(() => {});
+	// Somebody heard from a chat first, so `recent` is not empty and a tool that lost
+	// its context would answer *there* — a reply in another conversation.
+	await channel.submit({ chatId: "another-chat", threadId: "another-thread", text: "hello" });
+	const recorder = { record: () => ({ ok: true as const }) };
+	const tool = channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" }));
+	assert.equal(channel.responseTool(recorder as never, () => ({ threadId: "thread-from-turn" })), tool, "one tool per recorder");
+	await (tool as unknown as { execute: (id: string, args: unknown) => Promise<unknown> }).execute("call-1", { text: "the answer" });
+	assert.deepEqual(delivered.at(-1), { threadId: "thread-from-turn" }, "the turn's thread, not the last chat heard");
+});

@@ -1,19 +1,7 @@
 /**
- * Worker process entrypoint (`mir-worker-<taskId>` under pm2).
- *
- * Boots one WorkerRuntime for the Task named in the spec file, connects to the
- * daemon's control channel, runs the Task, reports the conclusion, then serves
- * follow-up Thread events (queued, never dropped) until idle — then exits.
- *
- * MCP: the daemon watches mcp.config.json and broadcasts a `system` signal
- * (kind `mcp_changed`) when servers are added/removed/changed. On receipt this
- * worker hot-reloads its MCP connections, swaps its `mcp__*` tool set, refreshes
- * the codemode sandbox globals, re-reports its catalog to the daemon, and
- * injects a system message into the session so the model knows what changed.
- *
- * Security: the task spec arrives as a 0600 file path (never inline env), the
- * secret registry is primed from the environment so nothing leaks into logs or
- * prompts, and the tool surface is filtered by the spec's capability policy.
+ * One Task, booted from a 0600 spec file: connect, run, report, then serve follow-up
+ * events until idle. The secret registry is primed from the environment and the tool
+ * surface is filtered by the spec's policy.
  */
 
 import fs from "node:fs";

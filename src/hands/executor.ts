@@ -1,19 +1,9 @@
 /**
- * The thing a hand actually does.
+ * What a hand actually does, shared by the endpoint daemon and the daemon's own hand.
  *
- * One implementation, used by the installable endpoint daemon *and* by the
- * daemon's built-in local hand, so a task behaves identically whether it runs on
- * someone's laptop or next to the Router.
- *
- * Guarantees this module provides to the rest of the system:
- *
- *   - a command that hangs is killed (process group, TERM then KILL);
- *   - a command that floods is capped, not buffered forever;
- *   - a path that escapes the roots is refused before it is touched;
- *   - the child never sees a secret-shaped env var, and secrets are redacted
- *     from everything that leaves the hand;
- *   - failure is a *result* (`ok: false`), never a thrown exception across the
- *     wire, so the brain sees a tool error and can decide what to do.
+ * A hung command is killed, a flooding one is capped, a path that escapes is refused
+ * before it is touched, and failure is a result (`ok: false`) rather than an exception
+ * across the wire.
  */
 
 import { spawn } from "node:child_process";
@@ -84,12 +74,7 @@ const JOB_OUTPUT_CAP = 64 * 1024;
 
 export class HandExecutor {
 	private running = 0;
-	/**
-	 * Commands started with `background: true`, still owned by this hand.
-	 *
-	 * They outlive the call that started them — that is the point — and they die
-	 * with the hand, so a brain that stops does not leave a server on a port.
-	 */
+	/** They outlive the call and die with the hand, so a stopped brain leaves no server on a port. */
 	private readonly jobs = new Map<string, RunningJob>();
 
 	constructor(private readonly options: HandExecutorOptions) {}
@@ -159,12 +144,7 @@ export class HandExecutor {
 		return this.options.secrets.redact(text);
 	}
 
-	/**
-	 * A command string, through the hand's shell. Validated as a shell op first —
-	 * which is where the `sh` grant and the `shell` capability are checked — then
-	 * run by the same code as `exec`, so timeouts, output caps, redaction and the
-	 * sandbox are identical.
-	 */
+	/** Validated as a shell op, then run by the same code as `exec`: same timeouts, caps, sandbox. */
 	private async shell(
 		input: ShellInput,
 		ctx: ExecutorRunContext,
@@ -385,14 +365,7 @@ export class HandExecutor {
 		});
 	}
 
-	/**
-	 * Start a command and return at once.
-	 *
-	 * Its output is kept in a capped buffer rather than streamed: a server writes
-	 * forever, and a caller that has already been answered is not reading. The job
-	 * belongs to this hand, so `jobs` and `jobOutput` can find it later and a hand
-	 * that closes takes it with it.
-	 */
+	/** Output is a capped buffer, not a stream: a server writes forever and nobody is reading. */
 	private startBackground(input: {
 		argv: string[];
 		cwd: string;
@@ -586,12 +559,7 @@ export class HandExecutor {
 		return { ok: true, data: { path: target, bytes }, durationMs: Date.now() - started };
 	}
 
-	/**
-	 * Exact-text replacements, all or nothing: every `oldText` must occur exactly
-	 * once in the file, and nothing is written unless they all apply. Ambiguity is
-	 * refused rather than guessed, so a model that meant the second occurrence
-	 * gets told instead of silently changing the first.
-	 */
+	/** Ambiguity is refused rather than guessed: a model that meant the second occurrence is told. */
 	private async edit(input: EditInput, started: number): Promise<HandResult> {
 		const policy = this.options.policy;
 		if (this.options.capabilities.fs !== "rw") {

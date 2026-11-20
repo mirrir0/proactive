@@ -1,14 +1,6 @@
 /**
- * MCP client integration for workers.
- *
- * Loads `mcp.config.json`, connects to each MCP server, lists their tools,
- * and converts them to pi-coding-agent `ToolDefinition` objects that can be
- * passed as `customTools` to `createAgentSession`. When the model calls an
- * MCP tool, the call is forwarded to the corresponding MCP server via
- * `McpClient.callTool()`.
- *
- * This gives workers access to external MCP servers (filesystem, database,
- * GitHub, etc.) while keeping the Router clean — only Workers get MCP tools.
+ * MCP for Workers only: loads `mcp.config.json`, lists each server's tools and offers
+ * them as `customTools`. The Router stays clean.
  */
 
 import { McpClient, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
@@ -60,12 +52,7 @@ export type { McpCatalogEntry, McpDiff, McpServerReport } from "./mcp-catalog.ts
  * Loads mcp.config.json, connects to servers, and exposes their tools.
  */
 export interface McpManagerOptions {
-	/**
-	 * Where a server's tool list is remembered between Workers. A Worker is a
-	 * fresh process, so without this every Worker pays a connect and a
-	 * `tools/list` per server before it can do anything — seconds, when a server
-	 * lists eighty tools over the network. The list is the same list.
-	 */
+	/** Without it every Worker pays a connect and a `tools/list` before it can do anything. */
 	readonly cacheDir?: string;
 }
 
@@ -78,11 +65,7 @@ interface CachedTools {
 export class McpManager {
 	private readonly options: McpManagerOptions;
 	private servers = new Map<string, ConnectedServer>();
-	/**
-	 * Every server's tools, connected or remembered. This is what the model is
-	 * offered: a server whose list is remembered has its tools from the first
-	 * millisecond, and is dialled when one of them is called.
-	 */
+	/** A remembered list is offered from the first millisecond; the dial happens on the call. */
 	private tools = new Map<string, any[]>();
 	/** Servers known from the config but not dialled yet. */
 	private pending = new Map<string, McpServerConfig>();
@@ -146,11 +129,7 @@ export class McpManager {
 		}
 	}
 
-	/**
-	 * A server's tools as they were last listed, when the config still names the
-	 * same target. Keyed by URL (a rename keeps the list); a server whose command
-	 * or URL changed is a different server and is dialled afresh.
-	 */
+	/** Keyed by URL: a rename keeps the list, a changed command or URL is a different server. */
 	private remembered(config: McpServerConfig): any[] | null {
 		if (config.url === undefined) return null;
 		const cache = this.readCache();
@@ -207,12 +186,7 @@ export class McpManager {
 	}
 
 
-	/**
-	 * Diff `config` against the last applied config, disconnect removed/changed
-	 * servers, connect added/changed ones. Servers whose (re)connect fails are
-	 * reported in `failed` and their tools disappear from the catalog.
-	 * A no-op when nothing changed.
-	 */
+	/** A no-op when nothing changed. A failed (re)connect drops that server's tools. */
 	async sync(rawConfig: McpConfig): Promise<McpDiff> {
 		const config = resolveSecretRefs(rawConfig);
 		registerServerSecrets(config);
@@ -515,17 +489,9 @@ function mcpToolToToolDefinition(serverName: string, mcpTool: any, mcp: McpManag
 }
 
 /**
- * A tool's parameters, as the server declared them.
- *
- * MCP `inputSchema` is JSON Schema already, and a TypeBox schema *is* JSON
- * Schema, so it is passed through rather than rebuilt. Rebuilding lost what the
- * server said: every property came back required (TypeBox marks all of them so
- * unless each is wrapped), and `enum`, `minLength`, `$ref` and friends were
- * dropped. A model reading that believed it had to supply every optional filter
- * on every call — Linear's `list_issues` declares sixteen and needs none — and
- * then reported the tool as unusable rather than calling it.
- *
- * A server that declares no object schema gets the permissive one.
+ * `inputSchema` is already JSON Schema and TypeBox is JSON Schema, so it is passed
+ * through. Rebuilding marked every property required and dropped `enum` and friends, and
+ * a model that read that reported the tool as unusable.
  */
 function parametersOf(inputSchema: unknown): TSchema {
 	const schema = inputSchema as { readonly type?: unknown; readonly properties?: unknown } | null | undefined;

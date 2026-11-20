@@ -1,24 +1,7 @@
 /**
- * The brain's client listener.
- *
- * A Unix socket, mode 0600, because the client is a process on this machine: the
- * product's host when the brain is a sidecar, the desktop app's host, or a test.
- * A brain that runs somewhere else puts this behind whatever fronts it (a
- * reverse proxy, an SSH tunnel, `socat`) — the frames do not change, which is
- * the point of the door being one protocol.
- *
- * Three rules, and each one is a way a naive server goes wrong:
- *
- * 1. **The first frame must be `hello`.** Nothing is routed before it, and a
- *    wrong token closes the connection with `1008`-style words rather than
- *    letting a caller discover the API by probing it.
- * 2. **A subscription is per connection.** Opening a thread attaches this
- *    connection to it; closing the connection detaches everything. A client that
- *    dies mid-read leaks nothing, which is what makes a panel that crashes
- *    harmless.
- * 3. **One bad frame never kills a connection.** It is answered (`bad-frame`) or
- *    dropped, never thrown: a long-lived display must not die because one line
- *    was truncated.
+ * The client listener: a Unix socket, 0600. The first frame must be `hello`; a
+ * subscription is per connection, so a client that dies leaks nothing; and one bad frame
+ * is answered or dropped, never thrown.
  */
 
 import net from "node:net";
@@ -41,13 +24,7 @@ export interface BrainServerOptions {
 	socketPath: string;
 	/** Shared bearer token. Without one the server refuses to start. */
 	token: string;
-	/**
-	 * The secret signed member tokens are verified with.
-	 *
-	 * Set when one daemon serves several members: a token then names its member, and
-	 * the static `token` is what a single-member install presents. Absent, this is a
-	 * one-member daemon and only `token` is accepted.
-	 */
+	/** Absent, this is a one-member daemon and only `token` is accepted. */
 	secret?: string;
 	/** The member the static token belongs to. Defaults to `local`. */
 	member?: string;
@@ -66,14 +43,7 @@ export class BrainServer {
 	private readonly watchers = new Map<string, Set<net.Socket>>();
 	private readonly subscribers = new Map<net.Socket, Subscriber>();
 
-	/**
-	 * The member a token names, or undefined.
-	 *
-	 * Two ways in, and they are different things: a signed token says *which* member,
-	 * and the static token says "the one this install has". The static one is not a
-	 * fallback for a failed signature — that would make the secret optional for an
-	 * attacker.
-	 */
+	/** The static token is not a fallback for a failed signature: that would make the secret optional. */
 	private memberFor(token: string): string | undefined {
 		if (this.options.secret !== undefined && this.options.secret !== "") {
 			const member = verifyMemberToken(this.options.secret, token);
@@ -119,13 +89,7 @@ export class BrainServer {
 		this.options.log.info("brain api listening", { socket: socketPath });
 	}
 
-	/**
-	 * Deliver one entry to every connection watching its thread.
-	 *
-	 * Called by whatever appends to the log (the Router's turn, a worker's
-	 * stream). A connection that is gone is dropped here rather than by a
-	 * periodic sweep, so the watcher map cannot grow past the live clients.
-	 */
+	/** A connection that is gone is dropped here, so the watcher map cannot outgrow the clients. */
 	publish(threadId: string, entry: ThreadEntry): void {
 		const sockets = this.watchers.get(threadId);
 		if (sockets === undefined || sockets.size === 0) return;

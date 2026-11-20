@@ -1,20 +1,7 @@
 /**
- * Worker runtime (Section 2.2).
- *
- * Runs inside a dedicated `mir-worker-<taskId>` pm2 process (ADR 0001). Each
- * Worker is a context-isolated agent session dedicated to one Task. Workers:
- *   - have the execution toolset their capabilities grant and the model they
- *     were dispatched with;
- *   - never talk to humans directly — they report `status`/`conclusion` to the
- *     Router over the control channel, and the Router replies via a Channel;
- *   - receive follow-up events on their subscribed Threads. Those events are
- *     **queued**, never dropped: a Worker that is mid-turn accepts them and
- *     drains them in order, which is what makes pass-through lossless.
- *
- * Durable state: task metadata goes to a shared SQLite database
- * (`<stateDir>/workers.sqlite`, WAL) and every Worker keeps its own
- * pi-coding-agent session file (`<stateDir>/sessions/worker-<taskId>.jsonl`),
- * so a restarted Worker can resume its own conversation.
+ * One Task, in its own pm2 process (ADR 0001): a context-isolated session with the tools
+ * its capabilities grant. A Worker never talks to a person — it reports to the Router over
+ * the control channel — and it queues follow-up events rather than dropping them.
  */
 
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -39,25 +26,12 @@ export interface WorkerReporter {
 	release?(eventId: string, reason?: string): void;
 	/** "Stop sending me this thread." */
 	unsubscribe?(threadId: string, reason?: string): void;
-	/**
-	 * A tool this worker called, and what came back.
-	 *
-	 * Reported, because a task's thread is where its work is written down: without
-	 * this the thread holds the worker's prose and none of what it *did*, which is
-	 * the part a member opens a dispatch card to see.
-	 */
+	/** Reported, so the task's thread holds what it did and not only what it said. */
 	toolCall?(call: { id: string; name: string; args: unknown }): void;
 	toolResult?(result: { id: string; isError: boolean; result: unknown }): void;
 }
 
-/**
- * What a Worker is, in its own words.
- *
- * Not "a coding assistant running inside pi": a Worker is the half of one assistant that
- * does the work, and its tools are a hand's — a machine with a folder and a policy. The
- * difference matters: a Worker that believes it is a coding agent with a shell invents
- * paths and reports files it never touched.
- */
+	/** A Worker's tools are a hand's. One that believes it has a shell invents paths. */
 export const WORKER_PROMPT = [
 	"You are the part of one assistant that does the work.",
 	"Your tools are a hand's: a machine with a folder, a policy and a name. What you can read is what that folder holds, and a refusal from the hand is a fact about the machine, not a limitation of the assistant.",
@@ -90,13 +64,7 @@ export interface WorkerRuntimeOptions {
 	heartbeatMs?: number;
 	/** Injectable session factory (tests use a scripted session). */
 	sessionFactory?: SessionFactory;
-	/**
-	 * The folder this Worker's tools work in, and the one pi names in its prompt.
-	 *
-	 * The hand's root, when the task has a hand. Omitted, pi falls back to
-	 * `process.cwd()` — the brain's own — and a Worker asked about "this space" answers
-	 * with a directory nobody asked about.
-	 */
+	/** The hand's root. Omitted, pi falls back to the brain's own cwd, and "this space" becomes a directory nobody asked about. */
 	cwd?: string;
 }
 
@@ -220,14 +188,7 @@ export class WorkerRuntime {
 	private currentStatus: "idle" | "busy" | "done" | "failed" = "idle";
 	private currentProgress: string | undefined;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
-	/**
-	 * Aborted when the daemon stops this task.
-	 *
-	 * A turn stuck inside a tool call is not something `dispose()` can wait out:
-	 * the tool may be a shell command on a hand, and the hand holds the process.
-	 * This signal is what the hand tools watch, so the stop reaches the command
-	 * that is actually running.
-	 */
+	/** `dispose()` cannot wait out a tool call on a hand, so the stop reaches the command itself. */
 	private readonly aborter = new AbortController();
 
 	private constructor(options: WorkerRuntimeOptions) {
@@ -351,12 +312,7 @@ export class WorkerRuntime {
 		if (typeof s?._refreshToolRegistry === "function") s._refreshToolRegistry();
 	}
 
-	/**
-	 * Hot-replace the MCP tool definitions (`mcp__*`) in this session after an
-	 * MCP config change — e.g. tools from added servers, without touching
-	 * codemode / mcp_query / other custom tools. Rebuilds the tool registry and
-	 * the declared tool set; takes effect on the next turn.
-	 */
+	/** Rebuilds the registry and the declared set; takes effect on the next turn. */
 	replaceMcpTools(defs: ToolDefinition[]): void {
 		const s = this.session as any;
 		const current: any[] = Array.isArray(s?._customTools) ? s._customTools : [];
@@ -365,11 +321,7 @@ export class WorkerRuntime {
 		if (typeof s?._refreshToolRegistry === "function") s._refreshToolRegistry();
 	}
 
-	/**
-	 * Inject a system signal message into the session (custom message with
-	 * customType "system"). It lands in the model's context on its next turn
-	 * without forcing a turn now — used to announce MCP add/remove.
-	 */
+	/** Lands in context on the next turn, without forcing one now. */
 	async injectSystemMessage(text: string, details?: unknown): Promise<void> {
 		const s = this.session as any;
 		if (typeof s?.sendCustomMessage !== "function") return;
@@ -379,12 +331,7 @@ export class WorkerRuntime {
 		);
 	}
 
-	/**
-	 * Queue a follow-up event and drain it in order.
-	 *
-	 * Never throws when a turn is already running — that was the old bug that
-	 * silently dropped pass-through events.
-	 */
+	/** Never throws when a turn is running: that is what used to drop pass-through events. */
 	enqueueFollowUp(prompt: string, eventId?: string): void {
 		this.followUps.push({ prompt, eventId });
 		metrics.gauge("mir_worker_followups_queued", this.followUps.length, { task: this.options.taskId });
@@ -490,12 +437,7 @@ export class WorkerRuntime {
 		});
 	}
 
-	/**
-	 * Stop the work now: abort the turn and everything it is waiting on.
-	 *
-	 * Called on the daemon's `abort` frame. It does not wait for the session —
-	 * a tool call that ignores the signal would make the stop a hang.
-	 */
+	/** Does not wait for the session: a tool that ignores the signal would make the stop a hang. */
 	async abort(reason = "stopped"): Promise<void> {
 		this.aborter.abort(new Error(reason));
 		await this.session.abort?.().catch(() => {});
@@ -514,13 +456,7 @@ export class WorkerRuntime {
 	}
 }
 
-/**
- * Control tools that let a Worker manage its own subscriptions.
- *
- * §3.2 requires that a Worker can unsubscribe, or hand an event back to the
- * Router, when a follow-up turns out not to be its business. Without this the
- * only escape is for the Worker to answer something it should not.
- */
+	/** A follow-up that is not this Worker's business is handed back, not answered. */
 export function createWorkerControlTools(runtime: WorkerRuntime, threadIds: string[]): ToolDefinition[] {
 	return [
 		defineTool({
@@ -577,18 +513,7 @@ export function createWorkerControlTools(runtime: WorkerRuntime, threadIds: stri
 	];
 }
 
-/**
- * What a Worker may do to *other agents*: dispatch one, or talk to one.
- *
- * A Worker used to be a leaf. It is not: a task big enough to need three
- * independent checks should run them in parallel rather than serialise them
- * through one context, and a Worker is the only thing that can see its own task
- * clearly enough to split it. So a top-level Worker gets `dispatch_task`, and
- * the daemon runs the child and returns its conclusion as this call's result.
- *
- * A subagent gets neither. Depth stops at one level, and it stops here — as a
- * list of tools, not as an instruction the model could reason its way around.
- */
+	/** A top-level Worker may dispatch a check and talk to it; a check gets neither — depth stops at one, as a tool list. */
 export interface AgentChannel {
 	dispatchChild(
 		requestId: string,

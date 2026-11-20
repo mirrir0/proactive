@@ -1,15 +1,6 @@
 /**
- * SuperAgent — top-level composition.
- *
- * Wires together:
- *   - Channels (terminal, HTTP webhook, file queue) — event sources + response tools
- *   - Router layer (long-lived, replies via channel tools, dispatches tasks)
- *   - Worker layer (one pm2 process per task, ADR 0001)
- *   - Trigger system (two-stage filtering, threads, pass-through fan-out)
- *   - Durable state (trigger log + tasks + workers + threads + recall objects)
- *   - Control channel (daemon↔worker IPC)
- *   - Watchdog (independent control loop with its own agent session)
- *   - Telemetry (structured logs + Prometheus metrics)
+ * Top-level composition: channels, Router, Workers (ADR 0001), the trigger system,
+ * durable state, the control channel, the watchdog and telemetry.
  */
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -577,12 +568,7 @@ export class SuperAgent {
 		}
 	}
 
-	/**
-	 * Merge one worker's MCP catalog report into the daemon cache. Each report is
-	 * authoritative for the servers it covers: stale entries for those servers are
-	 * dropped first, then the reported tools are inserted. Servers not present in
-	 * the report are left untouched (the watcher prunes removed/changed servers).
-	 */
+	/** Authoritative for the servers it covers; servers absent from it are left alone. */
 	private mergeMcpCatalog(report: { servers: McpServerReport[]; tools: McpCatalogEntry[] }): void {
 		for (const s of report.servers) {
 			for (const [name, entry] of this.mcpCatalog) {
@@ -792,14 +778,7 @@ export class SuperAgent {
 		};
 	}
 
-	/**
-	 * What the dashboard draws.
-	 *
-	 * Assembled from the readers the brain already has — the thread log, the
-	 * router's tasks, the scratchpad, the hub's hands, the metric registry — so the
-	 * page cannot disagree with the brain about what is true. `tasks` is reversed so
-	 * a person sees the newest work first.
-	 */
+	/** Assembled from the readers the brain already has, so the page cannot disagree with it. */
 	private dashboardState() {
 		const snapshot = metrics.snapshot();
 		return {
@@ -878,25 +857,13 @@ export class SuperAgent {
 		return this.handsHub;
 	}
 
-	/**
-	 * What the client API can see and do.
-	 *
-	 * `say` is the only write a client has: it becomes a Trigger on the thread,
-	 * exactly as a message from any other channel would, so the Router cannot
-	 * tell a person in the product from a person in a terminal — which is the
-	 * property that makes the product one more place to talk to the same agent.
-	 */
+	/** `say` is the only write: it becomes a Trigger, exactly as any other channel's message would. */
 	/** Every channel this daemon drives, the product's included when its API is on. */
 	private channels(): Channel[] {
 		return this.anomalousChannel === null ? this.deps.channels : [...this.deps.channels, this.anomalousChannel];
 	}
 
-	/**
-	 * The hands as this brain should describe them: the hub's status, and the roots the
-	 * client named when it brought the hand. A remote hand's own policy is display
-	 * only, and a hand that reports no roots leaves a Worker with no idea where "here"
-	 * is — which is how a Worker came to answer with the brain's directory.
-	 */
+	/** The hub's status plus the roots the client named: a remote hand's own policy is display only. */
 	private handsWithRoots(): HandStatus[] {
 		return (this.handsHub?.listHands() ?? []).map((hand) => {
 			const roots = this.handRoots.get(hand.endpointId);
@@ -974,15 +941,7 @@ export class SuperAgent {
 					.catch((err: unknown) => log.warn("could not stop a thread", { thread: threadId, error: (err as Error).message }));
 			},
 			hands: () => this.handsWithRoots(),
-			/**
-			 * A hand the client brought.
-			 *
-			 * The brain mints the token because the brain owns the store — a client
-			 * cannot write that row and should not have to. What the hand may do is the
-			 * hand's own policy; what is recorded here is only its name and that it is
-			 * expected. Nothing about *why* the client wants a hand (a space, a repo, a
-			 * build box) reaches this method.
-			 */
+			/** The brain owns the store, so it mints the token. What the hand may do is the hand's own policy. */
 			addHand: (request) => {
 				const token = `hand-${crypto.randomUUID()}`;
 				// Where the hand's files start. A remote hand's own policy is a placeholder on

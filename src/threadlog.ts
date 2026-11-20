@@ -252,9 +252,6 @@ export function newThreadId(at: number = Date.now()): string {
 	return ulid(at);
 }
 
-// ---------------------------------------------------------------------------
-// ULID
-// ---------------------------------------------------------------------------
 
 const ULID_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 

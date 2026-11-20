@@ -10,8 +10,6 @@ import { ThreadManager } from "./thread.ts";
 import { ADMIT_ALL_JUDGE, type SemanticJudge } from "./policy.ts";
 import { log } from "./telemetry.ts";
 
-// ---------- Stage 1: Programmatic policies (Fast Path) ----------
-
 export type KindPolicy = "ignore" | "candidate" | "respond_only";
 
 export interface ProgrammaticPolicies {
@@ -63,8 +61,6 @@ export function programmaticFilter(
 	}
 	return { pass: true };
 }
-
-// ---------- Router ----------
 
 export interface RouteResult {
 	thread: Thread;

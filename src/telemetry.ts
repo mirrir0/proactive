@@ -108,9 +108,6 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 /** Process-wide logger. */
 export const log: Logger = createLogger();
 
-// ---------------------------------------------------------------------------
-// Metrics
-// ---------------------------------------------------------------------------
 
 export type MetricLabels = Record<string, string | number>;
 export type MetricKind = "counter" | "gauge" | "histogram";

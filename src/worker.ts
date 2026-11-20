@@ -202,19 +202,12 @@ export class WorkerRuntime {
 		const sessionDir = join(options.sessionDir, "sessions");
 		mkdirSync(sessionDir, { recursive: true });
 		const sessionFile = join(sessionDir, `worker-${options.taskId}.jsonl`);
-		// `SessionManager.open` creates the file when it does not exist yet. The
-		// previous `existsSync ? open : inMemory()` branch made every task's first
-		// run ephemeral, so history was silently lost.
+// `open` creates the file when it does not exist; an in-memory session loses the history.
 		const sessionManager = SessionManager.open(sessionFile);
 
 		const factory = options.sessionFactory ?? createPiSession;
 		const agentDir = options.agentDir ?? join(options.sessionDir, "agent");
-		// The same skills the Router has. A Worker's working directory is the
-		// member's space, and its loader is allow-listed to the brain's roots, so a
-		// `SKILL.md` in that folder is not instructions it follows.
-		// The folder this Worker may actually read. pi names a working directory in its
-		// prompt, and left to `process.cwd()` that is whatever started the brain — so a
-		// Worker asked about "this space" answered with the brain's own source tree.
+// The folder this Worker may read. Left to `process.cwd()` it is the brain's own source tree.
 		const workerCwd = options.cwd ?? process.cwd();
 		const resourceLoader = await brainResourceLoader({
 			cwd: workerCwd,
@@ -228,16 +221,9 @@ export class WorkerRuntime {
 			modelRuntime: options.modelRuntime,
 			sessionManager,
 			thinkingLevel: options.thinkingLevel ?? "high",
-			// Exactly the tools this runtime hands it — its hand's, and the
-			// assistant's — and nothing else:
-			//
-			//   - `noTools: "all"` starts from an empty set. `"builtin"` was not
-			//     enough: it leaves *extension* tools on, so a machine with pi
-			//     extensions installed gave every Worker `subagent`, `todo` and
-			//     `AskClaude` — tools the assistant never had.
-			//   - `tools` names the ones that survive, so even an extension that
-			//     loads cannot add a tool to a Worker that was not given it.
-			//   - `agentDir` keeps the Worker away from the machine's own pi config.
+			// Exactly the tools this runtime hands it, and nothing else: `noTools: "all"` starts
+			// from an empty set, `tools` names what survives, and `agentDir` keeps the machine's
+			// own pi config out.
 			noTools: "all",
 			tools: (options.customTools ?? []).map((tool) => String(tool.name)),
 			agentDir,
@@ -373,11 +359,7 @@ export class WorkerRuntime {
 		if (this.disposed) throw new Error("worker disposed");
 		this.busy = true;
 		this.report("busy", this.currentEventId ? "handling follow-up" : "running task");
-		// The conclusion is the text of the **last** assistant message, not everything
-		// the model said. A Worker narrates as it works ("let me find the file…",
-		// "now I'll write it…") and those sentences are the work's commentary; the
-		// answer is what it says once it has stopped calling tools. Accumulating
-		// across tool calls produced a monologue delivered to a person as the result.
+// The last assistant message, not everything it said: the narration is commentary, not the answer.
 		let result = "";
 		let sinceToolCall = "";
 		const sink = (event: any) => {

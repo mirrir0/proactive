@@ -1,20 +1,9 @@
 /**
- * server.ts — mir as an MCP server, so a client can render mir's card.
+ * mir as an MCP server, so a client can fetch `ui://mir/work` and call `work_status`: a tool,
+ * a resource and JSON-RPC — nothing about a "dispatch" or a "hand" crosses the wire.
  *
- * mir has always been an MCP *client*: it reaches the member's connected services
- * as a config (ADR 0006). This is the other direction, and it is what makes the
- * card an app rather than a client feature: the client fetches `ui://mir/work` from
- * here, and the view calls `work_status` here. Nothing about a "dispatch" or a
- * "hand" crosses the wire — a tool, a resource, and JSON-RPC.
- *
- * The surface is deliberately the small one in the specification rather than a
- * framework: `initialize`, `tools/list`, `tools/call`, `resources/list`,
- * `resources/read`, `ping`. One POST endpoint, JSON-RPC bodies, JSON responses
- * (streaming responses are optional in the transport, and a card does not stream).
- *
- * **Authorization is the same token the client API uses.** A brain that answers
- * anyone who can open a port is not one to leave running, so the server refuses to
- * start with no token, and every request is checked in constant time.
+ * Authorization is the client API's token, checked in constant time; the server refuses to
+ * start without one.
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";

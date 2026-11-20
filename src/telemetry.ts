@@ -1,17 +1,6 @@
 /**
- * Telemetry: structured logs + metrics.
- *
- * Two rules this module exists to enforce:
- *
- *   1. **stdout belongs to the terminal channel.** Every log line goes to
- *      stderr, so `respond_terminal` output is never interleaved with logs.
- *   2. **One record per event, machine-readable.** `MIR_LOG_FORMAT=json` emits
- *      NDJSON with a stable envelope (ts, level, msg, plus fields), so pm2 logs
- *      can be shipped and queried instead of grepped.
- *
- * Metrics are the numbers the architecture paper measures (task completion
- * p50/p95, router turn latency, batch size, decisions per run, cache tokens).
- * They are exposed as Prometheus text on `MIR_METRICS_PORT` when configured.
+ * Two rules: stdout belongs to the terminal channel, so every log line goes to stderr; and
+ * one machine-readable record per event, so pm2 logs can be queried rather than grepped.
  */
 
 import http from "node:http";
@@ -236,10 +225,7 @@ export interface MetricsServerHandle {
 	readonly port: number;
 }
 
-/**
- * Serve `/metrics` (Prometheus text) and `/healthz` (JSON snapshot).
- * Bound to localhost by default — never expose this publicly without auth.
- */
+/** Localhost by default: never expose this without auth. */
 export async function startMetricsServer(
 	port: number,
 	host: string,

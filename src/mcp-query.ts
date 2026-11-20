@@ -1,14 +1,4 @@
-/**
- * `mcp_query` — agent-facing tool for searching available MCP tools.
- *
- * Both layers get this tool:
- *   - Workers build it over their live McpManager (always current), and
- *   - the Router builds it over the daemon's cached catalog (merged from
- *     worker `mcp_catalog` reports + pruned by the config watcher).
- *
- * With no query it lists servers and tool names; with a query it does a
- * multi-term match over tool name / server / description.
- */
+/** Both layers search with it: a Worker over its live manager, the Router over the cached catalog. */
 
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";

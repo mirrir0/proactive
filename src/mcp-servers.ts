@@ -1,20 +1,9 @@
 /**
- * The MCP servers this brain's member may reach, as the stack serves them.
+ * The member's connected services, fetched from the stack and re-broadcast to live Workers
+ * on change, so a server registered mid-run needs no restart.
  *
- * A brain is long-lived and a member's connected services are not: a server
- * registered, keyed, unlinked or revoked while a Worker is running has to reach
- * that Worker without a restart. So the config is *fetched* rather than read
- * from a file — the stack knows whose they are, and the brain only asks — kept
- * by content hash, and re-broadcast to live workers when it changes, on the
- * same `mcp_changed` signal the file watcher used to raise.
- *
- * Nothing here is a credential. Each server's `url` is the stack's own proxy
- * (`/agent/brain-plugin/<id>`) and each `authorization` header is this brain's
- * own token, which names its member and nothing else: the member's credential
- * for the server is attached at the stack, per call, and never travels.
- *
- * A stack that is down or slow costs the brain its MCP servers, not its life:
- * every failure leaves the last good config in place and is logged once.
+ * Nothing here is a credential: each `url` is the stack's own proxy and each
+ * `authorization` is this brain's token, which names its member and nothing else.
  */
 
 import { diffMcpConfigs, type McpConfigLike, type McpDiff } from "./mcp-catalog.ts";

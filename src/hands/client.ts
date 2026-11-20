@@ -1,16 +1,6 @@
 /**
- * Hands client — the brain's end of the tool call.
- *
- * A Worker uses this to reach its hands. It speaks the local client protocol
- * (Unix socket) and turns every call into `execute(name, input) → string`:
- * a name, an input, and either a result or a tool error.
- *
- * Two properties matter here:
- *
- *   - **A dead hand is a failed tool call.** The client never hangs; every call
- *     has a deadline and every disconnect settles the calls it owed.
- *   - **Reconnects are invisible.** A daemon restart or a dropped socket is
- *     retried with backoff, so a long turn survives it.
+ * A Worker's end of a hand call: `execute(name, input) → string`. A dead hand is a failed
+ * tool call — every call has a deadline — and a reconnect is invisible to the caller.
  */
 
 import net from "node:net";
@@ -205,14 +195,7 @@ export class HandsClient {
 		options: {
 			onChunk?: (stream: StreamName, data: string) => void;
 			timeoutMs?: number;
-			/**
-			 * Stop the call, and the command behind it.
-			 *
-			 * The daemon stops a task by aborting its turn; a turn that is waiting
-			 * on a shell command on a hand has nothing to abort unless the cancel
-			 * travels. This is that path: `cancel` to the hub, which cancels the
-			 * work, which signals the executor, which kills the process tree.
-			 */
+				/** The cancel travels: hub → work → executor → the process tree. */
 			signal?: AbortSignal;
 		} = {},
 	): Promise<HandCallResult> {
@@ -285,10 +268,7 @@ export class HandsClient {
 		);
 	}
 
-	/**
-	 * A command string through the hand's shell. Separate from `exec` because it
-	 * needs its own grant: `shell` on the hand and `sh` in its allowlist.
-	 */
+	/** Its own grant: `shell` on the hand and `sh` in its allowlist. */
 	shell(
 		command: string,
 		options: { cwd?: string; endpointId?: string; timeoutMs?: number } = {},

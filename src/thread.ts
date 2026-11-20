@@ -1,18 +1,7 @@
 /**
- * Thread & Subscription Manager (Section 3.2).
- *
- * Threads are event streams (consecutive Triggers on the same GitHub PR,
- * IM topic, or email chain). When the Router creates a Worker for the first
- * event in a Thread, that Worker subscribes to the Thread directly.
- *
- * Routing follows two paths:
- *   - Subscribed (Fast Path): follow-up events pass straight through to *all*
- *     subscribed Workers — no extra Router turn.
- *   - Unsubscribed (Slow Path): new events with no subscriber go to the Router
- *     for evaluation and possible dispatch.
- *
- * Subscriptions are many-to-many and durable: a restarted daemon reloads them,
- * so a follow-up on a PR still reaches the Worker that owns it.
+ * Threads and their subscriptions. A subscribed thread's follow-ups pass straight to every
+ * subscribed Worker; an unsubscribed one goes to the Router for a decision. Subscriptions
+ * are durable, so a restart still routes a follow-up to the Worker that owns it.
  */
 
 import type { Thread, Trigger } from "./types.ts";

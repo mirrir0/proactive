@@ -1,14 +1,6 @@
 /**
- * Builds the per-Channel response tool from a Channel.
- *
- * The Router answers by calling `respond_<channel>`, which is exactly the
- * "responses are tool calls, not free-form text" contract. Each tool's
- * description carries that channel's reply norms so the model tailors length
- * and structure per place.
- *
- * Deliveries are reported to a `ReplyRecorder` owned by the caller (the
- * Router's current turn). That replaces the old process-wide counter, which
- * could not distinguish "this turn replied" from "some earlier turn replied".
+ * The per-channel response tool: a reply is a tool call, never raw text, and its description
+ * carries that channel's norms. Deliveries are reported to the turn's own `ReplyRecorder`.
  */
 
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -26,14 +18,7 @@ export interface ReplyLimit {
 export function makeResponseTool(
 	channel: Channel,
 	recorder: ReplyRecorder = NOOP_RECORDER,
-	/**
-	 * Where this turn's replies go, when the model names nothing.
-	 *
-	 * The turn already knows the thread and the event it is answering; without this the
-	 * tool fell back to "the most recent inbound event on this channel", which is empty
-	 * for a trigger that arrived over the API — and the reply was refused for "no chat to
-	 * answer" after being counted as delivered.
-	 */
+	/** The turn knows the thread it is answering; without this a reply falls back to the last chat heard. */
 	context?: () => ReplyContext,
 ) {
 	return defineTool({
